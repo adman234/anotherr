@@ -1,7 +1,9 @@
-fastapi>=0.110
-uvicorn>=0.29
-httpx>=0.27
-numpy>=1.26
-pysubs2>=1.6
-faster-whisper>=1.1.1
-ctranslate2>=4.5
+# Exact versions, kept current by Renovate (github.com/adman234/renovate-config).
+# ctranslate2 needs CUDA 12 + cuDNN 9, which the nvidia/cuda base image provides.
+fastapi==0.162.0
+uvicorn==0.54.0
+httpx==0.28.1
+numpy==2.5.4
+pysubs2==1.9.1
+faster-whisper==1.2.1
+ctranslate2==4.8.4

@@ -150,10 +150,17 @@ class Worker(threading.Thread):
             return True
 
         sc = cfg["schedule"]
-        if not sc.get("enabled"):
+        overriding = float(settings.state_get("override_until", 0) or 0) > time.time()
+        if not sc.get("enabled") and not overriding:
             STATUS.update(mode="idle (schedule disabled)", window=None)
             return False
         win = active_window(sc.get("windows") or [])
+        override = float(settings.state_get("override_until", 0) or 0)
+        if override > time.time():
+            # "Run now": behave as if inside a scan window until the override expires
+            win = ({"start": "now", "end": time.strftime("%H:%M", time.localtime(override))}, f"override@{override}")
+        elif override:
+            settings.state_set("override_until", 0)
         if not win:
             STATUS.update(mode="idle (outside scan window)", window=None)
             return False

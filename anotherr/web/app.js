@@ -83,6 +83,8 @@ async function dashboard() {
         <div class="toolbar" style="margin:8px 0 0">
           <button onclick="act(()=>api('/api/control/pause',{method:'POST',body:{paused:${!s.paused}}}),'${s.paused ? "Resumed" : "Paused"}')">${s.paused ? "Resume" : "Pause"}</button>
           ${s.current.file_id ? `<button class="danger" onclick="act(()=>api('/api/scan/stop',{method:'POST'}),'Stopping')">Stop scan</button>` : ""}
+          ${s.override_until ? `<button onclick="act(()=>api('/api/control/run-now',{method:'POST',body:{hours:0}}),'Override cancelled')">Stop run-now (until ${new Date(s.override_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})</button>`
+            : `<button class="primary" onclick="runNow()" title="Scan by priority now, ignoring the scan windows">Run now…</button>`}
           <button onclick="act(()=>api('/api/sync',{method:'POST'}),'Sync started')">Sync now</button>
         </div></div>
       <div class="card"><div class="muted">Automation</div><div style="font-weight:600;margin:4px 0">${s.automation.enabled ? (s.automation.active_now ? '<span style="color:var(--ok)">Active now</span>' : "Enabled (outside its schedule)") : "Disabled"}</div>
@@ -100,6 +102,12 @@ async function dashboard() {
     </div>`;
   const a = await api("/api/activity?limit=60");
   $("#activity").innerHTML = a.map((r) => `<div><span class="muted">${new Date(r.ts * 1000).toLocaleString()}</span> <span style="color:var(--${r.level === "info" ? "text" : r.level})">${esc(r.message)}</span></div>`).join("");
+}
+
+async function runNow() {
+  const h = prompt("Scan by priority for how many hours? (ignores the scan windows; parity/stream pauses still apply)", "2");
+  if (!h || isNaN(+h)) return;
+  await act(() => api("/api/control/run-now", { method: "POST", body: { hours: +h } }), `Running for ${h}h`);
 }
 
 function profileSelect(id = "profile") {

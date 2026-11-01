@@ -148,6 +148,14 @@ def set_language_override(item_id: int, language: str = "") -> str:
 # ---------------------------------------------------------------- scanning
 
 @mcp.tool()
+def run_now(hours: float = 2) -> str:
+    """Start priority-based scheduled scanning immediately, ignoring the scan windows, for N hours.
+    hours=0 cancels. Parity-check and Plex-stream pauses still apply."""
+    res = _send("POST", "/api/control/run-now", {"hours": hours})
+    return "Run-now cancelled." if not res["override_until"] else f"Scanning by priority for {hours}h."
+
+
+@mcp.tool()
 def queue_scan(scope: str, ids: list[int] | None = None, disk: str = "", library: str = "", count: int = 0,
                profile: str = "standard") -> str:
     """Queue scans. scope: file|item|disk|library|random|problems|unscanned.

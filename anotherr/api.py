@@ -67,6 +67,7 @@ def status():
         "current": dict(scanner.CURRENT),
         "scheduler": dict(scheduler.STATUS),
         "paused": bool(settings.state_get("paused", False)),
+        "override_until": (lambda v: v if v > time.time() else 0)(float(settings.state_get("override_until", 0) or 0)),
         "sync": {**sync.STATE, "last": sync.STATE.get("last") or settings.state_get("last_sync")},
         "whisper": {"loaded": stt.WHISPER._model is not None, "device": stt.WHISPER.device,
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
@@ -299,6 +300,18 @@ def control_pause(body: dict = Body(...)):
     settings.state_set("paused", bool(body.get("paused")))
     db.log("Scanning paused" if body.get("paused") else "Scanning resumed")
     return {"paused": bool(body.get("paused"))}
+
+
+@app.post("/api/control/run-now", dependencies=[Depends(auth)])
+def control_run_now(body: dict = Body(default={})):
+    """Run scheduled (priority) scanning outside the scan windows for N hours. hours=0 cancels."""
+    hours = float(body.get("hours", 2))
+    until = time.time() + hours * 3600 if hours > 0 else 0
+    settings.state_set("override_until", until)
+    if until and settings.state_get("paused", False):
+        settings.state_set("paused", False)
+    db.log(f"Run-now override until {time.strftime('%H:%M', time.localtime(until))}" if until else "Run-now override cancelled")
+    return {"override_until": until}
 
 
 @app.post("/api/sync", dependencies=[Depends(auth)])

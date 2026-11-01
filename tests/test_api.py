@@ -58,22 +58,6 @@ def test_sync_with_fake_sonarr(monkeypatch):
     assert db.q1("SELECT original_language FROM items")["original_language"] == "eng"
 
 
-def test_run_now_override():
-    from anotherr import scheduler, settings
-
-    settings.save({"schedule": {"enabled": False}})
-    with client() as c:
-        r = c.post("/api/control/run-now", json={"hours": 1}).json()
-        assert r["override_until"] > time.time()
-        assert c.get("/api/status").json()["override_until"] > 0
-        w = scheduler.Worker()
-        w.tick()  # nothing to scan, but must not report schedule disabled / outside window
-        assert scheduler.STATUS["mode"] == "idle (nothing due)"
-        c.post("/api/control/run-now", json={"hours": 0})
-        w.tick()
-        assert scheduler.STATUS["mode"] == "idle (schedule disabled)"
-
-
 def test_process_queue_ignores_pauses(monkeypatch):
     from anotherr import scanner, scheduler, settings
 

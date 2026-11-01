@@ -73,6 +73,7 @@ async function dashboard() {
       <td>${r.bad || 0}</td><td><button class="sm" onclick="${r.name.startsWith("Anime") || r.name === "TV" || r.name === "Movies" ? `quickScan('library','${r.name.startsWith("Anime") ? "anime" : r.name === "TV" ? "tv" : "movies"}')` : `quickScan('disk','${esc(r.name === "(unknown)" ? "" : r.name)}')`}">Sample 10</button></td></tr>`;
   };
   $("#app").innerHTML = `
+    ${s.gpu_decode.available === false && s.gpu_decode.mode !== "off" ? `<div class="card" style="border-color:var(--warning);margin-bottom:12px"><b>GPU video decoding isn't available, so scans decode on the CPU (much slower).</b> In Unraid, edit the container and set <code>NVIDIA_DRIVER_CAPABILITIES</code> to <code>compute,utility,video</code>. <span class="small muted">${esc(s.gpu_decode.reason)}</span></div>` : ""}
     ${s.files_not_found ? `<div class="card" style="border-color:var(--error);margin-bottom:12px"><b>${s.files_not_found} file(s) couldn't be found on disk.</b> Your path mappings probably don't match how Sonarr/Radarr see your folders. Go to <a href="#/settings">Settings → Path mappings</a> and click <b>Check paths</b> - it suggests the right mapping.</div>` : ""}
     ${unconfigured.length ? `<div class="card" style="border-color:var(--accent);margin-bottom:12px">Set up ${unconfigured.join(" and ")} in <a href="#/settings">Settings</a>, then run a sync.</div>` : ""}
     <div class="grid">
@@ -90,7 +91,7 @@ async function dashboard() {
       <div class="card"><div class="muted">Automation</div><div style="font-weight:600;margin:4px 0">${s.automation.enabled ? (s.automation.active_now ? '<span style="color:var(--ok)">Active now</span>' : "Enabled (outside its schedule)") : "Disabled"}</div>
         <div class="small muted">${s.automation.today}/${s.automation.max_per_day} auto actions today · <a href="#/settings">configure</a></div></div>
       <div class="card"><div class="muted">Whisper</div><div style="font-weight:600;margin:4px 0">${esc(s.whisper.model)} ${s.whisper.device ? "on " + esc(s.whisper.device) : "(loads on demand)"}</div>
-        <div class="small" style="color:var(--error)">${esc(s.whisper.error || "")}</div><div class="small muted">${s.unraid.detected ? "Unraid detected" : "Unraid not detected"}${s.unraid.parity_running ? " · parity check running" : ""}</div></div>
+        <div class="small" style="color:var(--error)">${esc(s.whisper.error || "")}</div><div class="small muted">Video decode: ${s.gpu_decode.mode === "off" ? "CPU (GPU off in settings)" : s.gpu_decode.available === false ? '<span style="color:var(--warning)">CPU (GPU unavailable)</span>' : s.gpu_decode.available ? '<span style="color:var(--ok)">GPU (NVDEC)</span>' : "GPU (not used yet)"}</div><div class="small muted">${s.unraid.detected ? "Unraid detected" : "Unraid not detected"}${s.unraid.parity_running ? " · parity check running" : ""}</div></div>
     </div>
     <h3>Coverage by library</h3>
     <table><tr><th>Library</th><th>Files</th><th>Checked</th><th>Health</th><th>Bad</th><th></th></tr>${c.libraries.map(covRow).join("") || '<tr><td colspan=6 class="muted">No data yet - sync first.</td></tr>'}</table>
@@ -207,6 +208,7 @@ async function filePage(id) {
     <h3>Audio tracks</h3><table><tr><th>Track</th><th>Tag</th><th>Detected</th><th>Speech</th><th>Peak level</th><th>Info</th></tr>${audio || '<tr><td colspan=6 class="muted">Not analysed</td></tr>'}</table>
     <h3>Subtitles</h3><table><tr><th>Track</th><th>Lang</th><th>Kind</th><th>Dialogue cues</th></tr>${subs || `<tr><td colspan=4 class="muted">${(st.subs || []).length} track(s); content not analysed in this profile</td></tr>`}</table>
     ${sync ? `<h3>Subtitle sync</h3><table><tr><th>Track</th><th>Verdict</th><th>Offset</th><th>Match score</th><th>Windows</th></tr>${sync}</table>` : ""}
+    ${r.timings ? `<h3>Where the time went</h3><div class="card small">${Object.entries(r.timings).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<span class="pill">${esc(k)}: ${v}s</span>`).join(" ")} <span class="muted">· total ${r.elapsed_s}s · video decode on ${r.gpu_decode ? "GPU" : "CPU"}</span></div>` : ""}
     ${r.transcript_sample ? `<h3>Transcript sample</h3><div class="card small">${esc(r.transcript_sample)}</div>` : ""}
     <h3>Reviews & actions</h3><table>${f.reviews.map((v) => `<tr><td>review</td><td>${esc(v.kind)}</td><td>${esc(v.status)} ${esc(v.verdict)}</td><td>${esc(v.notes)}</td></tr>`).join("")}${f.actions.map((a) => `<tr><td>action</td><td>${esc(a.kind)}</td><td><span class="st s-${a.status}">${a.status}</span></td><td>${esc(a.result || a.reason)}</td></tr>`).join("") || ""}</table>
     <h3>Raw result</h3><details><summary class="muted">show JSON</summary><pre>${esc(JSON.stringify(r, null, 1))}</pre></details>`;
@@ -309,6 +311,8 @@ const HELP = {
   "languages.min_full_sub_cues_per_min": "Tracks with fewer dialogue lines per minute are treated as signs/songs only.",
   "anime.prefer_dual_audio": "Flag anime without a dub track (info only - original audio is always preferred).",
   "anime.detect_dubtitles": "Flag subtitle tracks that just transcribe the English dub.",
+  "scan.hw_decode": "auto = decode video on the NVIDIA GPU (NVDEC), falling back to CPU. Needs NVIDIA_DRIVER_CAPABILITIES to include 'video'.",
+  "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
   "review.title_cards": "When to queue title-card checks: never | multi_episode | flagged | always.",
   "review.visual_quality_on_deep": "Deep scans queue a picture-quality check (hardcoded subs, watermarks, cam rips).",
@@ -361,6 +365,7 @@ function render(path, val) {
     if (p === "schedule.disk_mode") return field(p, pretty(k), `<select data-k="${p}">${["all", "rotate", "spun_up", "specific"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "review.title_cards") return field(p, pretty(k), `<select data-k="${p}">${["never", "multi_episode", "flagged", "always"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.profile" || p === "scan.default_profile" || p === "imports.profile") return field(p, pretty(k), `<select data-k="${p}">${["quick", "standard", "deep"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
+    if (p === "scan.hw_decode") return field(p, pretty(k), `<select data-k="${p}">${["auto", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "whisper.device") return field(p, pretty(k), `<select data-k="${p}">${["auto", "cuda", "cpu"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.disks") return field(p, pretty(k), `<div data-list="${p}">${SET.disks.filter((d) => d).map((d) => `<label style="margin-right:10px"><input type="checkbox" value="${esc(d)}" ${v.includes(d) ? "checked" : ""}> ${esc(d)}</label>`).join("") || '<span class="muted">No disks detected yet (sync first)</span>'}</div>`);
     if (p === "automation.redownload_codes") return field(p, pretty(k), `<div data-list="${p}">${SET.redownload_codes.map((d) => `<label style="margin-right:10px;display:inline-block"><input type="checkbox" value="${d}" ${v.includes(d) ? "checked" : ""}> ${d}</label>`).join("")}</div>`);

@@ -35,25 +35,29 @@ def dialogue_cues(subs_text: str) -> tuple[list[Cue], int]:
         if ev.is_comment:
             continue
         total += 1
-        start, end = ev.start / 1000.0, ev.end / 1000.0
-        if end - start < 0.2 or end - start > 15:
-            continue
-        if _SIGN_STYLE.search(ev.style or "") or _POS.search(ev.text or ""):
-            continue
-        text = _TAGS.sub("", ev.text or "").replace("\\N", " ").replace("\\n", " ").strip()
-        if not text:
-            continue
-        cues.append(Cue(start, end, text))
+        c = clean_cue(ev.start / 1000.0, ev.end / 1000.0, ev.style or "", ev.text or "")
+        if c:
+            cues.append(c)
     return cues, total
+
+
+def clean_cue(start: float, end: float, style: str, text: str) -> Cue | None:
+    """A dialogue cue, or None for signs/typesetting/karaoke and junk."""
+    if end - start < 0.2 or end - start > 15:
+        return None
+    if _SIGN_STYLE.search(style or "") or _POS.search(text or ""):
+        return None
+    text = _TAGS.sub("", text or "").replace("\\N", " ").replace("\\n", " ").replace("<i>", "").replace("</i>", "").strip()
+    return Cue(start, end, text) if text else None
 
 
 def classify_track(cue_count: int, duration_s: float, title: str, forced: bool, min_per_min: float) -> str:
     """full | signs | empty"""
-    if cue_count == 0:
-        return "empty"
     t = (title or "").lower()
     if forced or any(w in t for w in ("sign", "song", "forced", "s&s")):
         return "signs"
+    if cue_count == 0:
+        return "empty"
     per_min = cue_count / max(duration_s / 60.0, 1.0)
     return "full" if per_min >= min_per_min else "signs"
 

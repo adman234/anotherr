@@ -68,6 +68,8 @@ def status():
         "scheduler": dict(scheduler.STATUS),
         "paused": bool(settings.state_get("paused", False)),
         "sync": {**sync.STATE, "last": sync.STATE.get("last") or settings.state_get("last_sync")},
+        "gpu_decode": {"available": media.HW["cuda"], "reason": media.HW["reason"],
+                       "mode": cfg["scan"].get("hw_decode", "auto")},
         "whisper": {"loaded": stt.WHISPER._model is not None, "device": stt.WHISPER.device,
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
         "files": {"total": sum(counts.values()), **counts},

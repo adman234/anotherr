@@ -24,7 +24,7 @@ Anotherr runs on your Unraid server. It mirrors your Sonarr/Radarr libraries and
 | Profile | What it does | Typical time |
 |---|---|---|
 | `quick` | 3 × 30 s segments (start / random / end), decode, language ID, subtitle presence from stream flags | seconds |
-| `standard` | 5 × 2 min segments, plus full subtitle analysis, sync, dubtitle/content checks, multi-episode breaks | ~1–2 min |
+| `standard` | 5 × 90 s segments, plus full subtitle analysis, sync, dubtitle/content checks, multi-episode breaks | ~20–60 s with GPU decode |
 | `deep` | 8 × 3 min segments, plus a full decode and a visual-quality review | several min |
 
 Every scan stores its random seed, so results are reproducible.
@@ -59,7 +59,7 @@ Problems create **proposals**:
    ```bash
    wget -O /boot/config/plugins/dockerMan/templates-user/my-anotherr.xml https://raw.githubusercontent.com/adman234/anotherr/main/unraid/anotherr.xml
    ```
-3. Go to **Docker → Add Container** and pick **anotherr** from the Template dropdown. Set `NVIDIA_VISIBLE_DEVICES` to your GPU UUID (or leave `all`), then click Apply.
+3. Go to **Docker → Add Container** and pick **anotherr** from the Template dropdown. Set `NVIDIA_VISIBLE_DEVICES` to your GPU UUID (or leave `all`). Keep `NVIDIA_DRIVER_CAPABILITIES` = `compute,utility,video` (`video` enables GPU video decoding, which makes scans several times faster). Then click Apply.
 4. Open the web UI at `http://<unraid-ip>:9797`, then go to **Settings**:
    - Sonarr / Radarr / Bazarr / Tautulli: URL and API key (use **Test**).
    - **Path mappings**: how Sonarr/Radarr paths map into the container. If Sonarr sees `/tv` and that's `/mnt/user/media/tv` on Unraid, map `/tv` → `/mnt/user/media/tv`. The container sees Unraid's `/mnt` read-only. Click **Check paths** to test a sample of files: it suggests the right mapping and adds it with one click.

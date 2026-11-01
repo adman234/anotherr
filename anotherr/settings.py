@@ -34,11 +34,12 @@ DEFAULTS: dict = {
     },
     "scan": {
         "default_profile": "standard",
-        "ffmpeg_threads": 2,
+        "hw_decode": "auto",     # auto = NVIDIA GPU (NVDEC) when available, off = CPU only
+        "ffmpeg_threads": 0,     # 0 = let ffmpeg decide
         "max_audio_tracks": 4,
         "profiles": {
             "quick": {"segments": 3, "seconds": 30, "subtitles": False, "full_decode": False},
-            "standard": {"segments": 5, "seconds": 120, "subtitles": True, "full_decode": False},
+            "standard": {"segments": 5, "seconds": 90, "subtitles": True, "full_decode": False},
             "deep": {"segments": 8, "seconds": 180, "subtitles": True, "full_decode": True},
         },
     },
@@ -95,11 +96,49 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
+def _diff(base: dict, cur: dict) -> dict:
+    """Only the values that differ from the defaults (so improved defaults reach existing installs)."""
+    out = {}
+    for k, v in cur.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            d = _diff(base[k], v)
+            if d:
+                out[k] = d
+        elif k not in base or base[k] != v:
+            out[k] = v
+    return out
+
+
+# Values that older versions saved as plain defaults; treat them as "not customised".
+_OLD_DEFAULTS = [
+    (("scan", "ffmpeg_threads"), 2),
+    (("scan", "profiles", "standard", "seconds"), 120),
+]
+
+
+def _migrate(stored: dict) -> dict:
+    for path, old in _OLD_DEFAULTS:
+        node = stored
+        for k in path[:-1]:
+            node = node.get(k) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict) and node.get(path[-1]) == old:
+            del node[path[-1]]
+    return _diff(DEFAULTS, _merge(DEFAULTS, stored))
+
+
 def get() -> dict:
     global _cache
     with _lock:
         if _cache is None:
             stored = db.unj(db.scalar("SELECT value FROM settings WHERE key='config'"), {})
+            if stored and not stored.get("_v"):
+                stored = _migrate(stored)
+                stored["_v"] = 2
+                db.x("INSERT INTO settings(key, value) VALUES('config', ?) ON CONFLICT(key) DO UPDATE SET "
+                     "value=excluded.value", (db.j(stored),))
+            stored.pop("_v", None)
             _cache = _merge(DEFAULTS, stored)
         return copy.deepcopy(_cache)
 
@@ -112,9 +151,10 @@ def save(new: dict) -> dict:
         for svc in ("sonarr", "radarr", "bazarr", "tautulli"):
             if svc in new and isinstance(new[svc], dict) and new[svc].get("api_key") in ("********", None):
                 new[svc]["api_key"] = current.get(svc, {}).get("api_key", "")
+        new.pop("_v", None)
         merged = _merge(current, new)
         db.x("INSERT INTO settings(key, value) VALUES('config', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-             (db.j(merged),))
+             (db.j({**_diff(DEFAULTS, merged), "_v": 2}),))
         _cache = merged
         return copy.deepcopy(merged)
 

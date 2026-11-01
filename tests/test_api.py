@@ -76,3 +76,19 @@ def test_process_queue_ignores_pauses(monkeypatch):
         w.tick(); w.tick(); w.tick()
         assert sorted(scanned) == sorted(fids)
         assert settings.state_get("force_queue") is False  # resets once drained
+
+
+def test_settings_store_only_changes_and_migrate():
+    from anotherr import settings
+
+    # simulate an old install that saved every default, including the old standard profile
+    old = settings._merge(settings.DEFAULTS, {"scan": {"ffmpeg_threads": 2, "profiles": {"standard": {"seconds": 120}}},
+                                              "path_mappings": [{"from": "/data", "to": "/mnt/user"}]})
+    db.x("INSERT INTO settings(key, value) VALUES('config', ?)", (db.j(old),))
+    settings._cache = None
+    s = settings.get()
+    assert s["scan"]["profiles"]["standard"]["seconds"] == 90 and s["scan"]["ffmpeg_threads"] == 0
+    assert s["path_mappings"] == [{"from": "/data", "to": "/mnt/user"}]
+    settings.save({"schedule": {"max_streams": 2}})
+    stored = db.unj(db.scalar("SELECT value FROM settings WHERE key='config'"))
+    assert stored["schedule"] == {"max_streams": 2} and "whisper" not in stored

@@ -41,11 +41,11 @@ def video(tmp_path_factory):
 @pytest.fixture
 def fake_whisper(monkeypatch):
     last = {}
-    real_extract = media.extract_audio
+    real_extract = media.extract_audio_multi
 
-    def extract(path, a, s, d):
+    def extract(path, idxs, s, d):
         last["start"] = s
-        return real_extract(path, a, s, d)
+        return real_extract(path, idxs, s, d)
 
     def vad(audio):
         s = last["start"]
@@ -61,7 +61,7 @@ def fake_whisper(monkeypatch):
         s = last["start"]
         return [(a - s, b - s, t) for (a, b), t in zip(CUES, TEXTS)]
 
-    monkeypatch.setattr(media, "extract_audio", extract)
+    monkeypatch.setattr(media, "extract_audio_multi", extract)
     monkeypatch.setattr(stt, "speech_intervals", vad)
     monkeypatch.setattr(stt.WHISPER, "detect_language", detect)
     monkeypatch.setattr(stt.WHISPER, "transcribe", transcribe)

@@ -60,8 +60,14 @@ class Ctx:
     def step(self, name: str):
         if CANCEL.is_set():
             raise Cancelled()
+        now = time.time()
+        prev, prev_at = CURRENT.get("step"), CURRENT.get("step_at")
+        if prev and prev_at:
+            group = prev.split(":")[0].split(" segment")[0].split(" track")[0].strip()
+            t = self.result.setdefault("timings", {})
+            t[group] = round(t.get(group, 0) + now - prev_at, 1)
         CURRENT["step"] = name
-        CURRENT["step_at"] = time.time()
+        CURRENT["step_at"] = now
 
     @property
     def episodes(self) -> list[dict]:
@@ -154,6 +160,7 @@ def run_pipeline(ctx: Ctx):
     check_subtitles(ctx)
     check_multi_episode(ctx)
     queue_reviews(ctx, rng)
+    ctx.step("done")  # closes the timing of the last step
 
 
 # ====================================================================== integrity
@@ -208,12 +215,24 @@ def check_streams(ctx: Ctx):
 
 
 def check_decode(ctx: Ctx):
-    threads = int(ctx.cfg["scan"].get("ffmpeg_threads", 2))
+    threads = int(ctx.cfg["scan"].get("ffmpeg_threads", 0))
+    hw = ctx.cfg["scan"].get("hw_decode", "auto")
+    has_video = bool(ctx.info["video"])
     results = []
     for i, (s, d) in enumerate(ctx.segments):
         ctx.step(f"decoding segment {i + 1}/{len(ctx.segments)}")
-        results.append(media.decode_segment(ctx.path, s, d, threads, has_video=bool(ctx.info["video"])))
+        results.append(media.decode_segment(ctx.path, s, d, threads, has_video=has_video, hw=hw))
     ctx.result["decode"] = results
+    ctx.result["gpu_decode"] = any(r.get("gpu") for r in results)
+    if has_video:
+        mid_idx = list(range(1, len(results) - 1)) if len(results) > 2 else []
+        for i in mid_idx:
+            ctx.step("video checks")
+            vc = media.video_checks(ctx.path, results[i]["start"], results[i]["dur"])
+            results[i]["black"], results[i]["freeze"] = vc["black"], vc["freeze"]
+        ctx.step("interlace check")
+        probe_at = results[mid_idx[0]]["start"] if mid_idx else results[0]["start"]
+        results[0]["idet"] = media.idet_sample(ctx.path, probe_at, 10)
     total_err = sum(r.get("error_count", 0) for r in results)
     bad_segs = sum(1 for r in results if r.get("error_count", 0) > 5)
     last = len(results) - 1
@@ -247,12 +266,12 @@ def check_decode(ctx: Ctx):
     tff = sum((r["idet"] or {}).get("tff", 0) for r in results)
     bff = sum((r["idet"] or {}).get("bff", 0) for r in results)
     prog = sum((r["idet"] or {}).get("progressive", 0) for r in results)
-    if tff + bff > 200 and (tff + bff) > 0.3 * (tff + bff + prog):
+    if tff + bff > 50 and (tff + bff) > 0.3 * (tff + bff + prog):
         ctx.issue("video", "interlaced", "info", "Video looks interlaced (not deinterlaced at encode).",
                   tff=tff, bff=bff, progressive=prog)
     if ctx.pcfg.get("full_decode"):
         ctx.step("full decode")
-        fd = media.full_decode(ctx.path, threads)
+        fd = media.full_decode(ctx.path, threads, hw=hw)
         ctx.result["full_decode"] = {"error_count": fd["error_count"], "errors": fd["errors"][:20]}
         if fd["error_count"] > 20:
             ctx.issue("integrity", "full_decode_errors", "error", f"Full decode found {fd['error_count']} errors.",
@@ -285,14 +304,18 @@ def check_audio(ctx: Ctx):
 
     tracks = sorted(tracks, key=prio)[: int(ctx.cfg["scan"].get("max_audio_tracks", 4))]
     segs = _audio_segments(ctx)
+    for si in segs:
+        ctx.step(f"reading audio segment {si + 1}")
+        s, d = ctx.segments[si]
+        for ai, audio in media.extract_audio_multi(ctx.path, [a["a_index"] for a in tracks], s, d).items():
+            ctx.audio[(ai, si)] = audio
     for a in tracks:
         ai = a["a_index"]
         speech_all, levels = [], []
         for si in segs:
-            ctx.step(f"audio track {ai + 1}: segment {si + 1}")
+            ctx.step(f"speech detection track {ai + 1}")
             s, d = ctx.segments[si]
-            audio = media.extract_audio(ctx.path, ai, s, d)
-            ctx.audio[(ai, si)] = audio
+            audio = ctx.audio.get((ai, si), np.zeros(0, dtype=np.float32))
             levels.append(analysis.rms_db(audio))
             iv = stt.speech_intervals(audio)
             ctx.vad[(ai, si)] = [(s + a0, s + b0) for a0, b0 in iv]
@@ -396,33 +419,51 @@ def check_subtitles(ctx: Ctx):
 
     dur = ctx.info["duration"]
     min_rate = float(lcfg["min_full_sub_cues_per_min"])
-    ctx.step("extracting subtitles")
-    emb_text = [s["s_index"] for s in mine if s["text"] and not s["external"]][:4]
-    texts = media.extract_text_subs(ctx.path, emb_text) if emb_text else {}
+    # Embedded subtitles are read only inside the sampled windows (no full-file read).
+    windows = [ctx.segments[i] for i in _audio_segments(ctx)]
+    win_s = sum(d for _, d in windows) or dur
+    packets = {}
+    if any(not s["external"] for s in mine):
+        ctx.step("reading subtitles")
+        packets = media.sub_packets(ctx.path, windows)
     analysed = []
     for s in mine[:6]:
-        cues, kind = [], "empty"
-        if s["text"]:
-            raw = texts.get(s["s_index"]) if not s["external"] else _read(s["path"])
-            if raw is None:
-                continue
-            parsed, total = analysis.dialogue_cues(raw)
-            cues = [(c.start, c.end, c.text) for c in parsed]
-            kind = analysis.classify_track(len(cues), dur, s["title"], s["forced"], min_rate)
+        cues, span = [], dur
+        if s["external"]:
+            if s["text"]:
+                raw = _read(s["path"])
+                if raw is None:
+                    continue
+                parsed, _ = analysis.dialogue_cues(raw)
+                cues = [(c.start, c.end, c.text) for c in parsed]
+            else:
+                if any(a.get("kind") == "full" for a in analysed):
+                    continue
+                ctx.step("reading image subtitle timing")
+                cues = [(a, b, "") for a, b in media.image_sub_times(s["path"])]
         else:
-            if any(a.get("kind") == "full" for a in analysed):
-                continue  # only spend a full-file read on image subs if no text track is good
-            ctx.step("reading image subtitle timing")
-            times = media.image_sub_times(s["path"]) if s["external"] else media.image_sub_times(ctx.path, s["s_index"])
-            cues = [(a, b, "") for a, b in times]
-            kind = analysis.classify_track(len(cues), dur, s["title"], s["forced"], min_rate)
-        analysed.append({"track": s, "cues": cues, "kind": kind})
+            span = win_s
+            pk = packets.get(s["index"], [])
+            if s["text"]:
+                for p in pk:
+                    style, text = media.text_from_packet(s["codec"], p["data"])
+                    c = analysis.clean_cue(p["start"], p["start"] + (p["dur"] or 2.0), style, text)
+                    if c:
+                        cues.append((c.start, c.end, c.text))
+            else:
+                for i, p in enumerate(pk):
+                    if p["size"] < 200:  # PGS "clear" display sets are tiny
+                        continue
+                    end = p["start"] + p["dur"] if p["dur"] > 0 else (pk[i + 1]["start"] if i + 1 < len(pk) else p["start"] + 3)
+                    cues.append((p["start"], min(end, p["start"] + 10), ""))
+        kind = analysis.classify_track(len(cues), span, s["title"], s["forced"], min_rate)
+        analysed.append({"track": s, "cues": cues, "kind": kind, "per_min": round(len(cues) / max(span / 60, 1), 1)})
 
     full = [a for a in analysed if a["kind"] == "full"]
     ctx.result["subtitle_tracks"] = [
         {"title": a["track"]["title"], "lang": a["track"]["lang"], "codec": a["track"]["codec"],
          "external": a["track"]["external"], "default": a["track"]["default"], "forced": a["track"]["forced"],
-         "kind": a["kind"], "cues": len(a["cues"]), "per_min": round(len(a["cues"]) / max(dur / 60, 1), 1)}
+         "kind": a["kind"], "cues": len(a["cues"]), "per_min": a["per_min"]}
         for a in analysed]
     if needs and not mine:
         ctx.issue("subtitles", "subs_missing", "error",

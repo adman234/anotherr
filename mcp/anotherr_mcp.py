@@ -148,6 +148,14 @@ def set_language_override(item_id: int, language: str = "") -> str:
 # ---------------------------------------------------------------- scanning
 
 @mcp.tool()
+def process_queue(stop: bool = False) -> str:
+    """Work through everything in the scan queue now, ignoring parity/Plex-stream/manual pauses,
+    until the queue is empty. stop=True goes back to normal (respect pauses)."""
+    res = _send("POST", "/api/queue/process", {"stop": stop})
+    return "Back to normal." if stop else f"Processing {res['queued']} queued file(s) now."
+
+
+@mcp.tool()
 def run_now(hours: float = 2) -> str:
     """Start priority-based scheduled scanning immediately, ignoring the scan windows, for N hours.
     hours=0 cancels. Parity-check and Plex-stream pauses still apply."""

@@ -38,7 +38,8 @@ Every scan stores its random seed, so results are reproducible.
   - `spun_up`: only disks that are already spinning (from emhttp's `disks.ini`)
   - `specific`: only the disks you pick
 - Files are read straight from `/mnt/diskN` (bypassing shfs) once their disk is known.
-- **Run now**: a dashboard button (or the `run_now` MCP tool) scans by priority immediately for N hours, ignoring the windows.
+- **Queued scans run any time** (windows don't apply). They wait during parity checks, Plex streams or a manual pause; **Process queue now** (Queue page / dashboard, or the `process_queue` MCP tool) works through the whole queue ignoring those pauses.
+- **Run now**: makes the scheduler act as if inside a scan window for N hours, picking files by priority on its own.
 - **Pauses** during parity checks and while Plex has active streams (via Tautulli).
 - **Priority**: never-checked files first, then recent imports, files whose release group has a bad track record, files with earlier problems, and the longest time since the last check.
 - **New imports** get a quick scan straight away through Sonarr/Radarr webhooks.
@@ -97,7 +98,7 @@ The MCP server is a thin local bridge. Claude never touches your files directly.
    - "Scan 20 random anime episodes on disk3 with the standard profile"
    - "Show me frames from file 123 at 1:00, 5:00 and 10:00"
 
-**Tools:** `status`, `coverage`, `recent_activity`, `search_library`, `item_files`, `file_report`, `set_language_override`, `run_now`, `queue_scan`, `list_issues`, `ignore_issue`, `pending_reviews`, `get_review` (returns frames), `get_frames`, `submit_review`, `list_actions`, `propose_action`, `decide_action`.
+**Tools:** `status`, `coverage`, `recent_activity`, `search_library`, `item_files`, `file_report`, `set_language_override`, `process_queue`, `run_now`, `queue_scan`, `list_issues`, `ignore_issue`, `pending_reviews`, `get_review` (returns frames), `get_frames`, `submit_review`, `list_actions`, `propose_action`, `decide_action`.
 **Prompts:** `review_pending`, `nightly_summary`.
 
 ## API

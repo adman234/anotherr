@@ -73,6 +73,7 @@ def status():
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
         "files": {"total": sum(counts.values()), **counts},
         "queue": db.scalar("SELECT COUNT(*) FROM queue"),
+        "forcing_queue": bool(settings.state_get("force_queue", False)),
         "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open'"),
         "pending_reviews": db.scalar("SELECT COUNT(*) FROM reviews WHERE status='pending'"),
         "proposed_actions": db.scalar("SELECT COUNT(*) FROM actions WHERE status='proposed'"),
@@ -300,6 +301,17 @@ def control_pause(body: dict = Body(...)):
     settings.state_set("paused", bool(body.get("paused")))
     db.log("Scanning paused" if body.get("paused") else "Scanning resumed")
     return {"paused": bool(body.get("paused"))}
+
+
+@app.post("/api/queue/process", dependencies=[Depends(auth)])
+def queue_process(body: dict = Body(default={})):
+    """Work through everything in the queue now, ignoring pauses (parity, Plex streams, manual pause).
+    Stops forcing once the queue is empty. stop=true cancels."""
+    stop = bool(body.get("stop"))
+    settings.state_set("force_queue", not stop)
+    n = db.scalar("SELECT COUNT(*) FROM queue")
+    db.log("Stopped forcing the queue" if stop else f"Processing queue now ({n} file(s), ignoring pauses)")
+    return {"forcing": not stop, "queued": n}
 
 
 @app.post("/api/control/run-now", dependencies=[Depends(auth)])

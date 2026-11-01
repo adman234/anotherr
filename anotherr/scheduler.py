@@ -133,14 +133,18 @@ class Worker(threading.Thread):
             except Exception:  # noqa: BLE001
                 log.exception("automation failed")
 
+        force = bool(settings.state_get("force_queue", False))
         job = db.q1("SELECT * FROM queue WHERE created_at <= ? ORDER BY CASE source WHEN 'manual' THEN 0 "
-                    "WHEN 'import' THEN 1 ELSE 2 END, created_at LIMIT 1", (time.time(),))
+                    "WHEN 'import' THEN 1 ELSE 2 END, created_at LIMIT 1", (float("inf") if force else time.time(),))
+        if force and not job:
+            settings.state_set("force_queue", False)  # queue drained
+            db.log("Queue processed")
         if job:
             manual_paused = "paused manually" in reasons
-            if manual_paused or (reasons and cfg["schedule"].get("manual_respects_pause", True)):
-                STATUS["mode"] = "paused"
+            if not force and (manual_paused or (reasons and cfg["schedule"].get("manual_respects_pause", True))):
+                STATUS["mode"] = "queue waiting: " + ", ".join(reasons)
                 return False
-            STATUS["mode"] = f"queue ({job['source']})"
+            STATUS["mode"] = f"processing queue ({job['source']})" + (" - forced" if force else "")
             f = db.q1("SELECT id FROM files WHERE id=? AND missing=0", (job["file_id"],))
             if not f:
                 db.x("DELETE FROM queue WHERE id=?", (job["id"],))

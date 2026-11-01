@@ -85,6 +85,7 @@ async function dashboard() {
           ${s.current.file_id ? `<button class="danger" onclick="act(()=>api('/api/scan/stop',{method:'POST'}),'Stopping')">Stop scan</button>` : ""}
           ${s.override_until ? `<button onclick="act(()=>api('/api/control/run-now',{method:'POST',body:{hours:0}}),'Override cancelled')">Stop run-now (until ${new Date(s.override_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})</button>`
             : `<button class="primary" onclick="runNow()" title="Scan by priority now, ignoring the scan windows">Run now…</button>`}
+          ${s.queue && !s.forcing_queue ? `<button class="primary" onclick="act(()=>api('/api/queue/process',{method:'POST'}),r=>'Processing '+r.queued+' file(s)')">Process queue (${s.queue})</button>` : ""}
           <button onclick="act(()=>api('/api/sync',{method:'POST'}),'Sync started')">Sync now</button>
         </div></div>
       <div class="card"><div class="muted">Automation</div><div style="font-weight:600;margin:4px 0">${s.automation.enabled ? (s.automation.active_now ? '<span style="color:var(--ok)">Active now</span>' : "Enabled (outside its schedule)") : "Disabled"}</div>
@@ -287,9 +288,17 @@ async function bulk(op, kind) {
 
 // ------------------------------------------------------------------ queue
 async function queue() {
-  const rows = await api("/api/queue");
-  $("#app").innerHTML = `<h2>Queue</h2><div class="toolbar"><button class="danger" onclick="act(()=>api('/api/queue',{method:'DELETE'}),'Cleared')">Clear queue</button>
-    <span class="muted">Manual and import scans run anytime (unless paused). Scheduled scans only run inside the scan windows.</span></div>
+  const [rows, s] = await Promise.all([api("/api/queue"), api("/api/status")]);
+  const reasons = s.scheduler.pause_reasons || [];
+  const waiting = rows.length && !s.current.file_id && !s.forcing_queue && reasons.length;
+  $("#app").innerHTML = `<h2>Queue <span class="muted">(${rows.length})</span></h2>
+    ${waiting ? `<div class="card" style="border-color:var(--warning);margin-bottom:12px">Queue is waiting: <b>${esc(reasons.join(", "))}</b>. Use <b>Process queue now</b> to run it anyway.</div>` : ""}
+    ${s.forcing_queue ? `<div class="card" style="border-color:var(--accent);margin-bottom:12px">Processing the queue now, ignoring pauses. ${s.current.file_id ? `Scanning <b>${esc(s.current.title)} ${esc(s.current.label || "")}</b> · ${esc(s.current.step)}` : ""}</div>` : ""}
+    <div class="toolbar">
+      ${s.forcing_queue ? `<button onclick="act(()=>api('/api/queue/process',{method:'POST',body:{stop:true}}),'Stopped forcing')">Stop forcing</button>`
+        : `<button class="primary" ${rows.length ? "" : "disabled"} onclick="act(()=>api('/api/queue/process',{method:'POST'}),r=>'Processing '+r.queued+' file(s)')">Process queue now</button>`}
+      <button class="danger" onclick="act(()=>api('/api/queue',{method:'DELETE'}),'Cleared')">Clear queue</button>
+      <span class="muted small">Queued scans run automatically at any time (scan windows don't apply). They wait during parity checks, Plex streams or a manual pause - "Process queue now" ignores those until the queue is empty.</span></div>
     <table><tr><th>File</th><th>Profile</th><th>Source</th><th>Queued</th><th></th></tr>${rows.map((q) => `<tr><td><a href="#/file/${q.file_id}">${esc(q.title)} ${esc(q.label || "")}</a></td><td>${esc(q.profile)}</td><td>${esc(q.source)}</td><td class="muted">${ago(q.created_at)}</td>
     <td><button class="sm" onclick="act(()=>api('/api/queue/${q.id}',{method:'DELETE'}),'Removed')">Remove</button></td></tr>`).join("") || '<tr><td colspan=5 class="muted">Empty</td></tr>'}</table>`;
 }

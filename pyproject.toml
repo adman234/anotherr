@@ -1,0 +1,9 @@
+[project]
+name = "anotherr"
+version = "0.1.0"
+description = "Media QA for Unraid / Plex / Sonarr / Radarr"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

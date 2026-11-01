@@ -62,7 +62,7 @@ Problems create **proposals**:
 3. Go to **Docker → Add Container** and pick **anotherr** from the Template dropdown. Set `NVIDIA_VISIBLE_DEVICES` to your GPU UUID (or leave `all`), then click Apply.
 4. Open the web UI at `http://<unraid-ip>:9797`, then go to **Settings**:
    - Sonarr / Radarr / Bazarr / Tautulli: URL and API key (use **Test**).
-   - **Path mappings**: how Sonarr/Radarr paths map into the container. If Sonarr sees `/tv` and that's `/mnt/user/media/tv` on Unraid, map `/tv` → `/mnt/user/media/tv`. The container sees Unraid's `/mnt` read-only.
+   - **Path mappings**: how Sonarr/Radarr paths map into the container. If Sonarr sees `/tv` and that's `/mnt/user/media/tv` on Unraid, map `/tv` → `/mnt/user/media/tv`. The container sees Unraid's `/mnt` read-only. Click **Check paths** to test a sample of files: it suggests the right mapping and adds it with one click.
    - Whisper → **Load & test model**. The first run downloads `large-v3-turbo` (~1.6 GB) into appdata.
    - Click **Sync now** on the dashboard.
 5. Optional, for instant scans of new downloads: in Sonarr and Radarr, add **Settings → Connect → Webhook** with "On Import" and "On Upgrade", URL `http://<unraid-ip>:9797/api/webhook/sonarr` (or `/radarr`). If you set an API key, append `?apikey=<key>`.

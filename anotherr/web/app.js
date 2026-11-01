@@ -73,6 +73,7 @@ async function dashboard() {
       <td>${r.bad || 0}</td><td><button class="sm" onclick="${r.name.startsWith("Anime") || r.name === "TV" || r.name === "Movies" ? `quickScan('library','${r.name.startsWith("Anime") ? "anime" : r.name === "TV" ? "tv" : "movies"}')` : `quickScan('disk','${esc(r.name === "(unknown)" ? "" : r.name)}')`}">Sample 10</button></td></tr>`;
   };
   $("#app").innerHTML = `
+    ${s.files_not_found ? `<div class="card" style="border-color:var(--error);margin-bottom:12px"><b>${s.files_not_found} file(s) couldn't be found on disk.</b> Your path mappings probably don't match how Sonarr/Radarr see your folders. Go to <a href="#/settings">Settings → Path mappings</a> and click <b>Check paths</b> - it suggests the right mapping.</div>` : ""}
     ${unconfigured.length ? `<div class="card" style="border-color:var(--accent);margin-bottom:12px">Set up ${unconfigured.join(" and ")} in <a href="#/settings">Settings</a>, then run a sync.</div>` : ""}
     <div class="grid">
       <div class="card"><div class="muted">Files</div><div class="stat">${files.total || 0}</div><div class="small muted">${scanned} checked · ${files.unscanned || 0} never checked</div></div>
@@ -341,7 +342,8 @@ async function settingsPage() {
     }
     if (k === "path_mappings") {
       return `<section><h4>${LABELS[k]}</h4><div class="small muted" style="margin-bottom:6px">${HELP.path_mappings}</div><div id="pm">${s.path_mappings.map(pmRow).join("")}</div>
-        <button class="sm" onclick="$('#pm').insertAdjacentHTML('beforeend', pmRow({from:'',to:''}))">+ Add mapping</button></section>`;
+        <button class="sm" onclick="$('#pm').insertAdjacentHTML('beforeend', pmRow({from:'',to:''}))">+ Add mapping</button>
+        <button class="sm primary" onclick="checkPaths()">Check paths</button><div id="pathcheck"></div></section>`;
     }
     return `<section><h4>${LABELS[k]}</h4>${render(k, s[k])}${k === "whisper" ? `<div class="field"><span></span><div><button class="sm" onclick="testWhisper()">Load & test model</button> <span id="t-whisper" class="small"></span></div></div>` : ""}</section>`;
   }).join("");
@@ -388,6 +390,29 @@ function collect() {
   out.path_mappings = [...document.querySelectorAll(".pmrow")].map((r) => ({ from: $(".pm-from", r).value.trim(), to: $(".pm-to", r).value.trim() })).filter((m) => m.from && m.to);
   return out;
 }
+async function checkPaths() {
+  $("#pathcheck").innerHTML = '<div class="muted small" style="margin-top:8px">Checking a sample of files…</div>';
+  const r = await api("/api/paths/check");
+  const sug = r.suggestions.map((g, i) => `<div class="win"><b>${esc(g.from)}</b> → <b>${esc(g.to)}</b> <span class="muted small">fixes ${g.files} of the sampled files</span>
+      <button class="sm primary" onclick="applyMapping(${i})">Use this</button></div>`).join("");
+  window._sugg = r.suggestions;
+  $("#pathcheck").innerHTML = `<div style="margin-top:10px">
+    ${!r.mnt_visible ? '<div class="card" style="border-color:var(--error)">/mnt/user is not visible inside the container - check the "Unraid /mnt" path in the Docker template.</div>' : ""}
+    <div><b>${r.found} of ${r.checked}</b> sampled files found with the current mappings.</div>
+    ${sug ? `<h3>Suggested mappings</h3>${sug}<div class="small muted">"Use this" adds it to the list and saves; affected files are re-checked automatically.</div>` : (r.found < r.checked ? '<div class="small muted">No suggestion found - the files may be outside /mnt/user.</div>' : "")}
+    <details style="margin-top:8px"><summary class="muted small">Show sampled files</summary><table class="small"><tr><th></th><th>Sonarr/Radarr path</th><th>Looked for</th></tr>
+    ${r.samples.map((x) => `<tr><td>${x.found ? '<span class="sev s-ok">ok</span>' : '<span class="sev s-error">missing</span>'}</td><td>${esc(x.arr_path)}</td><td>${esc(x.read_path)}</td></tr>`).join("")}</table></details></div>`;
+}
+async function applyMapping(i) {
+  const g = window._sugg[i];
+  // replace a mapping with the same "from", otherwise add it
+  const rows = [...document.querySelectorAll(".pmrow")];
+  const same = rows.find((row) => $(".pm-from", row).value.trim() === g.from);
+  if (same) $(".pm-to", same).value = g.to; else $("#pm").insertAdjacentHTML("beforeend", pmRow({ from: g.from, to: g.to }));
+  await saveSettings();
+  setTimeout(checkPaths, 1500);
+}
+
 async function saveSettings() { try { await api("/api/settings", { method: "PUT", body: collect() }); toast("Settings saved"); settingsPage(); } catch (e) { toast("Error: " + e.message); } }
 async function testSvc(k) {
   $("#t-" + k).textContent = "testing…";

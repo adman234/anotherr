@@ -120,9 +120,13 @@ def run_pipeline(ctx: Ctx):
     ctx.step("locating file")
     ctx.path = resolve_path(ctx.file)
     if not ctx.path:
-        ctx.issue("integrity", "file_not_found", "error",
-                  "File not found on disk (check path mappings, or the file was replaced since the last sync).",
-                  arr_path=ctx.file["arr_path"])
+        from .sync import map_path
+
+        tried = map_path(ctx.file["arr_path"])
+        ctx.issue("config", "file_not_found", "error",
+                  f"File not found. {ctx.item['source'].title()} path: {ctx.file['arr_path']} -> looked for: {tried}. "
+                  "Fix Settings -> Path mappings (use 'Check paths'), or resync if the file was replaced.",
+                  arr_path=ctx.file["arr_path"], tried=tried)
         return
     ctx.result["path"] = ctx.path
 

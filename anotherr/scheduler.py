@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from . import actions, arr, db, scanner, settings, stt, sync, unraid
+from . import actions, arr, db, paths, scanner, settings, stt, sync, unraid
 from .schedule_util import active_window
 
 log = logging.getLogger("anotherr.scheduler")
@@ -99,6 +99,8 @@ def pause_reasons(cfg: dict) -> list[str]:
         n = stream_count()
         if n > int(sc.get("max_streams", 0)):
             r.append(f"{n} active Plex stream(s)")
+    if paths.mappings_look_wrong():
+        r.append("files not found - fix path mappings in Settings")
     return r
 
 

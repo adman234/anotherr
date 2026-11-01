@@ -13,7 +13,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, media, scanner, scheduler, settings, stt, sync, unraid
+from . import __version__, actions, arr, db, media, paths, scanner, scheduler, settings, stt, sync, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -72,6 +72,7 @@ def status():
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
         "files": {"total": sum(counts.values()), **counts},
         "queue": db.scalar("SELECT COUNT(*) FROM queue"),
+        "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
         "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open'"),
         "pending_reviews": db.scalar("SELECT COUNT(*) FROM reviews WHERE status='pending'"),
@@ -474,7 +475,16 @@ def settings_get():
 
 @app.put("/api/settings", dependencies=[Depends(auth)])
 def settings_put(body: dict = Body(...)):
-    return {"settings": _mask(settings.save(body))}
+    before = settings.get().get("path_mappings")
+    saved = settings.save(body)
+    if saved.get("path_mappings") != before:
+        paths.reresolve_async()
+    return {"settings": _mask(saved)}
+
+
+@app.get("/api/paths/check", dependencies=[Depends(auth)])
+def paths_check(limit: int = 25):
+    return paths.check(min(limit, 100))
 
 
 def _mask(s: dict) -> dict:

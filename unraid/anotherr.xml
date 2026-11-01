@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>anotherr</Name>
+  <Repository>ghcr.io/adman234/anotherr:latest</Repository>
+  <Registry>https://github.com/adman234/anotherr/pkgs/container/anotherr</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/adman234/anotherr/issues</Support>
+  <Project>https://github.com/adman234/anotherr</Project>
+  <Overview>Anotherr checks your Plex library for bad media files. It syncs with Sonarr and Radarr, then samples random parts of episodes and movies on a schedule. It looks for corruption and truncated files, runtimes that don't match, the wrong audio language (original language preferred, dual audio preferred for anime), and subtitles that are missing, signs-only, out of sync, or dub captions. It also finds multi-episode files. Speech analysis uses faster-whisper on your NVIDIA GPU. It is Unraid-aware: it can scan one disk at a time or only disks that are already spinning, and it pauses during parity checks and active Plex streams (via Tautulli). Fixes go through Bazarr (new subtitles) and Sonarr/Radarr (blocklist + redownload), with approval by default. Automation is optional and runs on a schedule. Includes an MCP server for Claude Desktop that handles the visual checks, such as reading title cards.&#xD;
+&#xD;
+GPU: requires the Nvidia Driver plugin. Set NVIDIA_VISIBLE_DEVICES to your GPU UUID (or 'all').</Overview>
+  <Category>MediaApp:Video Tools: Status:Beta</Category>
+  <WebUI>http://[IP]:[PORT:9797]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/adman234/anotherr/main/unraid/anotherr.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/adman234/anotherr/main/assets/icon.png</Icon>
+  <ExtraParams>--runtime=nvidia</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Nvidia Driver plugin (for GPU speech recognition). Sonarr and/or Radarr. Optional: Bazarr, Tautulli.</Requires>
+  <Config Name="WebUI Port" Target="9797" Default="9797" Mode="tcp" Description="Web UI, REST API, webhooks and the MCP bridge talk to this port." Type="Port" Display="always" Required="true" Mask="false">9797</Config>
+  <Config Name="AppData" Target="/config" Default="/mnt/user/appdata/anotherr" Mode="rw" Description="Database, settings and Whisper model cache (~2 GB for large-v3-turbo)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/anotherr</Config>
+  <Config Name="Unraid /mnt (read-only)" Target="/mnt" Default="/mnt" Mode="ro,slave" Description="Read-only view of /mnt so files can be read from /mnt/user and traced to their physical /mnt/diskN for one-disk-at-a-time scanning. Set Path Mappings in the web UI (e.g. Sonarr's /tv -> /mnt/user/media/tv)." Type="Path" Display="always" Required="true" Mask="false">/mnt</Config>
+  <Config Name="Unraid array state (read-only)" Target="/unraid/emhttp" Default="/var/local/emhttp" Mode="ro" Description="Used to detect parity checks and which disks are spun down. Remove it to turn those features off." Type="Path" Display="advanced" Required="false" Mask="false">/var/local/emhttp</Config>
+  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU UUID from the Nvidia Driver plugin page (e.g. GPU-xxxxxxxx), or 'all'." Type="Variable" Display="always" Required="false" Mask="false">all</Config>
+  <Config Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="compute,utility" Mode="" Description="Leave as compute,utility." Type="Variable" Display="advanced" Required="false" Mask="false">compute,utility</Config>
+  <Config Name="API key (optional)" Target="ANOTHERR_API_KEY" Default="" Mode="" Description="If set, the web UI, API, webhooks (?apikey=...) and the MCP bridge must send this key. Leave blank on a trusted LAN." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID to run as (99 = nobody)." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID to run as (100 = users)." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="Log level" Target="ANOTHERR_LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING" Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+</Container>

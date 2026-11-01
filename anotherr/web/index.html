@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anotherr</title>
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="#/"><img src="icon.png" alt=""><span>Anotherr</span></a>
+  <nav id="nav">
+    <a href="#/">Dashboard</a>
+    <a href="#/library">Library</a>
+    <a href="#/issues">Issues <b id="n-issues"></b></a>
+    <a href="#/reviews">Reviews <b id="n-reviews"></b></a>
+    <a href="#/actions">Actions <b id="n-actions"></b></a>
+    <a href="#/queue">Queue</a>
+    <a href="#/settings">Settings</a>
+  </nav>
+  <div id="statusbar"></div>
+</header>
+<main id="app"></main>
+<div id="modal" class="hidden"><div class="modal-box"><button class="close" onclick="closeModal()">×</button><div id="modal-body"></div></div></div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

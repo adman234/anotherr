@@ -1,0 +1,136 @@
+"""Settings live in the DB (editable from the UI); defaults are merged in on read."""
+from __future__ import annotations
+
+import copy
+import threading
+
+from . import db
+
+ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]  # Monday = 0
+
+# Issue codes that may lead to an action proposal.
+RESUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"]
+REDOWNLOAD_CODES = [
+    "unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "duration_short",
+    "original_audio_missing", "silent_audio", "visual_review_failed", "full_decode_errors",
+]
+
+DEFAULTS: dict = {
+    "sonarr": {"url": "", "api_key": ""},
+    "radarr": {"url": "", "api_key": ""},
+    "bazarr": {"url": "", "api_key": ""},
+    "tautulli": {"url": "", "api_key": ""},
+    # Map paths as Sonarr/Radarr see them to paths inside this container.
+    "path_mappings": [{"from": "/tv", "to": "/mnt/user/media/tv"}, {"from": "/movies", "to": "/mnt/user/media/movies"}],
+    "languages": {
+        "subtitle_language": "eng",            # your reading language
+        "require_subs_for_native_audio": False,  # require subs even when audio is already in subtitle_language
+        "min_full_sub_cues_per_min": 3.0,      # below this a track is treated as signs/songs only
+    },
+    "anime": {
+        "prefer_dual_audio": True,
+        "dub_language": "eng",
+        "detect_dubtitles": True,
+    },
+    "scan": {
+        "default_profile": "standard",
+        "ffmpeg_threads": 2,
+        "max_audio_tracks": 4,
+        "profiles": {
+            "quick": {"segments": 3, "seconds": 30, "subtitles": False, "full_decode": False},
+            "standard": {"segments": 5, "seconds": 120, "subtitles": True, "full_decode": False},
+            "deep": {"segments": 8, "seconds": 180, "subtitles": True, "full_decode": True},
+        },
+    },
+    "review": {
+        "title_cards": "multi_episode",  # never | multi_episode | flagged | always
+        "visual_quality_on_deep": True,
+    },
+    "schedule": {
+        "enabled": True,
+        "windows": [{"days": ALL_DAYS, "start": "01:00", "end": "07:00"}],
+        "profile": "standard",
+        "max_files_per_window": 150,
+        "disk_mode": "rotate",  # all | rotate | spun_up | specific
+        "disks": [],            # used by 'specific' (and limits 'rotate' when non-empty)
+        "rescan_after_days": 180,
+        "pause_on_parity": True,
+        "pause_on_streams": True,
+        "max_streams": 0,       # pause when Plex has more than this many active streams
+        "manual_respects_pause": True,
+    },
+    "imports": {"enabled": True, "profile": "quick"},
+    "sync": {"interval_minutes": 360},
+    "whisper": {
+        "model": "large-v3-turbo",
+        "device": "auto",          # auto | cuda | cpu
+        "compute_type": "auto",    # auto | float16 | int8_float16 | int8
+        "cpu_fallback_model": "small",
+        "idle_unload_minutes": 10,
+    },
+    "automation": {
+        "enabled": False,
+        "windows": [{"days": ALL_DAYS, "start": "02:00", "end": "06:00"}],
+        "max_actions_per_day": 10,
+        "auto_resub": True,
+        "auto_redownload": False,
+        "redownload_codes": ["unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "original_audio_missing"],
+        "redownload_delete_file": True,
+    },
+}
+
+SECRET_KEYS = {"api_key"}
+
+_lock = threading.RLock()
+_cache: dict | None = None
+
+
+def _merge(base: dict, over: dict) -> dict:
+    out = copy.deepcopy(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def get() -> dict:
+    global _cache
+    with _lock:
+        if _cache is None:
+            stored = db.unj(db.scalar("SELECT value FROM settings WHERE key='config'"), {})
+            _cache = _merge(DEFAULTS, stored)
+        return copy.deepcopy(_cache)
+
+
+def save(new: dict) -> dict:
+    global _cache
+    with _lock:
+        current = get()
+        # Keep existing secrets when the UI sends back a masked value.
+        for svc in ("sonarr", "radarr", "bazarr", "tautulli"):
+            if svc in new and isinstance(new[svc], dict) and new[svc].get("api_key") in ("********", None):
+                new[svc]["api_key"] = current.get(svc, {}).get("api_key", "")
+        merged = _merge(current, new)
+        db.x("INSERT INTO settings(key, value) VALUES('config', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+             (db.j(merged),))
+        _cache = merged
+        return copy.deepcopy(merged)
+
+
+def masked() -> dict:
+    s = get()
+    for svc in ("sonarr", "radarr", "bazarr", "tautulli"):
+        if s[svc].get("api_key"):
+            s[svc]["api_key"] = "********"
+    return s
+
+
+def state_get(key: str, default=None):
+    return db.unj(db.scalar("SELECT value FROM settings WHERE key=?", ("state." + key,)), default)
+
+
+def state_set(key: str, value) -> None:
+    db.x("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+         ("state." + key, db.j(value)))

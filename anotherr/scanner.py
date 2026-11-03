@@ -456,8 +456,11 @@ def check_subtitles(ctx: Ctx):
                         continue
                     end = p["start"] + p["dur"] if p["dur"] > 0 else (pk[i + 1]["start"] if i + 1 < len(pk) else p["start"] + 3)
                     cues.append((p["start"], min(end, p["start"] + 10), ""))
-        kind = analysis.classify_track(len(cues), span, s["title"], s["forced"], min_rate)
-        analysed.append({"track": s, "cues": cues, "kind": kind, "per_min": round(len(cues) / max(span / 60, 1), 1)})
+        # density only counts cues inside the sampled windows (packets are read with padding)
+        counted = len(cues) if s["external"] else sum(
+            1 for c in cues if any(c[1] > ws and c[0] < ws + wd for ws, wd in windows))
+        kind = analysis.classify_track(counted, span, s["title"], s["forced"], min_rate)
+        analysed.append({"track": s, "cues": cues, "kind": kind, "per_min": round(counted / max(span / 60, 1), 1)})
 
     full = [a for a in analysed if a["kind"] == "full"]
     ctx.result["subtitle_tracks"] = [

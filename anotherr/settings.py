@@ -50,17 +50,20 @@ DEFAULTS: dict = {
         "visual_quality_on_deep": True,
     },
     "schedule": {
-        "enabled": True,
-        "windows": [{"days": ALL_DAYS, "start": "01:00", "end": "07:00"}],  # empty list = scan anytime
+        "enabled": True,              # scheduled (priority) scanning; queued scans always run
         "profile": "standard",
-        "max_files_per_window": 0,  # 0 = no limit
-        "disk_mode": "rotate",  # all | rotate | spun_up | specific
-        "disks": [],            # used by 'specific' (and limits 'rotate' when non-empty)
+        "max_disks": 1,               # hard drives scanned at the same time
+        "cache_slot": True,           # plus one extra slot for cache/SSD pools (no spin-up, no contention)
+        "spinup": "anytime",          # waking idle disks for scheduled scans: anytime | windows | never
+        "windows": [{"days": ALL_DAYS, "start": "01:00", "end": "07:00"}],  # used when spinup = windows
+        "quiet_windows": [],          # no new scans at all, e.g. while scheduled updates/backups run
+        "disks": [],                  # optional: only scan these disks (empty = all)
         "rescan_after_days": 180,
         "pause_on_parity": True,
+        "pause_on_mover": True,
         "pause_on_streams": True,
-        "stream_pause": "same_disk",  # same_disk = skip files on disks Plex is reading | any | off
-        "max_streams": 0,       # 'any' mode: pause when Plex has more than this many active streams
+        "stream_pause": "off",        # off | same_disk = skip the disk Plex reads | any = pause during streams
+        "max_streams": 0,             # 'any' mode: pause when Plex has more than this many active streams
         "manual_respects_pause": True,
     },
     "imports": {"enabled": True, "profile": "quick"},
@@ -94,6 +97,19 @@ def _merge(base: dict, over: dict) -> dict:
     for k, v in (over or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _prune(base: dict, cur: dict) -> dict:
+    """Drop settings that no longer exist (e.g. retired options still in an old saved config)."""
+    out = {}
+    for k, v in cur.items():
+        if k not in base:
+            continue
+        if isinstance(v, dict) and isinstance(base[k], dict) and base[k] and k != "profiles":
+            out[k] = _prune(base[k], v)
         else:
             out[k] = v
     return out
@@ -142,7 +158,7 @@ def get() -> dict:
                 db.x("INSERT INTO settings(key, value) VALUES('config', ?) ON CONFLICT(key) DO UPDATE SET "
                      "value=excluded.value", (db.j(stored),))
             stored.pop("_v", None)
-            _cache = _merge(DEFAULTS, stored)
+            _cache = _prune(DEFAULTS, _merge(DEFAULTS, stored))
         return copy.deepcopy(_cache)
 
 
@@ -155,7 +171,7 @@ def save(new: dict) -> dict:
             if svc in new and isinstance(new[svc], dict) and new[svc].get("api_key") in ("********", None):
                 new[svc]["api_key"] = current.get(svc, {}).get("api_key", "")
         new.pop("_v", None)
-        merged = _merge(current, new)
+        merged = _prune(DEFAULTS, _merge(current, new))
         db.x("INSERT INTO settings(key, value) VALUES('config', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
              (db.j({**_diff(DEFAULTS, merged), "_v": 2}),))
         _cache = merged

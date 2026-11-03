@@ -136,6 +136,22 @@ def parity_running() -> bool:
     return False
 
 
+def mover_running() -> bool:
+    """Unraid's mover is moving files between cache and array (emhttp var.ini: shareMoverActive)."""
+    var = _ini(os.path.join(EMHTTP, "var.ini")).get("", {})
+    return str(var.get("shareMoverActive", "")).lower() in ("yes", "true", "1")
+
+
+def is_fast_disk(name: str, state: dict | None = None) -> bool:
+    """Cache/pool or SSD: scanning it never spins anything up or competes with playback."""
+    if not name:
+        return False
+    st = (state if state is not None else disks_state()).get(name)
+    if st is not None:
+        return not st["rotational"] or (not re.match(r"disk\d+$", name) and st.get("type", "").lower() == "cache")
+    return not re.match(r"(disk\d+|parity\d*)$", name)  # pools are named, array disks are diskN
+
+
 @lru_cache(maxsize=1)
 def is_unraid() -> bool:
     return os.path.isdir(os.path.join(MNT, "user")) or os.path.exists(os.path.join(EMHTTP, "var.ini"))

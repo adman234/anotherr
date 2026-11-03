@@ -16,9 +16,15 @@ from . import analysis, db, langs, media, ocr, runtime, settings, stt
 
 log = logging.getLogger("anotherr.scan")
 
-CURRENT: dict = {}
-CANCEL = threading.Event()
-_scan_lock = threading.Lock()
+# Scans can run in parallel (one per slot); CURRENT maps slot name -> live status of its scan.
+CURRENT: dict[str, dict] = {}
+CANCEL = threading.Event()   # set to stop every running scan; the scheduler clears it once they've stopped
+_active_files: set[int] = set()
+_active_lock = threading.Lock()
+
+
+def current_scans() -> list[dict]:
+    return [dict(v, slot=k) for k, v in list(CURRENT.items())]
 
 FAMILIES = [{"chi", "yue"}, {"nor", "dan", "swe"}, {"srp", "hrv", "bos"}, {"may", "ind"}]
 
@@ -53,6 +59,7 @@ class Ctx:
     tracks: dict = field(default_factory=dict)  # a_index -> analysis
     expected: str = ""
     orig_track: int | None = None
+    live: dict = field(default_factory=dict)  # this scan's entry in CURRENT
 
     def issue(self, category: str, code: str, severity: str, message: str, **details):
         self.issues.append({"category": category, "code": code, "severity": severity, "message": message,
@@ -62,13 +69,13 @@ class Ctx:
         if CANCEL.is_set():
             raise Cancelled()
         now = time.time()
-        prev, prev_at = CURRENT.get("step"), CURRENT.get("step_at")
+        prev, prev_at = self.live.get("step"), self.live.get("step_at")
         if prev and prev_at:
             group = prev.split(":")[0].split(" segment")[0].split(" track")[0].strip()
             t = self.result.setdefault("timings", {})
             t[group] = round(t.get(group, 0) + now - prev_at, 1)
-        CURRENT["step"] = name
-        CURRENT["step_at"] = now
+        self.live["step"] = name
+        self.live["step_at"] = now
 
     @property
     def episodes(self) -> list[dict]:
@@ -131,35 +138,46 @@ def _resync_missing(fid: int, item: dict):
     db.x("UPDATE files SET status=?, open_issues=? WHERE id=?", (db.worst(sev) or "ok", len(sev), fid))
 
 
-def scan_file(file_id: int, profile: str | None = None, source: str = "manual", seed: int | None = None) -> dict:
-    with _scan_lock:
-        CANCEL.clear()
-        f = db.q1("SELECT * FROM files WHERE id=?", (file_id,))
-        if not f:
-            raise ValueError(f"file {file_id} not found")
-        item = db.q1("SELECT * FROM items WHERE id=?", (f["item_id"],))
-        cfg = settings.get()
-        profile = profile or cfg["scan"]["default_profile"]
-        pcfg = cfg["scan"]["profiles"].get(profile) or cfg["scan"]["profiles"]["standard"]
-        seed = seed if seed is not None else random.randrange(1 << 31)
-        started = time.time()
-        scan_id = db.x("INSERT INTO scans(file_id, profile, seed, source, started_at, status) VALUES (?,?,?,?,?,?)",
-                       (file_id, profile, seed, source, started, "running"))
-        CURRENT.clear()
-        CURRENT.update(file_id=file_id, scan_id=scan_id, title=item["title"], label=f.get("label", ""),
-                       profile=profile, started_at=started, step="starting")
-        ctx = Ctx(file=f, item=item, cfg=cfg, profile=profile, pcfg=pcfg, seed=seed)
-        status, error = "done", ""
-        try:
-            run_pipeline(ctx)
-        except Cancelled:
-            status = "cancelled"
-        except Exception as e:  # noqa: BLE001
-            status, error = "failed", f"{e}\n{traceback.format_exc()[-1500:]}"
-            log.exception("scan failed for file %s", file_id)
-        finally:
-            CURRENT.clear()
-        return persist(ctx, scan_id, status, error, time.time() - started)
+def scan_file(file_id: int, profile: str | None = None, source: str = "manual", seed: int | None = None,
+              slot: str = "main", why: str = "") -> dict:
+    with _active_lock:
+        if file_id in _active_files:
+            return {"status": "skipped", "error": "already being scanned"}
+        _active_files.add(file_id)
+    try:
+        return _scan_file(file_id, profile, source, seed, slot, why)
+    finally:
+        with _active_lock:
+            _active_files.discard(file_id)
+
+
+def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None, slot: str, why: str) -> dict:
+    f = db.q1("SELECT * FROM files WHERE id=?", (file_id,))
+    if not f:
+        raise ValueError(f"file {file_id} not found")
+    item = db.q1("SELECT * FROM items WHERE id=?", (f["item_id"],))
+    cfg = settings.get()
+    profile = profile or cfg["scan"]["default_profile"]
+    pcfg = cfg["scan"]["profiles"].get(profile) or cfg["scan"]["profiles"]["standard"]
+    seed = seed if seed is not None else random.randrange(1 << 31)
+    started = time.time()
+    scan_id = db.x("INSERT INTO scans(file_id, profile, seed, source, started_at, status) VALUES (?,?,?,?,?,?)",
+                   (file_id, profile, seed, source, started, "running"))
+    live = {"file_id": file_id, "scan_id": scan_id, "title": item["title"], "label": f.get("label", ""),
+            "disk": f.get("disk", ""), "why": why, "profile": profile, "started_at": started, "step": "starting"}
+    CURRENT[slot] = live
+    ctx = Ctx(file=f, item=item, cfg=cfg, profile=profile, pcfg=pcfg, seed=seed, live=live)
+    status, error = "done", ""
+    try:
+        run_pipeline(ctx)
+    except Cancelled:
+        status = "cancelled"
+    except Exception as e:  # noqa: BLE001
+        status, error = "failed", f"{e}\n{traceback.format_exc()[-1500:]}"
+        log.exception("scan failed for file %s", file_id)
+    finally:
+        CURRENT.pop(slot, None)
+    return persist(ctx, scan_id, status, error, time.time() - started)
 
 
 def run_pipeline(ctx: Ctx):

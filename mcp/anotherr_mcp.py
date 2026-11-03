@@ -24,8 +24,14 @@ import base64
 import json
 import os
 
+import logging
+
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
+
+# httpx logs every request URL at INFO; keep that out of Claude Desktop's MCP log
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")

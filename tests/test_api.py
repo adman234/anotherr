@@ -92,3 +92,70 @@ def test_settings_store_only_changes_and_migrate():
     settings.save({"schedule": {"max_streams": 2}})
     stored = db.unj(db.scalar("SELECT value FROM settings WHERE key='config'"))
     assert stored["schedule"] == {"max_streams": 2} and "whisper" not in stored
+
+
+def test_missing_file_resyncs_and_parks_reviews(monkeypatch):
+    from anotherr import scanner
+
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 42, 'Death Note', 'series')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, local_path, first_seen) VALUES (?, 1, '/tv/DN/10.mkv', "
+               "'/nope/10.mkv', ?)", (iid, time.time()))
+    db.x("INSERT INTO reviews(file_id, kind, status, created_at) VALUES (?, 'title_cards', 'pending', ?)", (fid, time.time()))
+    calls = []
+    monkeypatch.setattr(sync, "sync_one", lambda s, i, queue=True: calls.append((s, i)) or 0)
+    scanner._resync_at.clear()
+    with client() as c:
+        assert c.get(f"/api/files/{fid}/frame?t=10").status_code == 404
+        import threading
+        for t in threading.enumerate():
+            if t.name == "anotherr-resync":
+                t.join(10)
+        assert calls == [("sonarr", 42)]
+        assert c.get("/api/status").json()["files_not_found"] == 1
+        assert db.q1("SELECT status FROM reviews WHERE file_id=?", (fid,))["status"] == "dismissed"
+
+
+def test_streams_and_issue_evidence_endpoints(tmp_path):
+    import subprocess
+
+    v = str(tmp_path / "v.mkv")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=3",
+                    "-f", "lavfi", "-i", "sine=d=3", "-metadata:s:a:0", "language=jpn", "-c:v", "libx264", "-c:a", "aac", v],
+                   check=True)
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('radarr', 7, 'Ono', 'movie')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, local_path, first_seen) VALUES (?, 1, ?, ?, ?)",
+               (iid, v, v, time.time()))
+    sid = db.x("INSERT INTO scans(file_id, status, result) VALUES (?, 'done', ?)",
+               (fid, db.j({"audio_tracks": [{"a_index": 0, "windows": [{"lang": "eng", "prob": 0.9}]}]})))
+    xid = db.x("INSERT INTO issues(file_id, scan_id, category, code, severity, message, details, status) VALUES "
+               "(?, ?, 'language', 'original_audio_missing', 'error', 'No Russian audio', ?, 'open')",
+               (fid, sid, db.j({"evidence_ts": [30.0]})))
+    with client() as c:
+        s = c.get(f"/api/files/{fid}/streams").json()
+        assert s["audio"][0]["lang"] == "jpn" and s["video"]
+        e = c.get(f"/api/issues/{xid}").json()
+        assert e["evidence"]["audio_tracks"][0]["windows"] and e["evidence_ts"] == [30.0]
+
+
+def test_issue_code_summary_covers_every_open_issue():
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 3, 'S', 'series')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, first_seen) VALUES (?, 1, '/x', ?)", (iid, time.time()))
+    for n in range(20):  # 20 distinct codes - more than the old 15-code cut-off
+        db.x("INSERT INTO issues(file_id, code, severity, status) VALUES (?, ?, 'info', 'open')", (fid, f"code_{n}"))
+    with client() as c:
+        r = c.get("/api/issues?per_page=5").json()
+        assert sum(x["n"] for x in r["codes"]) == r["total"] == 20
+
+
+def test_files_with_revised_issue_codes_are_requeued_once():
+    from anotherr import settings
+
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 9, 'NCIS', 'series')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, first_seen) VALUES (?, 1, '/x', ?)", (iid, time.time()))
+    db.x("INSERT INTO issues(file_id, code, severity, status) VALUES (?, 'frozen_video', 'warning', 'open')", (fid,))
+    settings.state_set("detector_fixes_requeued", False)
+    api._requeue_after_detector_fixes()
+    assert db.q1("SELECT source FROM queue WHERE file_id=?", (fid,))["source"] == "recheck"
+    db.x("DELETE FROM queue")
+    api._requeue_after_detector_fixes()
+    assert db.scalar("SELECT COUNT(*) FROM queue") == 0

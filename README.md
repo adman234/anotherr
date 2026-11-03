@@ -11,13 +11,14 @@ Anotherr runs on your Unraid server. It mirrors your Sonarr/Radarr libraries and
 | Area | Checks |
 |---|---|
 | **Integrity** | ffprobe sanity, sampled-segment decode errors, truncated files (the last segment is always decoded), container vs. stream duration, optional full decode (deep profile) |
-| **Runtime** | File length vs. the Sonarr/Radarr runtime: too short (wrong file, sample), too long, or a likely multi-episode file mapped to one episode |
-| **Video** | Black video, frozen video, interlacing |
-| **Audio language** | Whisper language detection on each audio track (tags are often wrong or `und`). The **original language is always preferred** unless you set a per-show/movie override. It also flags mislabeled tracks, a default track that isn't the preferred language, and silent tracks |
+| **Runtime** | File length vs. the expected length. For series, the per-episode length is **learned from the series' own files** (median of length ÷ mapped episodes), so shows numbered by 11–13 min segments aren't judged against a 30 min runtime. Flags too short (wrong file, sample), much too long, and double-length single episodes (a special, or a different episode mapped as this one) |
+| **Video** | Black video, interlacing, and frozen video: keyframes nominate candidates, which are only reported after a continuous decode confirms the picture really stopped (≥10 s, black and the first/last 2 min excluded). One spot = info, two separate spots = warning |
+| **Audio language** | Whisper language detection on each audio track, run separately on several windows across the file (tags are often wrong or `und`). A tag is only overridden when ≥3 windows agree at ≥90% on average. The **original language is always preferred** unless you set a per-show/movie override. It also flags mislabeled tracks, a default track that isn't the preferred language, and silent tracks |
 | **Anime** | Original audio required, **dual audio preferred** (flags a missing dub as info), full subtitles required (not signs/songs only), **"dubtitles"** detection (subs that just caption the English dub) |
-| **Subtitles** | Missing, signs/songs only, **out of sync** (VAD speech vs. cue timing, reports the offset), **wrong subs entirely** (timing doesn't match the dialogue), text doesn't match speech (native-language content), image-only (PGS) warning. External `.srt`/`.ass` files from Bazarr are included |
+| **Subtitles** | Missing, signs/songs only, **out of sync** (speech vs. cue timing against the *original-language* track, reports the offset), **mismatch** (timing or text doesn't match). Text is compared after shifting by the detected offset, so each track gets one verdict. Image-only (PGS) info. Skipped for films with no dialogue. External `.srt`/`.ass` files from Bazarr are included and re-checked hourly |
 | **Multi-episode files** | SpongeBob / Courage-style files: segment breaks found with black-frame + silence detection, then title-card frames queued for a visual check against the expected episode titles |
-| **Visual (Claude or you)** | Title cards match the episode, movie identity when the length is suspicious, and in deep scans hardcoded subs, watermarks, cam rips, or a wrong aspect ratio |
+| **Wrong content** | Title cards are read automatically (OCR) and matched against the series' episode titles: a match passes, another episode's title raises **wrong content**. Subtitles failing *plus* another anomaly (length, every track failing) is also reported as wrong content, with a redownload proposed rather than a resub. Once a file is truncated or wrong, checks that can't be valid on it are skipped and listed as such |
+| **Visual (Claude or you)** | Title cards OCR couldn't read, movie identity when language or runtime is off, and in deep scans hardcoded subs, watermarks, cam rips, or a wrong aspect ratio |
 
 ### Scan profiles
 
@@ -31,7 +32,7 @@ Every scan stores its random seed, so results are reproducible.
 
 ## Scheduling (Unraid-aware)
 
-- **Scan windows** per weekday (overnight windows work, e.g. 23:00–06:00), with a cap on files per window.
+- **Scan windows** per weekday (overnight windows work, e.g. 23:00–06:00), optionally with a cap on files per window. **Remove every window to scan at any time.** The dashboard shows when the next scan will run and why.
 - **Disk modes**:
   - `all`: the whole array, by priority
   - `rotate`: one disk per window, round-robin
@@ -39,9 +40,9 @@ Every scan stores its random seed, so results are reproducible.
   - `specific`: only the disks you pick
 - Files are read straight from `/mnt/diskN` (bypassing shfs) once their disk is known.
 - **Queued scans run any time** (windows don't apply). They wait during parity checks, Plex streams or a manual pause; **Process queue now** (Queue page / dashboard, or the `process_queue` MCP tool) works through the whole queue ignoring those pauses.
-- **Pauses** during parity checks and while Plex has active streams (via Tautulli).
+- **Pauses** during parity checks. While Plex streams (via Tautulli), by default only files on the **disk Plex is reading** are skipped; everything else keeps scanning (`stream_pause`: same_disk / any / off).
 - **Priority**: never-checked files first, then recent imports, files whose release group has a bad track record, files with earlier problems, and the longest time since the last check.
-- **New imports** get a quick scan straight away through Sonarr/Radarr webhooks.
+- **New imports** get a quick scan straight away: through Sonarr/Radarr webhooks, a history check every 15 minutes, or the next library sync, so webhooks are optional.
 - The Whisper model is unloaded after it sits idle, so Plex gets the VRAM back.
 
 ## Actions and automation
@@ -97,7 +98,7 @@ The MCP server is a thin local bridge. Claude never touches your files directly.
    - "Scan 20 random anime episodes on disk3 with the standard profile"
    - "Show me frames from file 123 at 1:00, 5:00 and 10:00"
 
-**Tools:** `status`, `coverage`, `recent_activity`, `search_library`, `item_files`, `file_report`, `set_language_override`, `process_queue`, `queue_scan`, `list_issues`, `ignore_issue`, `pending_reviews`, `get_review` (returns frames), `get_frames`, `submit_review`, `list_actions`, `propose_action`, `decide_action`.
+**Tools:** `status`, `coverage`, `recent_activity`, `search_library`, `item_files`, `file_report`, `set_language_override`, `process_queue`, `queue_scan`, `list_issues`, `issue_evidence` (the measurements and frames behind an issue), `file_streams` (every track in a file), `ignore_issue`, `pending_reviews`, `get_review` (returns frames), `get_frames`, `submit_review`, `list_actions`, `propose_action`, `decide_action`.
 **Prompts:** `review_pending`, `nightly_summary`.
 
 ## API

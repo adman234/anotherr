@@ -176,9 +176,48 @@ def queue_scan(scope: str, ids: list[int] | None = None, disk: str = "", library
 def list_issues(severity: str = "", code: str = "", search: str = "", status: str = "open", page: int = 1) -> str:
     """List detected issues. severity: info|warning|error|critical (comma-separated ok)."""
     res = _get("/api/issues", severity=severity, code=code, search=search, status=status, page=page, per_page=60)
-    lines = [f"{res['total']} issues. Open by code: " + ", ".join(f"{c['code']}({c['severity']})={c['n']}" for c in res["codes"][:15])]
+    by_code = res["codes"]  # every code - the summary always adds up to the open total
+    lines = [f"{res['total']} issues (page {res['page']}). All open issues by code ({sum(c['n'] for c in by_code)}): "
+             + ", ".join(f"{c['code']}({c['severity']})={c['n']}" for c in by_code)]
     for r in res["rows"]:
         lines.append(f"#{r['id']} file {r['file_id']} [{r['severity']}] {r['title']} {r['label'] or ''}: {r['message']}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def issue_evidence(issue_id: int, frames: bool = False) -> list:
+    """What an issue is based on: its details, the relevant scan measurements (scores, thresholds, sampled
+    windows, per-window language detections, subtitle sync/text results) and timestamps worth checking.
+    frames=True also returns those frames (max 8)."""
+    i = _get(f"/api/issues/{issue_id}")
+    out: list = [_j({k: i.get(k) for k in ("id", "file_id", "title", "label", "code", "severity", "message", "status",
+                                           "details", "scan", "evidence", "evidence_ts", "suppressed_by_this_scan")})]
+    if frames:
+        for t in (i.get("evidence_ts") or [])[:MAX_FRAMES]:
+            try:
+                out.append(f"Frame @ {_ts(t)}")
+                out.append(_frame(i["file_id"], t))
+            except httpx.HTTPError as e:
+                out.append(f"(frame at {_ts(t)} failed: {e})")
+    return out
+
+
+@mcp.tool()
+def file_streams(file_id: int) -> str:
+    """Every stream in the file right now (live ffprobe): type, codec, language tag, title, default/forced
+    flags, channels, duration - plus external subtitle files next to it."""
+    r = _get(f"/api/files/{file_id}/streams")
+    lines = [f"{r['path']}  duration {_ts(r['duration'])}  {r['format']}"]
+    for v in r["video"]:
+        lines.append(f"video #{v['index']}: {v['codec']} {v.get('width')}x{v.get('height')} {v.get('field_order') or ''}")
+    for a in r["audio"]:
+        lines.append(f"audio a:{a['a_index']} (#{a['index']}): {a['codec']} {a.get('channels')}ch lang={a['lang_tag'] or 'und'} "
+                     f"title={a['title']!r}{' DEFAULT' if a['default'] else ''}{' commentary' if a.get('commentary') else ''}")
+    for s in r["subs"]:
+        where = "external " + s["path"] if s.get("external") else f"s:{s['s_index']} (#{s['index']})"
+        lines.append(f"subtitle {where}: {s['codec']} lang={s['lang_tag'] or 'und'} title={s['title']!r}"
+                     f"{' DEFAULT' if s['default'] else ''}{' FORCED' if s['forced'] else ''}"
+                     f"{' HI' if s.get('hearing_impaired') else ''}{' (image)' if not s['text'] else ''}")
     return "\n".join(lines)
 
 

@@ -46,11 +46,31 @@ def _startup():
     db.init()
     settings.get()  # load config so the log redactor knows the configured keys
     _scrub_stored_secrets()
+    _requeue_after_detector_fixes()
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
     db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
         scheduler.start()
     db.log(f"Anotherr {__version__} started")
+
+
+# Codes produced by detectors that changed in the Nov 2026 detector fixes - rescan once so stale results clear
+_REVISED_CODES = ["frozen_video", "duration_short", "duration_short_warn", "possible_multi_episode",
+                  "multi_episode_too_short", "segment_break_not_found", "subs_mismatch", "subs_mismatch_partial",
+                  "subs_text_mismatch", "subs_out_of_sync", "subs_signs_only", "default_subs_signs", "dubtitles",
+                  "audio_mislabeled", "original_audio_missing", "decode_errors_severe"]
+
+
+def _requeue_after_detector_fixes():
+    if settings.state_get("detector_fixes_requeued", False):
+        return
+    ids = [r["file_id"] for r in db.q(
+        f"SELECT DISTINCT x.file_id FROM issues x JOIN files f ON f.id = x.file_id WHERE x.status='open' AND f.missing=0 "
+        f"AND x.code IN ({','.join('?' * len(_REVISED_CODES))})", _REVISED_CODES)]
+    if ids:
+        scheduler.enqueue(ids, "standard", "recheck")
+        db.log(f"Detectors were updated: queued {len(ids)} file(s) with affected issues for a rescan")
+    settings.state_set("detector_fixes_requeued", True)
 
 
 def _scrub_stored_secrets():
@@ -81,7 +101,10 @@ def status():
     return {
         "version": __version__,
         "current": dict(scanner.CURRENT),
-        "scheduler": dict(scheduler.STATUS),
+        "scheduler": {**scheduler.STATUS, "next_run": scheduler.next_run(cfg),
+                      "windows": cfg["schedule"].get("windows") or [], "stream_pause": scheduler.stream_mode(cfg),
+                      "streams": [{k: s.get(k) for k in ("title", "disk", "state")}
+                                  for s in scheduler._streams_cache.get("sessions", [])]},
         "paused": bool(settings.state_get("paused", False)),
         "sync": {**sync.STATE, "last": sync.STATE.get("last") or settings.state_get("last_sync")},
         "gpu_decode": {"available": media.HW["cuda"], "reason": media.HW["reason"],
@@ -231,11 +254,27 @@ def frame(file_id: int, t: float, w: int = 768):
         raise HTTPException(404)
     path = scanner.resolve_path(f)
     if not path:
-        raise HTTPException(404, "file not found on disk")
+        scanner.handle_missing(f)
+        raise HTTPException(404, "file not found on disk - resyncing it from Sonarr/Radarr")
     try:
         return Response(media.extract_frame(path, t, max(160, min(w, 1920))), media_type="image/jpeg")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e)) from e
+
+
+@app.get("/api/files/{file_id}/streams", dependencies=[Depends(auth)])
+def file_streams(file_id: int):
+    """Live ffprobe of the file: every stream with codec, language, title, default/forced, duration."""
+    f = db.q1("SELECT * FROM files WHERE id=?", (file_id,))
+    if not f:
+        raise HTTPException(404)
+    path = scanner.resolve_path(f)
+    if not path:
+        scanner.handle_missing(f)
+        raise HTTPException(404, "file not found on disk - resyncing it from Sonarr/Radarr")
+    info = media.summarize(media.ffprobe(path))
+    info["subs"] += media.sidecar_subs(path)
+    return {"file_id": file_id, "path": path, **info}
 
 
 # ====================================================================== scanning
@@ -365,6 +404,39 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
     res["codes"] = db.q("SELECT code, severity, COUNT(*) n FROM issues WHERE status='open' GROUP BY code, severity "
                         "ORDER BY n DESC")
     return res
+
+
+EVIDENCE_KEYS = {
+    "video": ["decode", "freeze_check", "gpu_decode"],
+    "integrity": ["decode", "full_decode", "runtime_estimate", "runtime_ratio", "expected_runtime_s", "segments"],
+    "multi_episode": ["runtime_estimate", "runtime_ratio", "segment_starts", "segment_breaks", "episodes_mapped"],
+    "language": ["audio_tracks", "expected_language", "original_audio_note"],
+    "audio": ["audio_tracks"],
+    "subtitles": ["subtitle_tracks", "subtitle_sync", "subtitle_content", "sync_audio_track", "sync_skipped",
+                  "transcript_sample", "audio_tracks"],
+    "identity": ["title_cards_ocr", "runtime_estimate", "subtitle_sync", "subtitle_content", "audio_tracks"],
+}
+
+
+@app.get("/api/issues/{issue_id}", dependencies=[Depends(auth)])
+def issue_detail(issue_id: int):
+    """An issue with the evidence behind it: thresholds/scores from the scan and timestamps worth looking at."""
+    i = db.q1(ISSUE_SQL + " AND x.id=?", (issue_id,))
+    if not i:
+        raise HTTPException(404)
+    i["details"] = db.unj(i["details"], {})
+    scan = db.q1("SELECT id, profile, seed, finished_at, result FROM scans WHERE id=?", (i["scan_id"],)) if i["scan_id"] else None
+    res = db.unj(scan["result"], {}) if scan else {}
+    i["scan"] = {k: scan[k] for k in ("id", "profile", "seed", "finished_at")} if scan else None
+    i["evidence"] = {k: res[k] for k in EVIDENCE_KEYS.get(i["category"], []) if k in res}
+    i["suppressed_by_this_scan"] = res.get("suppressed", [])
+    ts = list(i["details"].get("evidence_ts") or [])
+    if not ts and isinstance(i["details"].get("target"), (int, float)):
+        ts = [round(i["details"]["target"] + o, 1) for o in (-20, 0, 20)]
+    if not ts and i["details"].get("windows"):
+        ts = [round(w[0] + w[1] / 2, 1) for w in i["details"]["windows"] if isinstance(w, (list, tuple))]
+    i["evidence_ts"] = ts[:8]
+    return i
 
 
 @app.patch("/api/issues/{issue_id}", dependencies=[Depends(auth)])

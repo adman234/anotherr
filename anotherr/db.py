@@ -135,9 +135,19 @@ def conn() -> sqlite3.Connection:
     return c
 
 
+# Columns added after the first release (CREATE TABLE IF NOT EXISTS won't add them to old DBs)
+_ADDED_COLUMNS = [
+    ("files", "duration", "REAL"),  # seconds, from ffprobe; feeds the per-series runtime estimate
+]
+
+
 def init() -> None:
     with _write_lock:
-        conn().executescript(SCHEMA)
+        c = conn()
+        c.executescript(SCHEMA)
+        for table, col, typ in _ADDED_COLUMNS:
+            if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def q(sql: str, args: tuple | list = ()) -> list[dict]:

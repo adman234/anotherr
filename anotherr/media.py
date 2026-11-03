@@ -326,14 +326,18 @@ def _hexdata(dump: str) -> bytes:
         return b""
 
 
-def sub_packets(path: str, windows: list[tuple[float, float]], timeout: float = 600) -> dict[int, list[dict]]:
-    """Subtitle packets (all subtitle streams) inside the given windows only - no full-file read.
+def sub_packets(path: str, windows: list[tuple[float, float]], pad: float = 12.0,
+                timeout: float = 600) -> dict[int, list[dict]]:
+    """Subtitle packets (all subtitle streams) around the given windows only - no full-file read.
 
-    Returns {stream_index: [{start, dur, size, data}]} with absolute timestamps.
+    Each window is read with `pad` seconds either side (the sync check correlates at offsets up to
+    +/-12 s). Returns {stream_index: [{start, dur, size, data}]} with absolute timestamps.
     """
     if not windows:
         return {}
-    intervals = ",".join(f"{max(0.0, s):.3f}%+{d:.3f}" for s, d in windows)
+    # Absolute end times: with "start%+duration" ffprobe counts the duration from the keyframe it
+    # actually seeked to (before `start`), which silently drops the cues at the end of each window.
+    intervals = ",".join(f"{max(0.0, s - pad):.3f}%{s + d + pad:.3f}" for s, d in windows)
     cmd = [FFPROBE, "-v", "error", "-read_intervals", intervals, "-select_streams", "s",
            "-show_packets", "-show_data", "-of", "json", path]
     try:

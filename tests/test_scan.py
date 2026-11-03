@@ -40,15 +40,19 @@ def video(tmp_path_factory):
 
 @pytest.fixture
 def fake_whisper(monkeypatch):
-    last = {}
+    # Remember which window each extracted clip came from. The scanner reads every window first and
+    # analyses afterwards, so "the last window read" would be the wrong start for most clips.
+    starts = {}
     real_extract = media.extract_audio_multi
 
     def extract(path, idxs, s, d):
-        last["start"] = s
-        return real_extract(path, idxs, s, d)
+        out = real_extract(path, idxs, s, d)
+        for audio in out.values():
+            starts[id(audio)] = (s, audio)  # keep a reference so the id stays unique
+        return out
 
     def vad(audio):
-        s = last["start"]
+        s = starts[id(audio)][0]
         e = s + audio.size / stt.SR
         return [(max(a, s) - s, min(b, e) - s) for a, b in CUES if b > s and a < e]
 
@@ -58,7 +62,7 @@ def fake_whisper(monkeypatch):
         return ("ja", 0.97, []) if freq > 660 else ("en", 0.96, [])
 
     def transcribe(audio, language):
-        s = last["start"]
+        s = starts[id(audio)][0]
         return [(a - s, b - s, t) for (a, b), t in zip(CUES, TEXTS)]
 
     monkeypatch.setattr(media, "extract_audio_multi", extract)
@@ -154,3 +158,13 @@ def test_automation_runs_when_enabled(video, fake_whisper, monkeypatch):
     scanner.scan_file(fid, "standard")
     assert calls == [fid]
     assert db.q1("SELECT status, auto FROM actions WHERE file_id=?", (fid,)) == {"status": "done", "auto": 1}
+
+
+def test_sub_packets_keep_cues_at_window_end(video):
+    """ffprobe 'start%+dur' measures from the seeked keyframe and dropped the last cues of each window."""
+    pk = media.sub_packets(str(video), [(27.1, 15.0), (48.1, 15.0)])
+    s_full = min(pk)  # first subtitle stream = the full English track
+    starts = {round(p["start"]) for p in pk[s_full]}
+    assert {28, 31, 34, 37, 40} <= starts and {49, 52, 55, 58, 61} <= starts
+    texts = [media.text_from_packet("subrip", p["data"])[1] for p in pk[s_full] if round(p["start"]) == 40]
+    assert texts == [TEXTS[13]]

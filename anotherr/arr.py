@@ -4,10 +4,15 @@ from __future__ import annotations
 import httpx
 
 from . import settings
+from .redact import redact
 
 
 class ServiceError(RuntimeError):
-    pass
+    """Errors from *arr/Tautulli calls. Messages are redacted: httpx errors embed the full URL,
+    and Tautulli's URL carries its API key."""
+
+    def __init__(self, message: str = ""):
+        super().__init__(redact(message))
 
 
 class Client:

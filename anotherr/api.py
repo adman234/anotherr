@@ -13,7 +13,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, media, paths, scanner, scheduler, settings, stt, sync, unraid
+from . import __version__, actions, arr, db, media, paths, redact, scanner, scheduler, settings, stt, sync, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -42,12 +42,28 @@ def auth(request: Request):
 
 
 def _startup():
+    redact.install()
     db.init()
+    settings.get()  # load config so the log redactor knows the configured keys
+    _scrub_stored_secrets()
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
     db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
         scheduler.start()
     db.log(f"Anotherr {__version__} started")
+
+
+def _scrub_stored_secrets():
+    """One-off clean-up of secrets that older versions may have written into the activity feed etc."""
+    n = 0
+    for table, col in (("activity", "message"), ("scans", "error"), ("actions", "result")):
+        for row in db.q(f"SELECT id, {col} AS v FROM {table} WHERE {col} != ''"):
+            clean = redact.redact(row["v"])
+            if clean != row["v"]:
+                db.x(f"UPDATE {table} SET {col}=? WHERE id=?", (clean, row["id"]))
+                n += 1
+    if n:
+        log.info("Removed secrets from %d stored log/error entries", n)
 
 
 def page(sql_base: str, args: list, page_no: int, per: int, order: str) -> dict:

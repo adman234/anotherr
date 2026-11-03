@@ -189,6 +189,10 @@ def unj(v: str | None, default: Any = None) -> Any:
 def log(message: str, level: str = "info") -> None:
     import logging
 
+    from .redact import redact
+
+    message = redact(message)
+
     logging.getLogger("anotherr").log(
         {"info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}.get(level, logging.INFO), message
     )

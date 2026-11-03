@@ -1,4 +1,12 @@
-"""Background worker: manual/import queue, scheduled scans in time windows with disk rotation, pauses, automation."""
+"""Background worker: scan slots, disk choice, pauses, automation.
+
+Scans run in slots: up to `max_disks` hard-drive slots (each on a different disk) plus one cache/SSD slot.
+Each slot takes the cheapest work first:
+  cache/SSD slot: queued files on cache, then scheduled files on cache
+  hard-drive slot: queued files on a spinning disk, scheduled files on a spinning disk (sticking with the disk
+                   it's on), queued files on an idle disk, then wakes the next idle disk in rotation
+Nothing new starts during a manual pause, parity check, mover run or quiet window.
+"""
 from __future__ import annotations
 
 import logging
@@ -11,7 +19,8 @@ from .schedule_util import active_window, next_window_start
 
 log = logging.getLogger("anotherr.scheduler")
 
-STATUS: dict = {"pause_reasons": [], "mode": "idle", "window": None, "disk": None, "window_count": 0}
+STATUS: dict = {"pause_reasons": [], "mode": "idle", "slots": [], "busy_disks": []}
+FAST_SLOT = "cache"
 _streams_cache = {"t": 0.0, "n": 0, "err": "", "sessions": [], "busy_disks": set()}
 
 
@@ -57,22 +66,6 @@ def next_files(disks: list[str] | None, rescan_days: float, limit: int = 1, excl
 
 def all_disks() -> list[str]:
     return [r["disk"] for r in db.q("SELECT DISTINCT disk FROM files WHERE missing=0 ORDER BY disk")]
-
-
-def candidate_disks(cfg: dict) -> list[str] | None:
-    """None = no disk restriction."""
-    sc = cfg["schedule"]
-    mode = sc.get("disk_mode", "all")
-    known = all_disks()
-    if mode == "all":
-        return None
-    if mode == "specific":
-        return [d for d in sc.get("disks", []) if d in known]
-    if mode == "spun_up":
-        up = unraid.spun_up_disks()
-        return None if up is None else [d for d in known if d in up or d == ""]
-    chosen = [d for d in (sc.get("disks") or known) if d in known]  # rotate
-    return chosen
 
 
 # ------------------------------------------------------------------ pauses
@@ -132,6 +125,12 @@ def pause_reasons(cfg: dict) -> list[str]:
     sc = cfg["schedule"]
     if sc.get("pause_on_parity") and unraid.parity_running():
         r.append("parity check running")
+    if sc.get("pause_on_mover", True) and unraid.mover_running():
+        r.append("mover running")
+    qw = sc.get("quiet_windows") or []
+    hit = active_window(qw) if qw else None
+    if hit:
+        r.append(f"quiet window until {hit[0].get('end')}")
     if stream_mode(cfg) == "any":
         n = stream_count()
         if n > int(sc.get("max_streams", 0)):
@@ -144,9 +143,12 @@ def pause_reasons(cfg: dict) -> list[str]:
 # ------------------------------------------------------------------ worker
 
 class Worker(threading.Thread):
-    def __init__(self):
+    def __init__(self, inline: bool = False):
         super().__init__(daemon=True, name="anotherr-worker")
         self.stop = threading.Event()
+        self.inline = inline  # tests: run scans synchronously instead of in slot threads
+        self.active: dict[str, dict] = {}  # slot -> {"thread", "disk", "file_id"}
+        self.last_disk: dict[str, str] = {}
         self._last_auto = 0.0
         self._last_poll = 0.0
         self._last_recheck = 0.0
@@ -159,10 +161,12 @@ class Worker(threading.Thread):
                 worked = self.tick()
             except Exception:  # noqa: BLE001
                 log.exception("worker tick failed")
-            self.stop.wait(1 if worked else 10)
+            self.stop.wait(1 if worked else (2 if self.active else 10))
 
+    # -------------------------------------------------------------- main loop
     def tick(self) -> bool:
         cfg = settings.get()
+        sc = cfg["schedule"]
         self._maybe_sync(cfg)
         stt.WHISPER.maybe_unload_idle()
         reasons = pause_reasons(cfg)
@@ -173,114 +177,164 @@ class Worker(threading.Thread):
                 actions.maybe_auto()
             except Exception:  # noqa: BLE001
                 log.exception("automation failed")
-
         self._periodic(cfg)
+        self._reap()
+
+        if scanner.CANCEL.is_set():  # "stop scan": wait for running scans to stop, then carry on
+            if self.active:
+                STATUS["mode"] = "stopping scans"
+                return False
+            scanner.CANCEL.clear()
+
         force = bool(settings.state_get("force_queue", False))
-        busy = set() if force else busy_disks(cfg)
-        STATUS["busy_disks"] = sorted(busy)
-        jobs = db.q("SELECT q.*, f.disk FROM queue q JOIN files f ON f.id = q.file_id WHERE q.created_at <= ? "
-                    "ORDER BY CASE q.source WHEN 'manual' THEN 0 WHEN 'import' THEN 1 ELSE 2 END, q.created_at LIMIT 200",
-                    (float("inf") if force else time.time(),))
-        job = next((j for j in jobs if j["disk"] not in busy), None)
-        if force and not jobs:
+        if force and not db.scalar("SELECT COUNT(*) FROM queue"):
             settings.state_set("force_queue", False)  # queue drained
             db.log("Queue processed")
-        blocked = ("queue waiting: Plex is reading " + ", ".join(sorted(busy))) if jobs and not job else None
-        if job:
-            manual_paused = "paused manually" in reasons
-            if not force and (manual_paused or (reasons and cfg["schedule"].get("manual_respects_pause", True))):
-                STATUS["mode"] = "queue waiting: " + ", ".join(reasons)
-                return False
-            STATUS["mode"] = f"processing queue ({job['source']})" + (" - forced" if force else "")
-            f = db.q1("SELECT id FROM files WHERE id=? AND missing=0", (job["file_id"],))
-            if not f:
-                db.x("DELETE FROM queue WHERE id=?", (job["id"],))
-                return True
-            scanner.scan_file(job["file_id"], job["profile"], job["source"])
-            db.x("DELETE FROM queue WHERE id=?", (job["id"],))
-            return True
-        worked = self._scheduled(cfg, reasons, busy)
-        if not worked and blocked:
-            STATUS["mode"] = blocked
-        return worked
+            force = False
+        busy = set() if force else busy_disks(cfg)
+        STATUS["busy_disks"] = sorted(busy)
+        queue_ok = force or not reasons
+        sched_ok = not reasons and bool(sc.get("enabled"))
+        if reasons and not force:
+            STATUS["mode"] = "paused: " + ", ".join(reasons)
+        started = 0
+        if queue_ok or sched_ok:
+            ctx = self._disk_context(cfg, busy)
+            if sc.get("cache_slot", True) and FAST_SLOT not in self.active:
+                started += self._fill(FAST_SLOT, cfg, ctx, queue_ok, sched_ok and not force, fast=True)
+            hdd_slots = [f"hdd{i + 1}" for i in range(max(0, int(sc.get("max_disks", 1) or 0)))]
+            for slot in hdd_slots:
+                if slot not in self.active:
+                    started += self._fill(slot, cfg, ctx, queue_ok, sched_ok and not force, fast=False)
+        self._publish(reasons, force)
+        return bool(started)
 
-    def _scheduled(self, cfg: dict, reasons: list[str], busy: set[str]) -> bool:
-        sc = cfg["schedule"]
-        if not sc.get("enabled"):
-            STATUS.update(mode="idle (schedule disabled)", window=None)
-            return False
-        win = active_window(sc.get("windows") or [])
-        if not win:
-            STATUS.update(mode="idle (outside scan window)", window=None)
-            return False
-        if reasons:
-            STATUS["mode"] = "paused"
-            return False
-        w, key = win
-        st = settings.state_get("window", {}) or {}
-        if st.get("key") != key:
-            st = {"key": key, "count": 0, "tried": [], "disk": self._first_disk(cfg)}
-        STATUS.update(window="anytime" if w.get("anytime") else f"{w.get('start')}-{w.get('end')}",
-                      window_count=st["count"], disk=st.get("disk"))
-        cap = int(sc.get("max_files_per_window", 0) or 0)
-        if cap and st["count"] >= cap:
-            STATUS["mode"] = "idle (window limit reached)"
-            settings.state_set("window", st)
-            return False
-        if busy and st.get("disk") in busy and sc.get("disk_mode") == "rotate":
-            STATUS["mode"] = f"waiting: Plex is reading {st['disk']} (this window's disk)"
-            return False
-        f = self._pick(cfg, st, busy)
-        settings.state_set("window", st)
-        if not f:
+    def _reap(self):
+        for slot, a in list(self.active.items()):
+            if not a["thread"].is_alive():
+                self.active.pop(slot, None)
+
+    def _publish(self, reasons, force):
+        live = {s["slot"]: s for s in scanner.current_scans()}
+        STATUS["slots"] = [dict(live.get(slot, {}), slot=slot, disk=a["disk"], why=a["why"]) for slot, a in self.active.items()]
+        if STATUS["slots"]:
+            STATUS["mode"] = ("processing queue (forced) - " if force else "scanning: ") + ", ".join(
+                f"{s['disk'] or 'disk?'} ({s['why']})" for s in STATUS["slots"])
+        elif not reasons or force:
             STATUS["mode"] = "idle (nothing due)"
-            return False
-        STATUS["mode"] = "scheduled scan"
-        scanner.scan_file(f["id"], sc.get("profile") or cfg["scan"]["default_profile"], "scheduled")
-        st["count"] += 1
-        settings.state_set("window", st)
-        STATUS["window_count"] = st["count"]
-        return True
 
-    # -------------------------------------------------------------- helpers
-    def _first_disk(self, cfg: dict) -> str | None:
-        if cfg["schedule"].get("disk_mode") != "rotate":
-            return None
-        disks = candidate_disks(cfg) or []
-        if not disks:
-            return None
-        last = settings.state_get("rotation_last")
-        nxt = disks[(disks.index(last) + 1) % len(disks)] if last in disks else disks[0]
-        settings.state_set("rotation_last", nxt)
-        return nxt
+    # -------------------------------------------------------------- choosing work
+    def _disk_context(self, cfg: dict, busy: set[str]) -> dict:
+        state = unraid.disks_state()
+        spun = unraid.spun_up_disks()  # None = unknown (not Unraid / emhttp not mounted)
+        disks = all_disks()
+        only = set(cfg["schedule"].get("disks") or [])
+        fast = {d for d in disks if unraid.is_fast_disk(d, state)}
+        return {"state": state, "spun": spun, "disks": disks, "only": only, "fast": fast, "busy": busy,
+                "taken": {a["disk"] for a in self.active.values()}}
 
-    def _pick(self, cfg: dict, st: dict, busy: set[str] | None = None) -> dict | None:
+    def _queue_job(self, ctx: dict, disks: set[str] | None, exclude: set[str]) -> dict | None:
+        """Next due queue job on one of `disks` (None = any disk not excluded)."""
+        force = bool(settings.state_get("force_queue", False))
+        rows = db.q("SELECT q.*, f.disk FROM queue q JOIN files f ON f.id = q.file_id WHERE f.missing=0 AND "
+                    "q.created_at <= ? ORDER BY CASE q.source WHEN 'manual' THEN 0 WHEN 'import' THEN 1 ELSE 2 END, "
+                    "q.created_at LIMIT 500", (float("inf") if force else time.time(),))
+        for r in rows:
+            if r["disk"] in exclude or r["file_id"] in {a["file_id"] for a in self.active.values()}:
+                continue
+            if disks is None or r["disk"] in disks:
+                return r
+        return None
+
+    def _fill(self, slot: str, cfg: dict, ctx: dict, queue_ok: bool, sched_ok: bool, fast: bool) -> int:
         sc = cfg["schedule"]
         rescan = float(sc.get("rescan_after_days", 180))
-        mode = sc.get("disk_mode", "all")
-        if mode != "rotate":
-            disks = candidate_disks(cfg)
-            if mode == "spun_up" and disks and st.get("disk") in disks and st.get("disk") not in (busy or ()):
-                got = next_files([st["disk"]], rescan)  # stay on the disk that's already spinning
+        profile = sc.get("profile") or cfg["scan"]["default_profile"]
+        taken = ctx["taken"] | ctx["busy"]
+        pick = None  # (file_id, profile, source, why, queue_id, disk)
+        if fast:
+            pool = ctx["fast"] - taken
+            if queue_ok and pool:
+                j = self._queue_job(ctx, pool, taken)
+                if j:
+                    pick = (j["file_id"], j["profile"], j["source"], f"cache/SSD - {j['source']}", j["id"], j["disk"])
+            if not pick and sched_ok:
+                allowed = sorted((pool & ctx["only"]) if ctx["only"] else pool)
+                got = next_files(allowed, rescan) if allowed else []
                 if got:
-                    return got[0]
-            got = next_files(disks, rescan, exclude=busy)
-            if got:
-                st["disk"] = got[0]["disk"]
-            return got[0] if got else None
-        disks = candidate_disks(cfg) or []
-        while st.get("disk") is not None:
-            got = next_files([st["disk"]], rescan)
-            if got:
-                return got[0]
-            st.setdefault("tried", []).append(st["disk"])
-            remaining = [d for d in disks if d not in st["tried"]]
-            if not remaining:
-                st["disk"] = None
-                break
-            st["disk"] = remaining[0]
-            settings.state_set("rotation_last", st["disk"])
-        return None
+                    pick = (got[0]["id"], profile, "scheduled", "cache/SSD", None, got[0]["disk"])
+        else:
+            hdds = set(ctx["disks"]) - ctx["fast"]
+            spinning = hdds if ctx["spun"] is None else hdds & set(ctx["spun"])
+            exclude = taken | ctx["fast"]
+            sticky = self.last_disk.get(slot)
+            allowed = (lambda ds: ds & ctx["only"]) if ctx["only"] else (lambda ds: ds)
+            # 1. queued files on a disk that's already spinning
+            if queue_ok:
+                j = self._queue_job(ctx, spinning - exclude, exclude)
+                if j:
+                    pick = (j["file_id"], j["profile"], j["source"], f"already spinning - {j['source']}", j["id"], j["disk"])
+            # 2. scheduled files on a spinning disk, staying on this slot's disk while it has work
+            if not pick and sched_ok:
+                cands = allowed(spinning - exclude)
+                order = ([sticky] if sticky in cands else []) + sorted(cands - {sticky})
+                for d in order:
+                    got = next_files([d], rescan)
+                    if got:
+                        pick = (got[0]["id"], profile, "scheduled", "already spinning", None, d)
+                        break
+            # 3. queued files on an idle disk (you asked for them, so they may wake it)
+            if not pick and queue_ok:
+                j = self._queue_job(ctx, None, exclude)
+                if j:
+                    pick = (j["file_id"], j["profile"], j["source"], f"woke disk - {j['source']}", j["id"], j["disk"])
+            # 4. wake the next idle disk in rotation
+            if not pick and sched_ok and self._may_spin_up(sc):
+                idle = sorted(allowed(hdds - spinning - exclude))
+                if idle:
+                    last = settings.state_get("rotation_last")
+                    start = (idle.index(last) + 1) if last in idle else 0
+                    for d in idle[start:] + idle[:start]:
+                        got = next_files([d], rescan)
+                        if got:
+                            settings.state_set("rotation_last", d)
+                            pick = (got[0]["id"], profile, "scheduled", "woke idle disk (rotation)", None, d)
+                            break
+        if not pick:
+            return 0
+        fid, prof, source, why, qid, disk = pick
+        ctx["taken"].add(disk)
+        self.last_disk[slot] = disk
+        self._start(slot, fid, prof, source, why, qid, disk)
+        return 1
+
+    @staticmethod
+    def _may_spin_up(sc: dict) -> bool:
+        mode = sc.get("spinup", "anytime")
+        if mode == "never":
+            return False
+        if mode == "windows":
+            w = sc.get("windows") or []
+            return bool(w) and active_window(w) is not None
+        return True
+
+    def _start(self, slot, fid, profile, source, why, qid, disk):
+        def run():
+            try:
+                scanner.scan_file(fid, profile, source, slot=slot, why=why)
+            except Exception:  # noqa: BLE001
+                log.exception("scan failed in slot %s", slot)
+            finally:
+                if qid:
+                    db.x("DELETE FROM queue WHERE id=?", (qid,))
+
+        t = threading.Thread(target=run, daemon=True, name=f"anotherr-scan-{slot}")
+        self.active[slot] = {"thread": t, "disk": disk, "file_id": fid, "why": why}
+        if self.inline:
+            t.run()
+            self.active.pop(slot, None)
+        else:
+            t.start()
 
     def _periodic(self, cfg: dict):
         now = time.time()
@@ -340,11 +394,14 @@ def next_run(cfg: dict) -> dict:
         return {"at": time.time(), "why": f"{due} queued file(s)"}
     if not sc.get("enabled"):
         return {"at": None, "why": "scheduled scanning is turned off; only queued scans run"}
-    if active_window(sc.get("windows") or []):
-        return {"at": time.time(), "why": "inside a scan window" if sc.get("windows") else "no window set - scans anytime"}
-    nxt = next_window_start(sc.get("windows") or [])
-    return {"at": nxt.timestamp() if nxt else None,
-            "why": f"next scan window opens {nxt:%a %H:%M}" if nxt else "no upcoming window"}
+    spin = sc.get("spinup", "anytime")
+    w = sc.get("windows") or []
+    if spin == "windows" and not (w and active_window(w)):
+        nxt = next_window_start(w)
+        return {"at": time.time(), "why": "scanning cache and spinning disks; idle disks wake "
+                + (f"from {nxt:%a %H:%M}" if nxt else "never (no spin-up window set)")}
+    return {"at": time.time(), "why": "around the clock: cache first, then spinning disks, then wakes one idle disk"
+            + ("" if spin != "never" else " (never wakes idle disks)")}
 
 
 WORKER: Worker | None = None

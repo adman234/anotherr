@@ -100,7 +100,8 @@ def status():
     cfg = settings.get()
     return {
         "version": __version__,
-        "current": dict(scanner.CURRENT),
+        "current": (scanner.current_scans() or [{}])[0],  # first running scan (older clients)
+        "scans": scanner.current_scans(),
         "scheduler": {**scheduler.STATUS, "next_run": scheduler.next_run(cfg),
                       "windows": cfg["schedule"].get("windows") or [], "stream_pause": scheduler.stream_mode(cfg),
                       "streams": [{k: s.get(k) for k in ("title", "disk", "state")}

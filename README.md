@@ -32,15 +32,19 @@ Every scan stores its random seed, so results are reproducible.
 
 ## Scheduling (Unraid-aware)
 
-- **Scan windows** per weekday (overnight windows work, e.g. 23:00–06:00), optionally with a cap on files per window. **Remove every window to scan at any time.** The dashboard shows when the next scan will run and why.
-- **Disk modes**:
-  - `all`: the whole array, by priority
-  - `rotate`: one disk per window, round-robin
-  - `spun_up`: only disks that are already spinning (from emhttp's `disks.ini`)
-  - `specific`: only the disks you pick
+Scanning runs **around the clock** in slots:
+
+| Slot | Takes, in order |
+|---|---|
+| **Cache/SSD** (one extra slot, on by default) | queued files on cache/pools, then scheduled files there. No spin-up and no playback contention, and these are mostly fresh downloads waiting for the mover |
+| **Hard drives** (`max_disks`, default 1, each slot on a different disk) | queued files on a disk that's already spinning → scheduled files on spinning disks (staying on the same disk while it has work) → queued files on an idle disk → wakes the next idle disk in rotation |
+
+- **Spin up idle disks:** `anytime` (default), only inside the spin-up `windows`, or `never`. Queued scans you asked for may always wake a disk.
+- **Quiet windows:** no new scans start, e.g. 02:30–04:30 while scheduled updates or backups run. Running scans finish first.
+- **Pauses:** manual pause, parity check, and mover. Plex streams don't pause scanning by default: a stream reads a few MB/s, and scans run at the lowest disk priority. `stream_pause` can be set to `same_disk` (skip the disk Plex is reading) or `any`.
+- The dashboard shows each slot's disk and why it was picked, and when the next scan will run.
 - Files are read straight from `/mnt/diskN` (bypassing shfs) once their disk is known.
-- **Queued scans run any time** (windows don't apply). They wait during parity checks, Plex streams or a manual pause; **Process queue now** (Queue page / dashboard, or the `process_queue` MCP tool) works through the whole queue ignoring those pauses.
-- **Pauses** during parity checks. While Plex streams (via Tautulli), by default only files on the **disk Plex is reading** are skipped; everything else keeps scanning (`stream_pause`: same_disk / any / off).
+- **Queued scans** use the same slots and pauses. **Process queue now** (Queue page / dashboard, or the `process_queue` MCP tool) works through the whole queue, ignoring pauses.
 - **Priority**: never-checked files first, then recent imports, files whose release group has a bad track record, files with earlier problems, and the longest time since the last check.
 - **New imports** get a quick scan straight away: through Sonarr/Radarr webhooks, a history check every 15 minutes, or the next library sync, so webhooks are optional.
 - The Whisper model is unloaded after it sits idle, so Plex gets the VRAM back.

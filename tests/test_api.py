@@ -65,13 +65,14 @@ def test_process_queue_ignores_pauses(monkeypatch):
     fids = [db.x("INSERT INTO files(item_id, arr_file_id, arr_path, first_seen) VALUES (?, ?, '/tv/x.mkv', ?)",
                  (iid, n, time.time())) for n in (1, 2)]
     scanned = []
-    monkeypatch.setattr(scanner, "scan_file", lambda fid, p, s: scanned.append(fid) or db.x("DELETE FROM queue WHERE file_id=?", (fid,)))
-    monkeypatch.setattr(scheduler, "pause_reasons", lambda cfg: ["1 active Plex stream(s)"])
+    monkeypatch.setattr(scanner, "scan_file", lambda fid, p, s, **kw: scanned.append(fid) or db.x("DELETE FROM queue WHERE file_id=?", (fid,)))
+    monkeypatch.setattr(scheduler, "pause_reasons", lambda cfg: ["parity check running"])
     with client() as c:
         c.post("/api/scan", json={"scope": "item", "ids": [iid], "profile": "quick"})
-        w = scheduler.Worker()
+        w = scheduler.Worker(inline=True)
+        w._last_poll = w._last_recheck = time.time()
         w.tick()
-        assert scanned == [] and scheduler.STATUS["mode"].startswith("queue waiting")
+        assert scanned == [] and scheduler.STATUS["mode"].startswith("paused")
         c.post("/api/queue/process")
         w.tick(); w.tick(); w.tick()
         assert sorted(scanned) == sorted(fids)
@@ -159,3 +160,15 @@ def test_files_with_revised_issue_codes_are_requeued_once():
     db.x("DELETE FROM queue")
     api._requeue_after_detector_fixes()
     assert db.scalar("SELECT COUNT(*) FROM queue") == 0
+
+
+def test_retired_settings_are_dropped():
+    from anotherr import settings
+
+    db.x("INSERT INTO settings(key, value) VALUES('config', ?)",
+         (db.j({"_v": 2, "schedule": {"disk_mode": "rotate", "max_files_per_window": 150, "max_disks": 2},
+                "scan": {"profiles": {"standard": {"seconds": 60}}}}),))
+    settings._cache = None
+    s = settings.get()
+    assert "disk_mode" not in s["schedule"] and "max_files_per_window" not in s["schedule"]
+    assert s["schedule"]["max_disks"] == 2 and s["scan"]["profiles"]["standard"]["seconds"] == 60

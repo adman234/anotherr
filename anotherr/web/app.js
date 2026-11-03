@@ -83,7 +83,7 @@ async function dashboard() {
       <div class="card"><div class="muted">Scanner</div><div style="font-weight:600;margin:4px 0">${s.current.file_id ? `${esc(s.current.title)} ${esc(s.current.label || "")}` : esc(s.scheduler.mode)}</div>
         <div class="small muted">Next: ${esc(s.scheduler.next_run ? s.scheduler.next_run.why : "")}${s.scheduler.windows && !s.scheduler.windows.length ? " · no scan window set (scans anytime)" : ""}</div>
         ${(s.scheduler.streams || []).length ? `<div class="small muted">Plex: ${s.scheduler.streams.map((x) => `${esc(x.title)}${x.disk ? ` (${esc(x.disk)})` : ""}`).join(", ")}${s.scheduler.stream_pause === "same_disk" ? " - skipping only those disks" : ""}</div>` : ""}
-        <div class="small muted">${s.current.file_id ? esc(s.current.step) : ""} ${s.scheduler.window ? `window ${esc(s.scheduler.window)} · ${s.scheduler.window_count} done` : ""} ${s.scheduler.disk ? `· disk ${esc(s.scheduler.disk)}` : ""}</div>
+        ${(s.scheduler.slots || []).map((x) => `<div class="small"><span class="pill">${esc(x.slot)}</span> ${esc(x.disk || "?")} · ${esc(x.title || "")} ${esc(x.label || "")} <span class="muted">· ${esc(x.why || "")} · ${esc(x.step || "")}</span></div>`).join("")}
         <div class="toolbar" style="margin:8px 0 0">
           <button onclick="act(()=>api('/api/control/pause',{method:'POST',body:{paused:${!s.paused}}}),'${s.paused ? "Resumed" : "Paused"}')">${s.paused ? "Resume" : "Pause"}</button>
           ${s.current.file_id ? `<button class="danger" onclick="act(()=>api('/api/scan/stop',{method:'POST'}),'Stopping')">Stop scan</button>` : ""}
@@ -326,14 +326,17 @@ const HELP = {
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
   "review.title_cards": "When to queue title-card checks: never | multi_episode | flagged | always.",
   "review.visual_quality_on_deep": "Deep scans queue a picture-quality check (hardcoded subs, watermarks, cam rips).",
-  "schedule.disk_mode": "all = whole array by priority · rotate = one disk per window · spun_up = only disks already spinning · specific = only the disks below.",
-  "schedule.disks": "Disks for 'specific' mode (or to limit 'rotate').",
+  "schedule.max_disks": "Hard drives scanned at the same time (each slot works on a different disk).",
+  "schedule.cache_slot": "One extra slot for cache/SSD pools - no spin-up and no playback contention, so new downloads get checked right away.",
+  "schedule.spinup": "Waking idle disks for scheduled scans: anytime · windows (only inside the spin-up windows below) · never. Queued scans you asked for may always wake a disk.",
+  "schedule.quiet_windows": "No new scans start during these (e.g. while scheduled updates or backups run). Running scans finish first.",
+  "schedule.pause_on_mover": "Don't start scans while Unraid's mover is running.",
+  "schedule.disks": "Only scan these disks with scheduled scans (none ticked = all disks).",
   "schedule.rescan_after_days": "Files are re-checked after this many days.",
   "schedule.max_streams": "Only for stream pause 'any': pause when Plex has more than this many active streams.",
   "schedule.stream_pause": "same_disk = while Plex streams, skip files on the disk it is reading (others keep scanning) · any = pause all scanning during streams · off. Needs Tautulli.",
   "schedule.pause_on_streams": "Master switch for the stream pause below.",
-  "schedule.max_files_per_window": "0 = no limit.",
-  "schedule.windows": "Scheduled scanning only runs inside these windows. Remove every window to scan at any time.",
+  "schedule.windows": "Spin-up windows: only used when Spin up = windows. Cache and already-spinning disks are scanned around the clock.",
   "automation.windows": "Automation only acts inside these windows. Remove every window to allow it at any time.",
   "review.ocr_title_cards": "Read title cards automatically (OCR). A match passes the review; another episode's title raises 'wrong content'; no readable text leaves it for you or Claude.",
   "schedule.manual_respects_pause": "Manual/import scans also wait during parity checks and active streams.",
@@ -377,8 +380,8 @@ const pretty = (k) => k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
 function render(path, val) {
   return Object.entries(val).map(([k, v]) => {
     const p = `${path}.${k}`;
-    if (k === "windows") return field(p, pretty(k), `<div data-win="${p}">${v.map(winRow).join("")}</div><button class="sm" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend', winRow({days:[0,1,2,3,4,5,6],start:'01:00',end:'07:00'}))">+ Add window</button>`);
-    if (p === "schedule.disk_mode") return field(p, pretty(k), `<select data-k="${p}">${["all", "rotate", "spun_up", "specific"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
+    if (k.endsWith("windows")) { const dflt = k === "quiet_windows" ? ["02:30", "04:30"] : ["01:00", "07:00"]; return field(p, pretty(k), `<div data-win="${p}">${v.map(winRow).join("")}</div><button class="sm" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend', winRow({days:[0,1,2,3,4,5,6],start:'${dflt[0]}',end:'${dflt[1]}'}))">+ Add window</button>`); }
+    if (p === "schedule.spinup") return field(p, "Spin up idle disks", `<select data-k="${p}">${["anytime", "windows", "never"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.stream_pause") return field(p, pretty(k), `<select data-k="${p}">${["same_disk", "any", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "review.title_cards") return field(p, pretty(k), `<select data-k="${p}">${["never", "multi_episode", "flagged", "always"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.profile" || p === "scan.default_profile" || p === "imports.profile") return field(p, pretty(k), `<select data-k="${p}">${["quick", "standard", "deep"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);

@@ -11,6 +11,13 @@ from .unraid import locate
 log = logging.getLogger("anotherr.sync")
 _lock = threading.Lock()
 STATE: dict = {"running": False, "last": None, "last_error": "", "progress": ""}
+_tl = threading.local()  # per-thread list of files that are new/replaced in the current sync
+
+
+def _changed() -> list[int]:
+    if not hasattr(_tl, "ids"):
+        _tl.ids = []
+    return _tl.ids
 
 
 def map_path(p: str) -> str:
@@ -57,15 +64,32 @@ def _upsert_file(item_id, arr_file_id, arr_path, size, episodes, label, group, q
         return existing["id"]
     disk, read_path = locate(local)
     if existing:  # file was replaced in place: reset scan state
+        _changed().append(existing["id"])
         db.x("""UPDATE files SET arr_path=?, local_path=?, disk=?, size=?, episodes=?, label=?, release_group=?,
                 quality=?, date_added=?, missing=0, status='unscanned', last_scan_at=NULL, open_issues=0 WHERE id=?""",
              (arr_path, read_path, disk, size, db.j(episodes), label, group, quality, date_added, existing["id"]))
         db.x("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open'", (now, existing["id"]))
         return existing["id"]
-    return db.x("""INSERT INTO files(item_id, arr_file_id, arr_path, local_path, disk, size, episodes, label,
-                   release_group, quality, date_added, first_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (item_id, arr_file_id, arr_path, read_path, disk, size, db.j(episodes), label, group, quality,
-                 date_added, now))
+    fid = db.x("""INSERT INTO files(item_id, arr_file_id, arr_path, local_path, disk, size, episodes, label,
+                  release_group, quality, date_added, first_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (item_id, arr_file_id, arr_path, read_path, disk, size, db.j(episodes), label, group, quality,
+                date_added, now))
+    _changed().append(fid)
+    return fid
+
+
+def queue_changed(reason: str = "sync") -> int:
+    """Queue a scan for files that appeared or were replaced (skipped on the very first sync)."""
+    from . import scheduler
+
+    ids = sorted(set(_changed()))
+    _changed().clear()
+    cfg = settings.get()["imports"]
+    if not ids or not cfg.get("enabled") or not settings.state_get("initial_sync_done", False):
+        return 0
+    n = scheduler.enqueue(ids, cfg.get("profile", "quick"), "import")
+    db.log(f"Queued {n} new/replaced file(s) for a {cfg.get('profile', 'quick')} scan ({reason})")
+    return n
 
 
 def _mark_missing(item_id: int, seen: set[int]):
@@ -124,7 +148,8 @@ def sync_movie(m: dict) -> int:
     is_anime = "Animation" in genres and langs.norm(olang.get("name", "")) == "jpn"
     item_id = _upsert_item("radarr", m["id"], m.get("title", "?"), m.get("year"), "movie", is_anime, olang,
                            m.get("runtime"), m.get("monitored", True), m.get("path", ""),
-                           {"tmdbId": m.get("tmdbId"), "imdbId": m.get("imdbId"), "genres": genres})
+                           {"tmdbId": m.get("tmdbId"), "imdbId": m.get("imdbId"), "genres": genres,
+                            "originalTitle": m.get("originalTitle") or ""})
     mf = m.get("movieFile")
     if not mf:
         _mark_missing(item_id, set())
@@ -139,6 +164,7 @@ def full_sync() -> dict:
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "sync already running"}
     STATE.update(running=True, last_error="", progress="starting")
+    _changed().clear()
     counts = {"series": 0, "episode_files": 0, "movies": 0, "errors": []}
     try:
         s = arr.Sonarr()
@@ -169,6 +195,9 @@ def full_sync() -> dict:
                 counts["errors"].append(str(e))
         STATE["last"] = time.time()
         settings.state_set("last_sync", STATE["last"])
+        counts["queued"] = queue_changed("library sync")
+        if not counts["errors"]:
+            settings.state_set("initial_sync_done", True)
         db.log(f"Sync done: {counts['series']} series / {counts['episode_files']} episode files, "
                f"{counts['movies']} movies" + (f", {len(counts['errors'])} errors" if counts["errors"] else ""),
                "warning" if counts["errors"] else "info")
@@ -186,9 +215,35 @@ def _drop_items(source: str, live: set[int]):
             db.x("DELETE FROM items WHERE id=?", (row["id"],))
 
 
-def sync_one(source: str, arr_id: int) -> None:
+def sync_one(source: str, arr_id: int, queue: bool = True) -> int:
+    """Resync one series/movie; queue scans for its new or replaced files. Returns how many were queued."""
+    _changed().clear()
     if source == "sonarr":
         s = arr.Sonarr()
         sync_series(s, s.series(arr_id))
     else:
         sync_movie(arr.Radarr().movies(arr_id))
+    return queue_changed(f"{source} item {arr_id}") if queue else 0
+
+
+IMPORT_EVENTS = {"downloadFolderImported", "seriesFolderImported", "movieFolderImported"}
+
+
+def poll_imports() -> int:
+    """Catch imports without webhooks: read Sonarr/Radarr history since the last poll."""
+    import datetime as dt
+
+    since = float(settings.state_get("imports_polled_at", 0) or 0) or time.time() - 3600
+    iso = dt.datetime.fromtimestamp(since - 60, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started, queued = time.time(), 0
+    for source, client, key in (("sonarr", arr.Sonarr(), "seriesId"), ("radarr", arr.Radarr(), "movieId")):
+        if not client.configured:
+            continue
+        try:
+            ids = {r.get(key) for r in client.history_since(iso) if r.get("eventType") in IMPORT_EVENTS and r.get(key)}
+            for arr_id in ids:
+                queued += sync_one(source, arr_id)
+        except arr.ServiceError as e:
+            log.warning("import poll failed for %s: %s", source, e)
+    settings.state_set("imports_polled_at", started)
+    return queued

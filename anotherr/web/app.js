@@ -57,7 +57,7 @@ async function route() {
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#/" + (name || "")));
   try { await (routes[name] || dashboard)(arg); } catch (e) { $("#app").innerHTML = `<div class="card">Error: ${esc(e.message)}</div>`; }
 }
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => { closeModal(); route(); });
 
 // ------------------------------------------------------------------ dashboard
 async function dashboard() {
@@ -81,6 +81,8 @@ async function dashboard() {
       <div class="card"><div class="muted">Problems</div><div class="stat" style="color:var(--error)">${bad}</div><div class="small muted">${files.warning || 0} warnings · ${s.open_issues} open issues</div></div>
       <div class="card"><div class="muted">Waiting on you</div><div class="stat">${s.pending_reviews + s.proposed_actions}</div><div class="small muted"><a href="#/reviews">${s.pending_reviews} visual reviews</a> · <a href="#/actions">${s.proposed_actions} proposed actions</a></div></div>
       <div class="card"><div class="muted">Scanner</div><div style="font-weight:600;margin:4px 0">${s.current.file_id ? `${esc(s.current.title)} ${esc(s.current.label || "")}` : esc(s.scheduler.mode)}</div>
+        <div class="small muted">Next: ${esc(s.scheduler.next_run ? s.scheduler.next_run.why : "")}${s.scheduler.windows && !s.scheduler.windows.length ? " · no scan window set (scans anytime)" : ""}</div>
+        ${(s.scheduler.streams || []).length ? `<div class="small muted">Plex: ${s.scheduler.streams.map((x) => `${esc(x.title)}${x.disk ? ` (${esc(x.disk)})` : ""}`).join(", ")}${s.scheduler.stream_pause === "same_disk" ? " - skipping only those disks" : ""}</div>` : ""}
         <div class="small muted">${s.current.file_id ? esc(s.current.step) : ""} ${s.scheduler.window ? `window ${esc(s.scheduler.window)} · ${s.scheduler.window_count} done` : ""} ${s.scheduler.disk ? `· disk ${esc(s.scheduler.disk)}` : ""}</div>
         <div class="toolbar" style="margin:8px 0 0">
           <button onclick="act(()=>api('/api/control/pause',{method:'POST',body:{paused:${!s.paused}}}),'${s.paused ? "Resumed" : "Paused"}')">${s.paused ? "Resume" : "Pause"}</button>
@@ -203,7 +205,7 @@ async function filePage(id) {
         <div>Expected audio</div><div>${esc(r.expected_language || "?")}${r.dual_audio ? " · dual audio ✓" : ""}</div>
         <div>Last scan</div><div>${f.last_scan ? `${ago(f.last_scan.finished_at)} · ${esc(f.last_scan.profile)} · seed ${f.last_scan.seed} · ${r.elapsed_s || "?"}s` : "never"}</div></div></div>
       <div class="card"><b>Issues</b>${f.issues.map((i) => `<div style="margin:6px 0">${sev(i.severity)} <b>${esc(i.code)}</b> ${i.status === "ignored" ? '<span class="pill">ignored</span>' : ""}<br>${esc(i.message)}
-        <div>${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
+        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
     </div>
     <h3>Audio tracks</h3><table><tr><th>Track</th><th>Tag</th><th>Detected</th><th>Speech</th><th>Peak level</th><th>Info</th></tr>${audio || '<tr><td colspan=6 class="muted">Not analysed</td></tr>'}</table>
     <h3>Subtitles</h3><table><tr><th>Track</th><th>Lang</th><th>Kind</th><th>Dialogue cues</th></tr>${subs || `<tr><td colspan=4 class="muted">${(st.subs || []).length} track(s); content not analysed in this profile</td></tr>`}</table>
@@ -212,6 +214,14 @@ async function filePage(id) {
     ${r.transcript_sample ? `<h3>Transcript sample</h3><div class="card small">${esc(r.transcript_sample)}</div>` : ""}
     <h3>Reviews & actions</h3><table>${f.reviews.map((v) => `<tr><td>review</td><td>${esc(v.kind)}</td><td>${esc(v.status)} ${esc(v.verdict)}</td><td>${esc(v.notes)}</td></tr>`).join("")}${f.actions.map((a) => `<tr><td>action</td><td>${esc(a.kind)}</td><td><span class="st s-${a.status}">${a.status}</span></td><td>${esc(a.result || a.reason)}</td></tr>`).join("") || ""}</table>
     <h3>Raw result</h3><details><summary class="muted">show JSON</summary><pre>${esc(JSON.stringify(r, null, 1))}</pre></details>`;
+}
+async function showEvidence(id) {
+  const e = await api("/api/issues/" + id);
+  openModal(`<h2>${sev(e.severity)} ${esc(e.code)}</h2><p>${esc(e.message)}</p>
+    ${e.evidence_ts && e.evidence_ts.length ? `<div class="frames">${e.evidence_ts.map((t) => `<figure><img loading="lazy" src="${imgUrl(e.file_id, t)}"><figcaption>${fmtTs(t)}</figcaption></figure>`).join("")}</div>` : ""}
+    <h3>Details</h3><pre>${esc(JSON.stringify(e.details, null, 1))}</pre>
+    <h3>Measurements from the scan</h3><pre>${esc(JSON.stringify(e.evidence, null, 1))}</pre>
+    ${e.suppressed_by_this_scan && e.suppressed_by_this_scan.length ? `<h3>Skipped because of a root cause</h3><pre>${esc(JSON.stringify(e.suppressed_by_this_scan, null, 1))}</pre>` : ""}`);
 }
 function framePicker(fid, dur) {
   const ts = [0.05, 0.2, 0.4, 0.6, 0.8, 0.95].map((p) => Math.round(dur * p));
@@ -319,7 +329,13 @@ const HELP = {
   "schedule.disk_mode": "all = whole array by priority · rotate = one disk per window · spun_up = only disks already spinning · specific = only the disks below.",
   "schedule.disks": "Disks for 'specific' mode (or to limit 'rotate').",
   "schedule.rescan_after_days": "Files are re-checked after this many days.",
-  "schedule.max_streams": "Pause when Plex has more than this many active streams (needs Tautulli).",
+  "schedule.max_streams": "Only for stream pause 'any': pause when Plex has more than this many active streams.",
+  "schedule.stream_pause": "same_disk = while Plex streams, skip files on the disk it is reading (others keep scanning) · any = pause all scanning during streams · off. Needs Tautulli.",
+  "schedule.pause_on_streams": "Master switch for the stream pause below.",
+  "schedule.max_files_per_window": "0 = no limit.",
+  "schedule.windows": "Scheduled scanning only runs inside these windows. Remove every window to scan at any time.",
+  "automation.windows": "Automation only acts inside these windows. Remove every window to allow it at any time.",
+  "review.ocr_title_cards": "Read title cards automatically (OCR). A match passes the review; another episode's title raises 'wrong content'; no readable text leaves it for you or Claude.",
   "schedule.manual_respects_pause": "Manual/import scans also wait during parity checks and active streams.",
   "imports.enabled": "Scan new downloads as soon as Sonarr/Radarr import them. Add a Webhook connection in Sonarr/Radarr (On Import/Upgrade) pointing to http://<unraid-ip>:9797/api/webhook/sonarr (or /radarr).",
   "sync.interval_minutes": "Full library resync interval (0 = only manual / webhooks).",
@@ -363,6 +379,7 @@ function render(path, val) {
     const p = `${path}.${k}`;
     if (k === "windows") return field(p, pretty(k), `<div data-win="${p}">${v.map(winRow).join("")}</div><button class="sm" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend', winRow({days:[0,1,2,3,4,5,6],start:'01:00',end:'07:00'}))">+ Add window</button>`);
     if (p === "schedule.disk_mode") return field(p, pretty(k), `<select data-k="${p}">${["all", "rotate", "spun_up", "specific"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
+    if (p === "schedule.stream_pause") return field(p, pretty(k), `<select data-k="${p}">${["same_disk", "any", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "review.title_cards") return field(p, pretty(k), `<select data-k="${p}">${["never", "multi_episode", "flagged", "always"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.profile" || p === "scan.default_profile" || p === "imports.profile") return field(p, pretty(k), `<select data-k="${p}">${["quick", "standard", "deep"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "scan.hw_decode") return field(p, pretty(k), `<select data-k="${p}">${["auto", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);

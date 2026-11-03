@@ -77,6 +77,9 @@ class Sonarr(Client):
     def search(self, episode_ids: list[int]):
         return self.req("POST", "/api/v3/command", json={"name": "EpisodeSearch", "episodeIds": episode_ids})
 
+    def history_since(self, iso: str) -> list[dict]:
+        return self.get("/api/v3/history/since", date=iso) or []
+
 
 class Radarr(Client):
     service = "radarr"
@@ -99,6 +102,9 @@ class Radarr(Client):
 
     def search(self, movie_ids: list[int]):
         return self.req("POST", "/api/v3/command", json={"name": "MoviesSearch", "movieIds": movie_ids})
+
+    def history_since(self, iso: str) -> list[dict]:
+        return self.get("/api/v3/history/since", date=iso) or []
 
 
 class Bazarr(Client):
@@ -140,6 +146,11 @@ class Tautulli(Client):
     def stream_count(self) -> int:
         d = self.call("get_activity") or {}
         return int(d.get("stream_count") or 0)
+
+    def sessions(self) -> list[dict]:
+        d = self.call("get_activity") or {}
+        return [{"file": s.get("file") or "", "title": s.get("full_title") or s.get("title") or "",
+                 "state": s.get("state", "")} for s in d.get("sessions") or []]
 
 
 CLIENTS = {"sonarr": Sonarr, "radarr": Radarr, "bazarr": Bazarr, "tautulli": Tautulli}

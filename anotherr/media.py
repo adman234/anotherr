@@ -231,19 +231,106 @@ def decode_segment(path: str, start: float, dur: float, threads: int = 2, has_vi
             "black": [], "freeze": [], "idet": None, "gpu": use_hw and not (hw_lines and _HW_FATAL.search(" ".join(hw_lines)))}
 
 
-def video_checks(path: str, start: float, dur: float) -> dict:
-    """Black / frozen video on keyframes only, downscaled - a fraction of a second per segment."""
+_FREEZE_START = re.compile(r"freezedetect.freeze_start:\s*([\d.]+)")
+_FREEZE_END = re.compile(r"freezedetect.freeze_end:\s*([\d.]+)")
+
+
+def _freeze_intervals(stderr: str, offset: float, window_end: float) -> list[tuple[float, float]]:
+    starts = [offset + float(v) for v in _FREEZE_START.findall(stderr or "")]
+    ends = [offset + float(v) for v in _FREEZE_END.findall(stderr or "")]
+    out = []
+    for i, st in enumerate(starts):
+        out.append((st, ends[i] if i < len(ends) else window_end))  # a freeze running to the end has no end line
+    return out
+
+
+_SHOWINFO_PTS = re.compile(r"showinfo.*?\bn:\s*(\d+)\s+pts:\s*-?\d+\s+pts_time:\s*(-?[\d.]+)")
+THUMB_W, THUMB_H = 64, 36
+
+
+def video_checks(path: str, start: float, dur: float, min_span: float = 10.0) -> dict:
+    """Cheap screening pass on keyframes only: black spans and *candidate* freezes.
+
+    ffmpeg's freezedetect can't be used on keyframes alone (it treats the gap between two sparse
+    frames as a freeze), so consecutive keyframes are compared here on 64x36 grey thumbnails using
+    their real timestamps. A candidate is a run of practically identical keyframes spanning
+    >= min_span seconds; confirm it with confirm_freeze() before reporting anything.
+    """
     cmd = nice_prefix() + [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "level+info", "-skip_frame", "nokey",
                            "-ss", f"{start:.3f}", "-i", path, "-t", f"{dur:.3f}", "-map", "0:v:0",
-                           "-vf", "scale=320:-2,blackdetect=d=1.5:pix_th=0.10,freezedetect=n=-60dB:d=8",
-                           "-an", "-sn", "-f", "null", "-"]
+                           "-vf", f"scale={THUMB_W}:{THUMB_H},format=gray,blackdetect=d=1.5:pix_th=0.10,showinfo",
+                           "-fps_mode", "passthrough", "-an", "-sn", "-f", "rawvideo", "pipe:1"]
     try:
-        p = run(cmd, timeout=300)
+        p = run(cmd, timeout=300, binary=True)
     except subprocess.TimeoutExpired:
-        return {"black": [], "freeze": []}
-    err = p.stderr or ""
-    return {"black": [(start + float(a), start + float(b), float(c)) for a, b, c in _BLACK.findall(err)],
-            "freeze": [float(v) for v in _FREEZE.findall(err)]}
+        return {"black": [], "freeze_candidates": [], "keyframes": 0}
+    err = (p.stderr or b"").decode("utf-8", "replace")
+    pts = [start + float(t) for _, t in _SHOWINFO_PTS.findall(err)]
+    size = THUMB_W * THUMB_H
+    n = min(len(pts), len(p.stdout or b"") // size)
+    frames = np.frombuffer((p.stdout or b"")[: n * size], dtype=np.uint8).reshape(n, size).astype(np.int16) if n else None
+    black = [(start + float(a), start + float(b), float(c)) for a, b, c in _BLACK.findall(err)]
+    cands = []
+    if n >= 2:
+        same = [float(np.mean(np.abs(frames[i + 1] - frames[i]))) < 1.0 and float(frames[i].mean()) > 20
+                for i in range(n - 1)]  # dark frames are blackdetect's job
+        i = 0
+        while i < n - 1:
+            if same[i]:
+                j = i
+                while j < n - 1 and same[j]:
+                    j += 1
+                if pts[j] - pts[i] >= min_span:
+                    cands.append((round(pts[i], 2), round(pts[j], 2)))
+                i = j
+            i += 1
+    return {"black": black, "freeze_candidates": cands, "keyframes": n,
+            "keyframe_pts": [round(t, 2) for t in pts[:200]]}
+
+
+CONFIRM_W, CONFIRM_H = 320, 180
+
+
+def confirm_freeze(path: str, start: float, dur: float, min_freeze: float = 10.0) -> dict:
+    """Confirm a candidate freeze with a continuous decode (CPU, accurate seek, native frame rate),
+    sampling one real frame per second.
+
+    A 1 s pair counts as unchanged when fewer than 0.05% of pixels moved by more than compression
+    noise (|diff| > 16 at 320x180) - a talking head's mouth alone changes far more than that. The span
+    is confirmed when >= 90% of its pairs are unchanged and the longest unchanged run is >= min_freeze.
+    Dark frames are ignored (black holds are reported by blackdetect, not as freezes).
+    """
+    cmd = nice_prefix() + [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", f"{start:.3f}",
+                           "-i", path, "-t", f"{dur:.3f}", "-map", "0:v:0",
+                           "-vf", f"fps=1,scale={CONFIRM_W}:{CONFIRM_H},format=gray",
+                           "-an", "-sn", "-f", "rawvideo", "pipe:1"]
+    try:
+        p = run(cmd, timeout=max(300, dur * 10), binary=True)
+    except subprocess.TimeoutExpired:
+        return {"confirmed": False, "error": "timeout", "pairs": 0}
+    size = CONFIRM_W * CONFIRM_H
+    n = len(p.stdout or b"") // size
+    if n < 3:
+        return {"confirmed": False, "pairs": 0, "frames": n}
+    fr = np.frombuffer(p.stdout[: n * size], dtype=np.uint8).reshape(n, size).astype(np.int16)
+    unchanged = []
+    for i in range(n - 1):
+        if fr[i].mean() <= 20:
+            unchanged.append(False)
+            continue
+        moved = int(np.count_nonzero(np.abs(fr[i + 1] - fr[i]) > 16))
+        unchanged.append(moved < 0.0005 * size)
+    run_len = best = 0
+    best_end = 0
+    for i, u in enumerate(unchanged):
+        run_len = run_len + 1 if u else 0
+        if run_len > best:
+            best, best_end = run_len, i + 1
+    frac = sum(unchanged) / len(unchanged)
+    ok = frac >= 0.9 and best >= min_freeze
+    return {"confirmed": ok, "pairs": len(unchanged), "unchanged_fraction": round(frac, 3), "longest_s": best,
+            "freeze": (round(start + best_end - best, 1), round(start + best_end, 1)) if best else None,
+            "window": (round(start, 1), round(dur, 1))}
 
 
 def idet_sample(path: str, start: float, dur: float = 10.0) -> dict | None:
@@ -394,6 +481,16 @@ def image_sub_times(path: str, s_index: int | None = None, timeout: float = 1800
         end = pts + durv if durv > 0 else (pkts[i + 1][0] if i + 1 < len(pkts) else pts + 3)
         out.append((pts, min(end, pts + 10)))
     return out
+
+
+def extract_ocr_frame(path: str, t: float, width: int = 1280) -> bytes:
+    """Greyscale PNG frame for OCR."""
+    cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path, "-frames:v", "1",
+           "-vf", f"scale={int(width)}:-2,format=gray", "-f", "image2", "-c:v", "png", "pipe:1"]
+    p = run(cmd, timeout=120, binary=True)
+    if not p.stdout:
+        raise RuntimeError("frame extraction failed")
+    return p.stdout
 
 
 def extract_frame(path: str, t: float, width: int = 768) -> bytes:

@@ -11,7 +11,8 @@ ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]  # Monday = 0
 # Issue codes that may lead to an action proposal.
 RESUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"]
 REDOWNLOAD_CODES = [
-    "unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "duration_short",
+    "unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "decode_stopped_early",
+    "duration_short", "wrong_content",
     "original_audio_missing", "silent_audio", "visual_review_failed", "full_decode_errors",
 ]
 
@@ -45,19 +46,21 @@ DEFAULTS: dict = {
     },
     "review": {
         "title_cards": "multi_episode",  # never | multi_episode | flagged | always
+        "ocr_title_cards": True,         # read title cards with OCR; matches auto-pass, other episodes flag wrong content
         "visual_quality_on_deep": True,
     },
     "schedule": {
         "enabled": True,
-        "windows": [{"days": ALL_DAYS, "start": "01:00", "end": "07:00"}],
+        "windows": [{"days": ALL_DAYS, "start": "01:00", "end": "07:00"}],  # empty list = scan anytime
         "profile": "standard",
-        "max_files_per_window": 150,
+        "max_files_per_window": 0,  # 0 = no limit
         "disk_mode": "rotate",  # all | rotate | spun_up | specific
         "disks": [],            # used by 'specific' (and limits 'rotate' when non-empty)
         "rescan_after_days": 180,
         "pause_on_parity": True,
         "pause_on_streams": True,
-        "max_streams": 0,       # pause when Plex has more than this many active streams
+        "stream_pause": "same_disk",  # same_disk = skip files on disks Plex is reading | any | off
+        "max_streams": 0,       # 'any' mode: pause when Plex has more than this many active streams
         "manual_respects_pause": True,
     },
     "imports": {"enabled": True, "profile": "quick"},

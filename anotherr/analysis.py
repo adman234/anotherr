@@ -152,6 +152,34 @@ def text_overlap(transcript: str, subs: str) -> dict:
     return {"recall": round(len(inter) / len(ts), 3), "precision": round(len(inter) / len(ss), 3), "words": len(tw)}
 
 
+def track_verdict(sync_verdict: str, text_recall: float | None) -> str:
+    """Final verdict for one subtitle track: ok | offset | mismatch | unknown.
+
+    Text compared after shifting by the detected offset is the stronger evidence: if it matches,
+    the subs are the right content (a timing "mismatch" is overruled); if it still doesn't match,
+    the track is a mismatch regardless of timing (one issue, not offset + text mismatch).
+    """
+    if text_recall is None:
+        return sync_verdict
+    if text_recall >= 0.5:
+        return "offset" if sync_verdict == "offset" else "ok"
+    if text_recall < 0.2:
+        return "mismatch"
+    return sync_verdict
+
+
+def aggregate_language(windows: list[tuple[str, float]]) -> dict:
+    """Combine per-window language detections: majority language, agreement and mean confidence."""
+    if not windows:
+        return {"detected": "", "prob": 0.0, "agree": 0, "n": 0, "all_agree": False}
+    counts: dict[str, list[float]] = {}
+    for lang, p in windows:
+        counts.setdefault(lang, []).append(p)
+    lang, probs = max(counts.items(), key=lambda kv: (len(kv[1]), sum(kv[1])))
+    return {"detected": lang, "prob": round(sum(probs) / len(probs), 3), "agree": len(probs), "n": len(windows),
+            "all_agree": len(probs) == len(windows)}
+
+
 def rms_db(audio: np.ndarray) -> float:
     if audio.size == 0:
         return -120.0

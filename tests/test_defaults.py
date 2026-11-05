@@ -327,3 +327,20 @@ def test_issues_grouped_by_show_season_and_bulk_ops():
     assert c.post("/api/issues/bulk", json={"op": "ignore", "ids": g["ids"]}).json()["changed"] == 3
     assert db.scalar("SELECT COUNT(*) FROM issues WHERE status='ignored'") == 3
     assert len(c.get("/api/issues").json()["rows"]) == 1  # ungrouped still works
+
+
+def test_issue_rows_point_to_default_track_fix_or_rescan():
+    from fastapi.testclient import TestClient
+
+    from anotherr import api
+
+    settings.save({"languages": {"subtitle_language": "eng"}})
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind, original_language) VALUES ('sonarr', 77, 'Frog and Toad', 'series', 'eng')")
+    new = _file(iid, "S02E01", 2, [A(0, "eng"), A(1, "ger", default=True)], [], {"default_audio_not_preferred"})
+    old = _file(iid, "S02E02", 2, [], [], {"default_audio_not_preferred"})  # evidence from before the update
+    db.x("UPDATE files SET audio_evidence=NULL WHERE id=?", (old,))
+    defaults.refresh_item(iid)
+    aid = db.scalar("SELECT id FROM actions WHERE kind='set_default_audio'")
+    res = TestClient(api.app).get("/api/issues", params={"group": "true"}).json()
+    [g] = res["rows"]
+    assert g["fix_actions"] == [aid] and g["fix_missing"] == [old]

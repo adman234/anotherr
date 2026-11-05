@@ -30,6 +30,15 @@ Anotherr runs on your Unraid server. It mirrors your Sonarr/Radarr libraries and
 
 Every scan stores its random seed, so results are reproducible.
 
+### Where scan time goes
+
+The dashboard's **Where scan time goes** table adds up every scan's per-step timings over the last 1, 7
+or 30 days. For each step it shows the share of total time, the average and the slowest run, and the
+setting that controls it. The optional checks can be turned off under Settings → Scanning →
+`scan.checks`: interlace, extra language samples, hardsubs, subtitle sync and subtitle content (Whisper
+transcription, usually the most expensive subtitle check). One file's breakdown is still on its page,
+under *Where the time went*.
+
 ## Scheduling (Unraid-aware)
 
 Scanning runs **around the clock** in slots:

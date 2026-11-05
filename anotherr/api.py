@@ -122,6 +122,76 @@ def page(sql_base: str, args: list, page_no: int, per: int, order: str) -> dict:
     return {"total": total, "page": page_no, "per_page": per, "rows": rows}
 
 
+# ====================================================================== scan time
+
+# timing group (prefix) -> what controls it, for the "where scan time goes" table
+STEP_CONTROLS = [
+    ("decoding", "Scan profile: segments x seconds (and GPU decode)"),
+    ("video checks", "Scan profile: segments"),
+    ("interlace check", "scan.checks.interlace"),
+    ("re-checking a segment in software", "automatic: a GPU decode stopped early"),
+    ("full decode", "Scan profile: full_decode (deep only by default)"),
+    ("confirming possible freeze", "automatic: only when a freeze is suspected"),
+    ("reading audio", "Scan profile: segments x seconds; scan.max_audio_tracks"),
+    ("speech detection", "scan.max_audio_tracks"),
+    ("language detection", "scan.max_audio_tracks (Whisper on the GPU)"),
+    ("extra language samples", "scan.checks.extra_language_samples"),
+    ("checking for burned-in subtitles", "scan.checks.hardsubs"),
+    ("reading subtitles", "Scan profile: subtitles"),
+    ("reading image subtitle timing", "Scan profile: subtitles"),
+    ("subtitle sync", "scan.checks.subtitle_sync"),
+    ("transcribing for subtitle content check", "scan.checks.subtitle_content"),
+    ("finding segment break", "automatic: suspected multi-episode files"),
+    ("reading title cards", "review.ocr_title_cards"),
+    ("saving review frames", "review.title_cards"),
+    ("probing", "always (ffprobe)"),
+    ("locating file", "always (disk spin-up shows here)"),
+]
+
+
+def _step_group(name: str) -> str:
+    import re
+
+    return re.sub(r"\s*\d+(/\d+)?$", "", name).strip()
+
+
+@app.get("/api/stats/timings", dependencies=[Depends(auth)])
+def scan_timings(days: float = 7, profile: str = ""):
+    """Where scan time goes: per-step totals over finished scans, with the setting that controls each step."""
+    sql = ("SELECT profile, json_extract(result, '$.timings') t, json_extract(result, '$.elapsed_s') e, "
+           "finished_at - started_at d FROM scans WHERE status='done' AND finished_at > ?")
+    args: list = [time.time() - days * 86400]
+    if profile:
+        sql += " AND profile=?"
+        args.append(profile)
+    rows = db.q(sql + " ORDER BY id DESC LIMIT 5000", args)
+    steps: dict[str, dict] = {}
+    profiles: dict[str, dict] = {}
+    total = 0.0
+    for r in rows:
+        el = float(r["e"] or r["d"] or 0)
+        p = profiles.setdefault(r["profile"] or "?", {"scans": 0, "seconds": 0.0})
+        p["scans"] += 1
+        p["seconds"] += el
+        total += el
+        for k, v in (db.unj(r["t"], {}) or {}).items():
+            g = steps.setdefault(_step_group(k), {"seconds": 0.0, "scans": 0, "max": 0.0})
+            g["seconds"] += v
+            g["scans"] += 1
+            g["max"] = max(g["max"], v)
+    timed = sum(g["seconds"] for g in steps.values()) or 1
+    out = []
+    for name, g in sorted(steps.items(), key=lambda kv: -kv[1]["seconds"]):
+        ctl = next((c for pre, c in STEP_CONTROLS if name.startswith(pre)), "")
+        out.append({"step": name, "seconds": round(g["seconds"], 1), "share": round(100 * g["seconds"] / timed, 1),
+                    "scans": g["scans"], "avg": round(g["seconds"] / g["scans"], 1), "max": round(g["max"], 1),
+                    "control": ctl})
+    return {"days": days, "scans": len(rows), "seconds": round(total, 1),
+            "avg_per_scan": round(total / len(rows), 1) if rows else None,
+            "profiles": {k: {"scans": v["scans"], "avg": round(v["seconds"] / v["scans"], 1)} for k, v in profiles.items()},
+            "steps": out}
+
+
 # ====================================================================== status
 
 @app.get("/api/status", dependencies=[Depends(auth)])
@@ -459,12 +529,40 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
         res = _grouped_issues(db.q(f"{sql} ORDER BY {order}", args), page_no, min(per_page, 500))
     else:
         res = page(sql, args, page_no, min(per_page, 500), order)
+    fixes = _proposed_track_fixes()
     for r in res["rows"]:
         r["details"] = db.unj(r.get("details"), {})
         r.pop("file_episodes", None)
+        if r["code"] in TRACK_FIX_CODES:  # fixed by a track-edit proposal, not a resub
+            files = [i["file_id"] for i in r["items"]] if r.get("group") else [r["file_id"]]
+            hit = {fixes[(f, r["code"])] for f in files if (f, r["code"]) in fixes}
+            r["fix_actions"] = sorted(hit)
+            r["fix_missing"] = [f for f in files if (f, r["code"]) not in fixes]
     res["codes"] = db.q("SELECT x.code, x.severity, COUNT(*) n FROM issues x JOIN files f ON f.id=x.file_id "
                         "WHERE x.status='open' AND f.missing=0 GROUP BY x.code, x.severity ORDER BY n DESC")
     return res
+
+
+TRACK_FIX_CODES = {"default_audio_not_preferred": ("set_default_audio",),
+                   "default_subs_signs": ("set_default_audio", "set_default_subtitle"),  # combined proposals
+                   "audio_untagged": ("retag_audio",), "audio_mislabeled": ("retag_audio",)}
+
+
+def _proposed_track_fixes() -> dict[tuple[int, str], int]:
+    """(file_id, issue code) -> the open track-edit proposal that fixes it."""
+    out = {}
+    for a in db.q("SELECT id, kind, payload FROM actions WHERE status='proposed' AND kind IN "
+                  "('set_default_audio','set_default_subtitle','retag_audio')"):
+        for e in (db.unj(a["payload"], {}) or {}).get("files", []):
+            for code, kinds in TRACK_FIX_CODES.items():
+                if a["kind"] not in kinds:
+                    continue
+                if code == "default_subs_signs" and not e.get("sub"):
+                    continue
+                if code == "default_audio_not_preferred" and not e.get("audio"):
+                    continue
+                out[(e["file_id"], code)] = a["id"]
+    return out
 
 
 def _season_of(episodes_json) -> int | None:

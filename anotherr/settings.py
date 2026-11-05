@@ -38,6 +38,14 @@ DEFAULTS: dict = {
         "hw_decode": "auto",     # auto = NVIDIA GPU (NVDEC) when available, off = CPU only
         "ffmpeg_threads": 0,     # 0 = let ffmpeg decide
         "max_audio_tracks": 4,
+        # optional checks (see Dashboard -> Where scan time goes): turn off the ones that cost more than they find
+        "checks": {
+            "interlace": True,               # idet sample for interlaced video
+            "extra_language_samples": True,  # more audio windows before calling the expected language missing
+            "hardsubs": True,                # OCR frames for burned-in subtitles
+            "subtitle_sync": True,           # compare subtitle timing with speech
+            "subtitle_content": True,        # transcribe speech and compare it with the subtitle text
+        },
         "profiles": {
             "quick": {"segments": 3, "seconds": 30, "subtitles": False, "full_decode": False},
             "standard": {"segments": 5, "seconds": 90, "subtitles": True, "full_decode": False},

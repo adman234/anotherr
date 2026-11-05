@@ -34,9 +34,9 @@ tr:hover td { background: #222630; }
 .s-proposed { background: var(--accent); } .s-done { background: var(--ok); } .s-rejected, .s-withdrawn, .s-undone { background: #555c6a; color: #ddd; } .s-running, .s-queued { background: var(--accent2); }
 button, .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
 button:hover { border-color: var(--accent); }
-button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+button.primary, .btn.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
 button.danger { border-color: var(--error); color: var(--error); }
-button.sm { padding: 2px 8px; font-size: 12px; }
+button.sm, .btn.sm { padding: 2px 8px; font-size: 12px; }
 input, select, textarea { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; }
 input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }

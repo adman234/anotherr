@@ -71,15 +71,23 @@ class Ctx:
         now = time.time()
         prev, prev_at = self.live.get("step"), self.live.get("step_at")
         if prev and prev_at:
-            group = prev.split(":")[0].split(" segment")[0].split(" track")[0].strip()
+            group = re.sub(r"\s*\d+(/\d+)?$", "", prev.split(":")[0].split(" segment")[0].split(" track")[0]).strip()
             t = self.result.setdefault("timings", {})
             t[group] = round(t.get(group, 0) + now - prev_at, 1)
         self.live["step"] = name
         self.live["step_at"] = now
 
     @property
+    def checks(self) -> dict:
+        return ((self.cfg or {}).get("scan") or {}).get("checks") or {}
+
+    @property
     def episodes(self) -> list[dict]:
         return db.unj(self.file.get("episodes"), []) or []
+
+
+def _check_on(ctx: "Ctx", name: str) -> bool:
+    return ctx.checks.get(name, True) is not False
 
 
 # ====================================================================== entry
@@ -377,9 +385,10 @@ def check_decode(ctx: Ctx):
             vc = media.video_checks(ctx.path, results[i]["start"], results[i]["dur"])
             results[i]["black"], results[i]["freeze_candidates"] = vc["black"], vc["freeze_candidates"]
         check_freeze(ctx, results, mid_idx)
-        ctx.step("interlace check")
-        probe_at = results[mid_idx[0]]["start"] if mid_idx else results[0]["start"]
-        results[0]["idet"] = media.idet_sample(ctx.path, probe_at, 10)
+        if _check_on(ctx, "interlace"):
+            ctx.step("interlace check")
+            probe_at = results[mid_idx[0]]["start"] if mid_idx else results[0]["start"]
+            results[0]["idet"] = media.idet_sample(ctx.path, probe_at, 10)
     # A segment that stopped early on the GPU is retried in software before it counts against the file
     # (NVDEC seeks near the end of some files return nothing even though the file plays fine).
     for i, r in enumerate(results):
@@ -610,7 +619,8 @@ def check_language(ctx: Ctx):
     if not tracks:
         return
     # Before concluding the expected language is missing, give thinly-sampled tracks more chances.
-    if exp and not any(lang_match(t["tag"], exp) or lang_match(t.get("detected"), exp) for t in tracks):
+    if exp and _check_on(ctx, "extra_language_samples") and \
+            not any(lang_match(t["tag"], exp) or lang_match(t.get("detected"), exp) for t in tracks):
         for t in tracks:
             if len(t.get("windows", [])) < 3 and t.get("level_db", -120) > -70:
                 ctx.step(f"extra language samples track {t['a_index'] + 1}")
@@ -702,6 +712,8 @@ def _hardsubs(ctx: Ctx, sub_lang: str) -> dict | None:
     if "hardsubs" in ctx.result:
         return ctx.result["hardsubs"] or None
     ctx.result["hardsubs"] = {}
+    if not _check_on(ctx, "hardsubs"):
+        return None
     if not (ocr.available() and ctx.info.get("video") and lang_match(sub_lang, "eng") and ctx.path):
         return None
     at = ctx.orig_track if ctx.orig_track is not None else next(iter(ctx.tracks), None)
@@ -847,7 +859,9 @@ def check_subtitles(ctx: Ctx):
     # ---- timing against the ORIGINAL-language speech
     at = ctx.orig_track
     skip = None
-    if at is None or at not in ctx.tracks:
+    if not _check_on(ctx, "subtitle_sync"):
+        skip = "subtitle sync check turned off in Settings"
+    elif at is None or at not in ctx.tracks:
         skip = "no analysed audio track"
     elif ctx.result.get("orig_track_confirmed") is False:
         eff = ctx.tracks[at].get("effective")
@@ -875,7 +889,7 @@ def check_subtitles(ctx: Ctx):
     native = next((t for t in ctx.tracks.values() if lang_match(t.get("effective", ""), sub_lang)), None)
     is_dub = bool(exp) and not lang_match(exp, sub_lang)
     transcript = []
-    if text_full and native and (not is_dub or (ctx.item.get("is_anime") and ctx.cfg["anime"]["detect_dubtitles"])):
+    if text_full and native and _check_on(ctx, "subtitle_content") and (not is_dub or (ctx.item.get("is_anime") and ctx.cfg["anime"]["detect_dubtitles"])):
         ai = native["a_index"]
         segs = sorted([si for si in _audio_segments(ctx) if (ai, si) in ctx.audio],
                       key=lambda si: -sum(e - s for s, e in ctx.vad.get((ai, si), [])))[:2]

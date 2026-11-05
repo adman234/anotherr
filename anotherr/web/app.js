@@ -53,6 +53,8 @@ setInterval(refreshStatus, 5000);
 // ------------------------------------------------------------------ router
 const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, reviews, actions: actionsPage, queue, settings: settingsPage };
 async function route() {
+  // stop images still loading on the page we're leaving, so they don't hold up the next page
+  document.querySelectorAll("#app img").forEach((i) => { i.removeAttribute("src"); });
   const [name, arg] = location.hash.replace(/^#\/?/, "").split("/");
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#/" + (name || "")));
   try { await (routes[name] || dashboard)(arg); } catch (e) { $("#app").innerHTML = `<div class="card">Error: ${esc(e.message)}</div>`; }
@@ -253,15 +255,21 @@ async function issues() {
 }
 
 // ------------------------------------------------------------------ reviews
+let REV = { page: 1 };
+const REV_PER = 10;
 async function reviews() {
-  const rows = await api("/api/reviews?status=pending&limit=100");
+  const rows = await api(`/api/reviews?status=pending&limit=${REV_PER + 1}&offset=${(REV.page - 1) * REV_PER}`);
+  const more = rows.length > REV_PER;
+  rows.length = Math.min(rows.length, REV_PER);
+  const total = (window.STATUS && window.STATUS.pending_reviews) || rows.length;
+  const nav = `<div class="pager"><button class="sm" ${REV.page <= 1 ? "disabled" : ""} onclick="REV.page--;route()">‹ Prev</button><span class="muted">Page ${REV.page} of ${Math.max(1, Math.ceil(total / REV_PER))} · ${total} pending</span><button class="sm" ${more ? "" : "disabled"} onclick="REV.page++;route()">Next ›</button></div>`;
   $("#app").innerHTML = `<h2>Visual reviews</h2>
-    <div class="card small muted" style="margin-bottom:12px">These need eyes. Review them here, or in Claude Desktop with the Anotherr MCP server ("review pending items"). <a href="/mcp/anotherr_mcp.py">Download MCP server</a></div>
+    <div class="card small muted" style="margin-bottom:12px">These need eyes. Review them here, or in Claude Desktop with the Anotherr MCP server ("review pending items"). <a href="/mcp/anotherr_mcp.py">Download MCP server</a></div>${nav}
     ${rows.map((r) => `<div class="card" style="margin-bottom:12px"><div><b>${esc(r.title)} ${esc(r.label || "")}</b> <span class="pill">${esc(r.kind)}</span> <a class="small" href="#/file/${r.file_id}">file</a></div>
-      <p>${esc(r.question)}</p><div class="frames">${r.timestamps.map((t) => `<figure><img loading="lazy" src="${imgUrl(r.file_id, t)}"><figcaption>${fmtTs(t)}</figcaption></figure>`).join("")}</div>
+      <p>${esc(r.question)}</p><div class="frames">${r.timestamps.map((t) => `<figure><a href="${imgUrl(r.file_id, t, 1280)}" target="_blank"><img loading="lazy" src="${imgUrl(r.file_id, t)}"></a><figcaption>${fmtTs(t)}</figcaption></figure>`).join("")}</div>
       <div class="toolbar" style="margin-top:8px"><input id="rn${r.id}" placeholder="Notes" style="flex:1">
         <button onclick="verdict(${r.id},'ok')">Looks right</button><button class="danger" onclick="verdict(${r.id},'problem')">Problem</button>
-        <button class="danger" onclick="verdict(${r.id},'problem',true)">Problem + propose redownload</button><button onclick="verdict(${r.id},'dismiss')">Dismiss</button></div></div>`).join("") || '<div class="muted">Nothing to review.</div>'}`;
+        <button class="danger" onclick="verdict(${r.id},'problem',true)">Problem + propose redownload</button><button onclick="verdict(${r.id},'dismiss')">Dismiss</button></div></div>`).join("") || '<div class="muted">Nothing to review.</div>'}${rows.length ? nav : ""}`;
 }
 async function verdict(id, v, redl = false) {
   await act(() => api(`/api/reviews/${id}/verdict`, { method: "POST", body: { verdict: v, notes: $("#rn" + id).value, request_redownload: redl } }), "Saved");
@@ -274,7 +282,7 @@ async function actionsPage() {
   const s = window.STATUS || (await api("/api/status"));
   $("#app").innerHTML = `<h2>Actions</h2>
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
-    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="">All</option></select>
+    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${rows.map((a) => `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${a.kind === "resub" ? "Bazarr resub" : "Blocklist + redownload"}</td>

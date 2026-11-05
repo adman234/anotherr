@@ -9,11 +9,12 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
+import anyio
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, media, paths, redact, scanner, scheduler, settings, stt, sync, unraid
+from . import __version__, actions, arr, db, frames, health, media, paths, redact, scanner, scheduler, settings, stt, sync, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -28,6 +29,7 @@ MCP_SCRIPT = next((p for p in (os.path.join(HERE, "mcp_shim.py"),
 async def lifespan(_app):
     _startup()
     yield
+    health.mark_clean_shutdown()
 
 
 app = FastAPI(title="Anotherr", version=__version__, lifespan=lifespan)
@@ -44,9 +46,16 @@ def auth(request: Request):
 def _startup():
     redact.install()
     db.init()
+    note = health.check_previous_run()
+    if note:
+        db.log(note, "warning")
+    health.beat()
     settings.get()  # load config so the log redactor knows the configured keys
     _scrub_stored_secrets()
     _requeue_after_detector_fixes()
+    n = actions.reconcile()
+    if n:
+        db.log(f"Withdrew {n} proposed action(s) whose issues are no longer open")
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
     db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
@@ -100,6 +109,7 @@ def status():
     cfg = settings.get()
     return {
         "version": __version__,
+        "mcp_bridge_version": MCP_BRIDGE_VERSION,
         "current": (scanner.current_scans() or [{}])[0],  # first running scan (older clients)
         "scans": scanner.current_scans(),
         "scheduler": {**scheduler.STATUS, "next_run": scheduler.next_run(cfg),
@@ -114,6 +124,7 @@ def status():
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
         "files": {"total": sum(counts.values()), **counts},
         "queue": db.scalar("SELECT COUNT(*) FROM queue"),
+        "memory": health.memory(),
         "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
         "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open'"),
@@ -248,19 +259,33 @@ def file_detail(file_id: int):
     return f
 
 
+MCP_BRIDGE_VERSION = 3  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
+FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
+
+
 @app.get("/api/files/{file_id}/frame", dependencies=[Depends(auth)])
-def frame(file_id: int, t: float, w: int = 768):
+async def frame(file_id: int, t: float, w: int = 768):
+    """Cached frames are served straight from disk. Uncached ones wait (without tying up the API's worker
+    threads) for one of a few extraction slots, so a page full of frames can't start dozens of ffmpegs."""
     f = db.q1("SELECT * FROM files WHERE id=?", (file_id,))
     if not f:
         raise HTTPException(404)
-    path = scanner.resolve_path(f)
+    hit = frames.cached(f, t, w)
+    if hit:
+        frames.touch(hit)
+        return FileResponse(hit, media_type="image/jpeg", headers=FRAME_CACHE_HEADERS)
+    path = await anyio.to_thread.run_sync(scanner.resolve_path, f)
     if not path:
         scanner.handle_missing(f)
         raise HTTPException(404, "file not found on disk - resyncing it from Sonarr/Radarr")
     try:
-        return Response(media.extract_frame(path, t, max(160, min(w, 1920))), media_type="image/jpeg")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, str(e)) from e
+        data = await anyio.to_thread.run_sync(frames.extract, f, path, t, w, limiter=FRAME_LIMITER)
+    except TimeoutError as e:
+        raise HTTPException(503, "busy extracting frames, try again", headers={"Retry-After": "3"}) from e
+    except Exception as e:  # noqa: BLE001 - a bad frame must never take the server down
+        raise HTTPException(500, f"frame extraction failed: {e}") from e
+    return Response(data, media_type="image/jpeg", headers=FRAME_CACHE_HEADERS)
 
 
 @app.get("/api/files/{file_id}/streams", dependencies=[Depends(auth)])
@@ -402,8 +427,8 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
                "CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END, id DESC")
     for r in res["rows"]:
         r["details"] = db.unj(r["details"], {})
-    res["codes"] = db.q("SELECT code, severity, COUNT(*) n FROM issues WHERE status='open' GROUP BY code, severity "
-                        "ORDER BY n DESC")
+    res["codes"] = db.q("SELECT x.code, x.severity, COUNT(*) n FROM issues x JOIN files f ON f.id=x.file_id "
+                        "WHERE x.status='open' AND f.missing=0 GROUP BY x.code, x.severity ORDER BY n DESC")
     return res
 
 
@@ -448,6 +473,7 @@ def issue_update(issue_id: int, body: dict = Body(...)):
     db.x("UPDATE issues SET status=?, updated_at=? WHERE id=?", (st, time.time(), issue_id))
     fid = db.scalar("SELECT file_id FROM issues WHERE id=?", (issue_id,))
     _refresh_file_status(fid)
+    actions.reconcile(fid)
     return {"ok": True}
 
 
@@ -466,7 +492,7 @@ REVIEW_SQL = """SELECT r.*, i.title, i.kind, i.year, f.label FROM reviews r JOIN
 
 
 @app.get("/api/reviews", dependencies=[Depends(auth)])
-def reviews(status: str = "pending", kind: str = "", limit: int = 50):
+def reviews(status: str = "pending", kind: str = "", limit: int = 50, offset: int = 0):
     sql, args = REVIEW_SQL, []
     if status:
         sql += " AND r.status=?"
@@ -474,7 +500,7 @@ def reviews(status: str = "pending", kind: str = "", limit: int = 50):
     if kind:
         sql += " AND r.kind=?"
         args.append(kind)
-    rows = db.q(sql + " ORDER BY r.id LIMIT ?", args + [min(limit, 500)])
+    rows = db.q(sql + " ORDER BY r.id LIMIT ? OFFSET ?", args + [min(limit, 500), max(offset, 0)])
     for r in rows:
         r["timestamps"] = db.unj(r["timestamps"], [])
         r["context"] = db.unj(r["context"], {})
@@ -650,6 +676,15 @@ def mcp_download():
 @app.get("/healthz")
 def healthz():
     return PlainTextResponse("ok")
+
+
+@app.middleware("http")
+async def ui_revalidate(request: Request, call_next):
+    """Make browsers check for a newer UI after every update (cheap 304 when nothing changed)."""
+    resp = await call_next(request)
+    if not request.url.path.startswith(("/api/", "/mcp/")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 app.mount("/", StaticFiles(directory=os.path.join(HERE, "web"), html=True), name="web")

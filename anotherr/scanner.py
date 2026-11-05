@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import analysis, db, langs, media, ocr, runtime, settings, stt
+from . import analysis, db, frames, langs, media, ocr, runtime, settings, stt
 
 log = logging.getLogger("anotherr.scan")
 
@@ -221,6 +221,13 @@ def run_pipeline(ctx: Ctx):
     check_multi_episode(ctx)
     queue_reviews(ctx, rng)
     consolidate(ctx)
+    # render the frames a reviewer (you or Claude) will look at now, while the file is open and the
+    # disk is spinning - viewing reviews later then never starts ffmpeg or wakes a disk
+    want = [t for r in ctx.reviews if r.get("status", "pending") == "pending" for t in r["timestamps"]]
+    want += [t for i in ctx.issues for t in (i["details"].get("evidence_ts") or [])]
+    if want and ctx.info.get("video"):
+        ctx.step("saving review frames")
+        frames.prerender(ctx.file, ctx.path, list(dict.fromkeys(round(t, 1) for t in want))[:24])
     ctx.step("done")  # closes the timing of the last step
 
 
@@ -246,47 +253,92 @@ def check_streams(ctx: Ctx):
                   f"Video stream length ({v['duration'] / 60:.1f} min) differs from container ({dur / 60:.1f} min).")
 
 
+# per-opinion thresholds: (error below, warning below, double-length band, "much longer" above)
+_RUNTIME_LIMITS = {
+    "files": (0.6, 0.75, (1.7, 2.4), 2.6),             # the season's/series' own files: reliable
+    "episode metadata": (0.45, 0.62, (1.7, 2.4), 2.6),  # TVDB per-episode runtimes
+    "series metadata": (0.3, 0.62, (1.7, 2.4), 2.6),    # one number for the whole show: weakest
+    "movie": (0.6, 0.85, None, 1.6),
+}
+_RANK = {"ok": 0, "long": 1, "double": 2, "short_warn": 3, "short": 4}
+
+
+def _runtime_verdict(ratio: float, limits: tuple, single: bool) -> str:
+    err, warn, double, long_ = limits
+    if ratio < err:
+        return "short"
+    if ratio < warn:
+        return "short_warn"
+    if double and single and double[0] <= ratio <= double[1]:
+        return "double"
+    if ratio > long_:
+        return "long"
+    return "ok"
+
+
 def check_runtime(ctx: Ctx, dur: float):
+    """Length vs. two independent opinions; a file is only flagged when both say it's off the same way."""
     is_movie = ctx.item["kind"] == "movie"
+    mapped = 1 if is_movie else max(1, len(ctx.episodes))
+    per_file = dur / 60.0 / mapped
     if is_movie:
-        per_ep, mapped, est = float(ctx.item.get("runtime") or 0), 1, {"source": "metadata"}
+        est = {"metadata_min": float(ctx.item.get("runtime") or 0) or None, "metadata_source": "movie"}
+        opinions = [("movie", est["metadata_min"], "movie")] if est["metadata_min"] else []
     else:
-        mapped = max(1, len(ctx.episodes))
         est = runtime.estimate(ctx.item, ctx.file, ctx.episodes)
-        per_ep = float(est.get("per_episode_min") or 0)
+        opinions = []
+        if est.get("files_min"):
+            opinions.append(("files", est["files_min"], est["files_source"]))
+        if est.get("metadata_min"):
+            opinions.append((est["metadata_source"], est["metadata_min"], est["metadata_source"]))
     ctx.result["runtime_estimate"] = est
-    if per_ep <= 0:
+    if not opinions:
         return
-    exp = per_ep * mapped * 60
-    ctx.result["expected_runtime_s"] = round(exp, 1)
-    ratio = dur / exp
-    ctx.result["runtime_ratio"] = round(ratio, 3)
-    # "metadata (matches series files)" is verified by the files, so it gets the strict thresholds too
-    from_files = est.get("source") in ("series files", "metadata (matches series files)")
-    basis = (f"{mapped} x ~{per_ep:.1f} min (checked against this series' files)" if from_files
-             else f"~{exp / 60:.0f} min ({est.get('source')})")
-    d = {"ratio": round(ratio, 2), "expected_min": round(exp / 60, 1), "mapped_episodes": mapped,
-         "per_episode_min": round(per_ep, 2), "basis": est.get("source"), "samples": est.get("samples")}
-    if is_movie:
-        short_err, short_warn, long_info = 0.6, 0.85, 1.6
-    elif from_files:
-        short_err, short_warn, long_info = 0.6, 0.75, 2.6
-    else:  # unverified metadata (e.g. 30 min for a show numbered by 11 min segments): only warn unless far off
-        short_err, short_warn, long_info = 0.3, 0.62, 2.6
-    if ratio < short_err:
+    verdicts = []
+    for kind, minutes, label in opinions:
+        r = per_file / minutes
+        verdicts.append({"basis": label, "per_episode_min": round(minutes, 2), "ratio": round(r, 2),
+                         "verdict": _runtime_verdict(r, _RUNTIME_LIMITS[kind], mapped == 1)})
+    ctx.result["runtime_opinions"] = verdicts
+    ctx.result["runtime_ratio"] = verdicts[0]["ratio"]
+    ctx.result["expected_runtime_s"] = round(opinions[0][1] * mapped * 60, 1)
+    kinds = {v["verdict"] for v in verdicts}
+    shorts, longs = {"short", "short_warn"}, {"double", "long"}
+    if "ok" in kinds or not (kinds <= shorts or kinds <= longs):
+        if kinds - {"ok"}:
+            # one opinion objects, the other doesn't: no issue, but let the title cards settle it
+            ctx.result["runtime_disputed"] = True
+        return
+    final = max((v["verdict"] for v in verdicts), key=lambda k: _RANK[k])  # both agree: take the stronger
+    why = "; ".join(f"{v['basis']} ~{v['per_episode_min']:.1f} min/episode ({v['ratio']:.0%})" for v in verdicts)
+    d = {"ratio": verdicts[0]["ratio"], "mapped_episodes": mapped, "file_min": round(dur / 60, 1), "opinions": verdicts}
+    if final == "short":
         ctx.issue("integrity", "duration_short", "error",
-                  f"File is {dur / 60:.1f} min but {basis} was expected (wrong content, sample, or truncated).", **d)
-    elif ratio < short_warn:
+                  f"File is {dur / 60:.1f} min for {mapped} episode(s) - too short against {why} "
+                  "(wrong content, sample, or truncated).", **d)
+    elif final == "short_warn":
         ctx.issue("integrity", "duration_short_warn", "warning",
-                  f"File is shorter than expected ({dur / 60:.1f} min vs {basis}).", **d)
-    elif not is_movie and mapped == 1 and 1.7 <= ratio <= 2.4:
-        ctx.issue("multi_episode", "double_length", "warning",
-                  f"Double-length file ({dur / 60:.1f} min vs ~{per_ep:.1f} min per episode for this series): a "
-                  "special or double episode, or a different/second episode mapped as this one. Title cards queued "
-                  "for review.", **d)
-    elif ratio > long_info:
-        ctx.issue("integrity", "duration_long", "info",
-                  f"File is much longer than expected ({dur / 60:.0f} min vs {basis}).", **d)
+                  f"File is shorter than expected ({dur / 60:.1f} min; {why}).", **d)
+    elif final == "double":
+        finale = _is_season_finale(ctx)
+        ctx.issue("multi_episode", "double_length", "info" if finale else "warning",
+                  f"Double-length file ({dur / 60:.1f} min; {why})"
+                  + (": it's the season finale, which often runs long." if finale else
+                     ": a special or double episode, or a different/second episode mapped as this one. "
+                     "Title cards queued for review."), season_finale=finale, **d)
+    elif final == "long":
+        ctx.issue("integrity", "duration_long", "info", f"File is much longer than expected ({dur / 60:.0f} min; {why}).", **d)
+
+
+def _is_season_finale(ctx: Ctx) -> bool:
+    eps = ctx.episodes
+    if len(eps) != 1 or eps[0].get("season") in (None, 0):
+        return False
+    try:
+        season = [e for e in ocr.series_episodes(ctx.item) if e.get("season") == eps[0]["season"]]
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(season) and eps[0].get("episode") == max(e.get("episode") or 0 for e in season)
 
 
 def check_decode(ctx: Ctx):
@@ -309,15 +361,30 @@ def check_decode(ctx: Ctx):
         ctx.step("interlace check")
         probe_at = results[mid_idx[0]]["start"] if mid_idx else results[0]["start"]
         results[0]["idet"] = media.idet_sample(ctx.path, probe_at, 10)
+    # A segment that stopped early on the GPU is retried in software before it counts against the file
+    # (NVDEC seeks near the end of some files return nothing even though the file plays fine).
+    for i, r in enumerate(results):
+        if r.get("gpu") and not r.get("timeout") and r["decoded"] < r["dur"] * 0.9 - 2:
+            ctx.step("re-checking a segment in software")
+            again = media.decode_segment(ctx.path, r["start"], r["dur"], threads, has_video=has_video, hw="off")
+            again["retried_from_gpu"] = {"decoded": r["decoded"], "errors": r["errors"][:5]}
+            again["black"], again["freeze_candidates"] = r.get("black", []), r.get("freeze_candidates", [])
+            results[i] = again
+    ctx.result["decode"] = results
     total_err = sum(r.get("error_count", 0) for r in results)
     bad_segs = sum(1 for r in results if r.get("error_count", 0) > 5)
     last = len(results) - 1
     for i, r in enumerate(results):
         short = r["decoded"] < r["dur"] * 0.9 - 2
         if short and i == last:
-            ctx.issue("integrity", "truncated", "critical",
-                      f"Decoding stopped {r['decoded']:.0f}s into the final {r['dur']:.0f}s segment - file looks truncated.",
-                      segment_start=r["start"])
+            confirm = confirm_truncation(ctx, threads, has_video)
+            ctx.result["truncation_check"] = confirm
+            if confirm["truncated"]:
+                ctx.issue("integrity", "truncated", "critical",
+                          f"Decoding stopped {r['decoded']:.0f}s into the final {r['dur']:.0f}s segment, and a "
+                          f"software re-check of the last 30 s confirmed it - file looks truncated.",
+                          segment_start=r["start"], confirm=confirm,
+                          evidence_ts=[round(max(0.0, r["start"] + r["decoded"] - 5), 1), round(r["start"] + r["decoded"] + 5, 1)])
         elif short and not r.get("timeout"):
             bad_segs += 1
     stopped = [r["start"] for i, r in enumerate(results)
@@ -338,7 +405,7 @@ def check_decode(ctx: Ctx):
     for r in mids:
         black = sum(b[2] for b in r.get("black", []))
         if black > 0.5 * r["dur"]:
-            ctx.issue("video", "black_video", "warning",
+            ctx.issue("video", "black_video", "info",
                       f"{black:.0f}s of black video in the segment at {r['start'] / 60:.1f} min.", start=r["start"])
             break
     tff = sum((r["idet"] or {}).get("tff", 0) for r in results)
@@ -357,6 +424,19 @@ def check_decode(ctx: Ctx):
         elif fd["error_count"]:
             ctx.issue("integrity", "full_decode_minor", "warning", f"Full decode found {fd['error_count']} error(s).",
                       sample=fd["errors"][:10])
+
+
+def confirm_truncation(ctx: Ctx, threads: int, has_video: bool) -> dict:
+    """Software decode (accurate seek) of the last 30 s before the video stream's own end."""
+    dur = ctx.info["duration"]
+    v = (ctx.info.get("video") or [{}])[0]
+    end = min(dur, v.get("duration") or dur)
+    start = max(0.0, end - 35)
+    r = media.decode_segment(ctx.path, start, 30, threads, has_video=has_video, hw="off")
+    ok = r["decoded"] >= 20
+    return {"truncated": not ok, "start": round(start, 1), "decoded": round(r["decoded"], 1),
+            "container_s": round(dur, 1), "video_stream_s": round(v.get("duration") or 0, 1),
+            "errors": r["errors"][:5]}
 
 
 EDGE_S = 120  # ignore the first/last 2 minutes for picture checks (logos, credits, fades)
@@ -461,6 +541,48 @@ def check_audio(ctx: Ctx):
     ctx.result["audio_tracks"] = list(ctx.tracks.values())
 
 
+def _extra_language_windows(ctx: Ctx, t: dict, positions=(0.15, 0.35, 0.55, 0.75), secs: float = 30.0):
+    """More language samples from across the file for a track that has too few."""
+    dur = ctx.info.get("duration") or 0
+    for p in positions:
+        if len(t["windows"]) >= 5 or dur < 120:
+            break
+        start = dur * p
+        if any(abs(start - w["at"]) < secs for w in t["windows"]):
+            continue
+        audio = media.extract_audio_multi(ctx.path, [t["a_index"]], start, secs).get(t["a_index"])
+        if audio is None or audio.size == 0:
+            continue
+        iv = stt.speech_intervals(audio)
+        if sum(e - s for s, e in iv) < 4:
+            continue
+        try:
+            lang, prob, _ = stt.WHISPER.detect_language(stt.speech_audio(audio, iv, 30))
+        except Exception:  # noqa: BLE001
+            break
+        t["windows"].append({"at": round(start, 1), "lang": langs.norm(lang) or lang, "prob": round(prob, 3),
+                             "extra": True})
+    agg = analysis.aggregate_language([(w["lang"], w["prob"]) for w in t["windows"]])
+    t.update(detected=agg["detected"], prob=agg["prob"], agree=agg["agree"], all_agree=agg["all_agree"])
+
+
+def _sibling_mislabel(ctx: Ctx, exp: str) -> dict | None:
+    """Another file of this series whose track, tagged like ours, was confirmed to be the expected language."""
+    if not ctx.item.get("id"):
+        return None
+    for r in db.q("SELECT x.details, x.message, f.label FROM issues x JOIN files f ON f.id=x.file_id WHERE "
+                  "f.item_id=? AND f.id!=? AND f.missing=0 AND x.code='audio_mislabeled' AND x.status IN ('open','ignored')",
+                  (ctx.item["id"], ctx.file["id"])):
+        d = db.unj(r["details"], {}) or {}
+        det = d.get("detected")
+        if not det:
+            m = re.search(r"sounds like (\w+)", r["message"] or "")
+            det = langs.norm(m.group(1)) if m else ""
+        if lang_match(det, exp):
+            return {"label": r["label"], "tag": d.get("tag", ""), "detected": det}
+    return None
+
+
 def check_language(ctx: Ctx):
     exp = ctx.expected
     dub = langs.norm(ctx.cfg["anime"]["dub_language"])
@@ -468,6 +590,12 @@ def check_language(ctx: Ctx):
     tracks = list(ctx.tracks.values())
     if not tracks:
         return
+    # Before concluding the expected language is missing, give thinly-sampled tracks more chances.
+    if exp and not any(lang_match(t["tag"], exp) or lang_match(t.get("detected"), exp) for t in tracks):
+        for t in tracks:
+            if len(t.get("windows", [])) < 3 and t.get("level_db", -120) > -70:
+                ctx.step(f"extra language samples track {t['a_index'] + 1}")
+                _extra_language_windows(ctx, t)
     for t in tracks:
         n, agree = len(t.get("windows", [])), t.get("agree", 0)
         det, tag = t["detected"], t["tag"]
@@ -479,7 +607,7 @@ def check_language(ctx: Ctx):
                 ctx.issue("language", "audio_mislabeled", "warning",
                           f"Audio track #{t['a_index'] + 1} is tagged {langs.name(tag)} but sounds like "
                           f"{langs.name(det)} in all {n} sampled windows ({t['prob']:.0%} avg).",
-                          a_index=t["a_index"], windows=t["windows"])
+                          a_index=t["a_index"], windows=t["windows"], tag=tag, detected=det)
             else:
                 t.update(effective=tag, confident=False, disputed=True)  # keep the tag; evidence stays in the result
         elif tag:
@@ -509,9 +637,16 @@ def check_language(ctx: Ctx):
         unsure = [t for t in tracks if not t["effective"]]
         found = sorted({langs.name(t["effective"]) for t in tracks if t["effective"]})
         what = "preferred" if ctx.item.get("language_override") else "original"
+        sib = _sibling_mislabel(ctx, exp)
+        tag_only = not any(t.get("confident") and t.get("detected") for t in tracks)
         if unsure and len(unsure) == len(tracks):
             ctx.issue("language", "language_unconfirmed", "warning",
                       f"Could not confirm {what} language ({langs.name(exp)}) audio - not enough clear speech.")
+        elif sib and tag_only:
+            ctx.issue("language", "language_unconfirmed", "warning",
+                      f"Tracks are tagged {', '.join(found) or 'unknown'}, but {sib['label']} from this series has the "
+                      f"same kind of tag and is confirmed {langs.name(exp)} - probably mislabeled too. Not raised as "
+                      "missing until speech confirms it.", sibling=sib)
         else:
             ctx.issue("language", "original_audio_missing", "error",
                       f"No {langs.name(exp)} audio ({what} language). Found: {', '.join(found) or 'unknown'}.",
@@ -537,6 +672,37 @@ def check_language(ctx: Ctx):
 DUB_TITLE = re.compile(r"\bdub|dubtitle|\bcc\b|closed.?caption", re.I)
 
 
+def _hardsubs(ctx: Ctx, sub_lang: str) -> dict | None:
+    """Burned-in subtitles? OCR the bottom third of frames taken mid-sentence. Only English OCR is bundled."""
+    if "hardsubs" in ctx.result:
+        return ctx.result["hardsubs"] or None
+    ctx.result["hardsubs"] = {}
+    if not (ocr.available() and ctx.info.get("video") and lang_match(sub_lang, "eng") and ctx.path):
+        return None
+    at = ctx.orig_track if ctx.orig_track is not None else next(iter(ctx.tracks), None)
+    spans = sorted((e - s, (s + e) / 2) for (ai, _), ivs in ctx.vad.items() if ai == at for s, e in ivs)
+    ts = [m for length, m in reversed(spans) if length >= 1.5][:5]
+    if not ts:  # no speech timing available: spread over the sampled segments
+        mids = ctx.segments[1:-1] if len(ctx.segments) >= 5 else ctx.segments
+        ts = [s + d * f for s, d in mids for f in (0.3, 0.7)][:5]
+    ctx.step("checking for burned-in subtitles")
+    hits, sample, total = 0, "", 0
+    for t in sorted(ts):
+        try:
+            words = ocr.confident_words(media.extract_ocr_frame(ctx.path, t, bottom_third=True))
+        except Exception:  # noqa: BLE001
+            continue
+        total += len(words)
+        if ocr.looks_like_subtitle(words):
+            hits += 1
+            sample = sample or " ".join(words)[:120]
+    # most dialogue frames carry readable text, and enough of it that a sign or credit can't do it alone
+    found = len(ts) >= 2 and hits >= max(2, (len(ts) + 1) // 2) and total >= 5
+    ctx.result["hardsubs"] = {"checked": len(ts), "with_text": hits, "found": found, "sample": sample,
+                              "timestamps": [round(t, 1) for t in ts]}
+    return ctx.result["hardsubs"] if found else None
+
+
 def _no_dialogue(ctx: Ctx) -> bool:
     """Near-zero speech in every analysed track (e.g. Baraka) - subtitle requirements don't apply."""
     tr = [t for t in ctx.tracks.values() if t.get("window_s")]
@@ -559,6 +725,14 @@ def check_subtitles(ctx: Ctx):
         needs = False
     subs = ctx.info["subs"]
     mine = [s for s in subs if lang_match(s["lang"], sub_lang)]
+    if needs and not mine:
+        hs = _hardsubs(ctx, sub_lang)
+        if hs:
+            ctx.issue("subtitles", "hardsubs", "info",
+                      f"No {langs.name(sub_lang)} subtitle track, but subtitles are burned into the picture "
+                      f"(text found in {hs['with_text']} of {hs['checked']} frames during dialogue).",
+                      evidence_ts=hs["timestamps"][:4], sample=hs["sample"])
+            needs = False
     ctx.result["subs_needed"] = needs
     if not ctx.pcfg.get("subtitles"):
         if needs and not mine:
@@ -807,7 +981,8 @@ def queue_reviews(ctx: Ctx, rng: random.Random):
     flagged = bool(codes & (DURATION_CODES | {"subs_mismatch", "subs_text_mismatch", "wrong_content"}))
     if ctx.item["kind"] == "series":
         eps = ctx.episodes
-        want = policy == "always" or (policy == "multi_episode" and (len(eps) >= 2 or "double_length" in codes)) \
+        want = policy == "always" or (policy == "multi_episode" and (len(eps) >= 2 or "double_length" in codes
+                                                                   or ctx.result.get("runtime_disputed"))) \
             or (policy in ("flagged", "multi_episode") and flagged)
         if want and policy != "never":
             starts = ctx.result.get("segment_starts") or [0.0]
@@ -867,7 +1042,7 @@ def auto_title_cards(ctx: Ctx, review: dict):
             texts.append(ocr.read_text(media.extract_ocr_frame(ctx.path, t)))
         except Exception:  # noqa: BLE001
             texts.append("")
-    found = ocr.match(texts, ocr.series_episodes(ctx.item))
+    found = ocr.match(texts, ocr.series_episodes(ctx.item), ctx.item.get("title", ""))
     expected = {e["id"] for e in ctx.episodes}
     hit_expected = {m["id"] for m in found if m["id"] in expected}
     others = [m for m in found if m["id"] not in expected and m["score"] >= 0.9]
@@ -975,6 +1150,7 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
            "warning" if fstatus in ("error", "critical", "failed") else "info")
     if status == "done":
         try:
+            actions.reconcile(fid)
             actions.propose_for_file(fid)
         except Exception:  # noqa: BLE001
             log.exception("proposing actions failed")

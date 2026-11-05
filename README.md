@@ -11,7 +11,7 @@ Anotherr runs on your Unraid server. It mirrors your Sonarr/Radarr libraries and
 | Area | Checks |
 |---|---|
 | **Integrity** | ffprobe sanity, sampled-segment decode errors, truncated files (the last segment is always decoded), container vs. stream duration, optional full decode (deep profile) |
-| **Runtime** | File length vs. the expected length. For series, the per-episode length is **learned from the series' own files** (median of length ÷ mapped episodes), so shows numbered by 11–13 min segments aren't judged against a 30 min runtime. Flags too short (wrong file, sample), much too long, and double-length single episodes (a special, or a different episode mapped as this one) |
+| **Runtime** | File length vs. two opinions: the per-episode length **learned from the same season's files** (or the whole series when a season has fewer than 5), and Sonarr/TVDB's per-episode runtime. A file is only flagged when **both** say it's off in the same direction, so segment-numbered shows and seasons with shorter episodes pass. Flags too short (wrong file, sample), much too long, and double-length single episodes (season finales are info only) |
 | **Video** | Black video, interlacing, and frozen video: keyframes nominate candidates, which are only reported after a continuous decode confirms the picture really stopped (≥10 s, black and the first/last 2 min excluded). One spot = info, two separate spots = warning |
 | **Audio language** | Whisper language detection on each audio track, run separately on several windows across the file (tags are often wrong or `und`). A tag is only overridden when ≥3 windows agree at ≥90% on average. The **original language is always preferred** unless you set a per-show/movie override. It also flags mislabeled tracks, a default track that isn't the preferred language, and silent tracks |
 | **Anime** | Original audio required, **dual audio preferred** (flags a missing dub as info), full subtitles required (not signs/songs only), **"dubtitles"** detection (subs that just caption the English dub) |
@@ -48,6 +48,7 @@ Scanning runs **around the clock** in slots:
 - **Priority**: never-checked files first, then recent imports, files whose release group has a bad track record, files with earlier problems, and the longest time since the last check.
 - **New imports** get a quick scan straight away: through Sonarr/Radarr webhooks, a history check every 15 minutes, or the next library sync, so webhooks are optional.
 - The Whisper model is unloaded after it sits idle, so Plex gets the VRAM back.
+- **Memory:** frames for reviews are rendered during the scan and cached in appdata (capped at 1 GB). At most 2 live frame extractions run at once, so a page full of frames can't start dozens of ffmpeg processes. The dashboard status reports memory use, and if the container is ever killed (e.g. out of memory), the next start logs what happened.
 
 ## Actions and automation
 

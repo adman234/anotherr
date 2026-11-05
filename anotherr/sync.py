@@ -64,6 +64,9 @@ def _upsert_file(item_id, arr_file_id, arr_path, size, episodes, label, group, q
         return existing["id"]
     disk, read_path = locate(local)
     if existing:  # file was replaced in place: reset scan state
+        from . import frames
+
+        frames.drop_file(existing["id"])
         _changed().append(existing["id"])
         db.x("""UPDATE files SET arr_path=?, local_path=?, disk=?, size=?, episodes=?, label=?, release_group=?,
                 quality=?, date_added=?, missing=0, status='unscanned', last_scan_at=NULL, open_issues=0 WHERE id=?""",
@@ -101,6 +104,8 @@ def _mark_missing(item_id: int, seen: set[int]):
                  (time.time(), r["id"]))
             db.x("UPDATE reviews SET status='dismissed' WHERE file_id=? AND status='pending'", (r["id"],))
             db.x("DELETE FROM queue WHERE file_id=?", (r["id"],))
+            db.x("UPDATE actions SET status='withdrawn', result='Withdrawn: the file is no longer in the library', "
+                 "updated_at=? WHERE file_id=? AND status='proposed'", (time.time(), r["id"]))
 
 
 def _ep_label(eps: list[dict]) -> str:

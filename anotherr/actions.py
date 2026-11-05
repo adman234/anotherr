@@ -27,11 +27,11 @@ def propose_for_file(file_id: int) -> list[int]:
     resub = sorted(codes & set(settings.RESUB_CODES))
     if redl and "redownload" not in recent:
         created += [_propose(file_id, "redownload", "Issues: " + ", ".join(redl), redl)]
-    elif resub and not redl and "resub" not in recent:  # a redownload would replace the subs anyway
+    elif resub and not redl:  # a redownload would replace the subs anyway
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (file_id,))
-        note = (" - Bazarr found nothing useful for this series before; consider Bazarr's Whisper provider "
-                "(translate) or the release's official subtitles" if item_id and resub_failed_before(item_id) else "")
-        created += [_propose(file_id, "resub", "Issues: " + ", ".join(resub) + note, resub)]
+        kind, reason = _sub_fix(file_id, item_id, resub)
+        if kind not in recent:
+            created += [_propose(file_id, kind, reason, resub)]
     created = [c for c in created if c]
     if created:
         maybe_auto(created)
@@ -63,6 +63,43 @@ def _still_open(file_id: int, codes: list[str]) -> bool:
                       [file_id, *codes]))
 
 
+WHISPER_CODES = ("subs_missing", "subs_signs_only")  # no usable full subtitle: a generated one fills the gap
+
+
+def _sub_fix(file_id: int, item_id: int | None, codes: list[str]) -> tuple[str, str]:
+    """Bazarr resub - or, once Bazarr's normal search came up empty for this series, a Whisper subtitle."""
+    base = "Issues: " + ", ".join(codes)
+    if not (item_id and resub_failed_before(item_id)):
+        return "resub", base
+    if not set(codes) & set(WHISPER_CODES):
+        return "resub", base + " - Bazarr found nothing useful for this series before"
+    why = whisper_blocker(file_id)
+    if why:
+        return "resub", base + f" - Bazarr found nothing useful for this series before; Whisper can't be used yet: {why}"
+    return "whisper_subtitle", (base + " - Bazarr's search found nothing for this series before, so this asks Bazarr's "
+                                       "Whisper provider (subgen) to transcribe + translate")
+
+
+def upgrade_resubs_to_whisper(item_id: int | None = None) -> int:
+    """Swap open resub proposals for Whisper ones where another plain search is known to be pointless."""
+    n = 0
+    sql = ("SELECT a.id, a.file_id, a.codes, f.item_id FROM actions a JOIN files f ON f.id=a.file_id "
+           "WHERE a.kind='resub' AND a.status='proposed'" + (" AND f.item_id=?" if item_id else ""))
+    for a in db.q(sql, (item_id,) if item_id else ()):
+        codes = db.unj(a["codes"], []) or []
+        kind, reason = _sub_fix(a["file_id"], a["item_id"], codes)
+        if kind != "whisper_subtitle":
+            continue
+        if _propose(a["file_id"], kind, reason, codes) or db.q1(
+                "SELECT id FROM actions WHERE file_id=? AND kind='whisper_subtitle' AND status IN ('proposed','queued','running')",
+                (a["file_id"],)):
+            db.x("UPDATE actions SET status='withdrawn', result='Withdrawn: replaced by a Whisper subtitle proposal "
+                 "(Bazarr found nothing for this series before)', updated_at=? WHERE id=? AND status='proposed'",
+                 (time.time(), a["id"]))
+            n += 1
+    return n
+
+
 def _rearm_point(file_id: int) -> float:
     """When something changed that makes a new Bazarr search worthwhile: the audio language was retagged (Bazarr
     picks subtitles by it) or a Whisper subtitle was fetched."""
@@ -92,7 +129,7 @@ def resub_failed_before(item_id: int) -> bool:
 
 
 def _propose(file_id: int, kind: str, reason: str, codes: list[str], auto: bool = False) -> int | None:
-    if db.q1("SELECT id FROM actions WHERE file_id=? AND kind=? AND status IN ('proposed','running')", (file_id, kind)):
+    if db.q1("SELECT id FROM actions WHERE file_id=? AND kind=? AND status IN ('proposed','queued','running')", (file_id, kind)):
         return None
     now = time.time()
     return db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, created_at, updated_at) "
@@ -105,13 +142,15 @@ def propose(file_id: int, kind: str, reason: str, codes: list[str] | None = None
 
 def whisper_blocker(file_id: int) -> str | None:
     """Why a Whisper subtitle can't be requested for this file (None = it can)."""
-    f = db.q1("SELECT f.episodes, f.audio_evidence, i.source FROM files f JOIN items i ON i.id=f.item_id WHERE f.id=?",
-              (file_id,))
+    from .retag import _evidence
+
+    f = db.q1("SELECT f.episodes, f.audio_evidence, f.last_scan_id, i.source FROM files f JOIN items i ON i.id=f.item_id "
+              "WHERE f.id=?", (file_id,))
     if not f:
         return "file not found"
     if f["source"] == "sonarr" and len(db.unj(f["episodes"], []) or []) != 1:
         return "Whisper subtitles are requested for one episode at a time; this file holds several (or none)"
-    ev = db.unj(f.get("audio_evidence"), {}) or {}
+    ev = _evidence(f) or {}  # also reads scans from before the evidence column
     tracks = ev.get("tracks") or []
     cur = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
     sub = langs.norm(settings.get()["languages"]["subtitle_language"]) or "eng"
@@ -184,12 +223,12 @@ def reject(action_id: int):
     db.x("UPDATE actions SET status='rejected', updated_at=? WHERE id=? AND status='proposed'", (time.time(), action_id))
 
 
-GROUPABLE = ("resub", "redownload")  # one approval per series + season + identical reason (UI/MCP)
+GROUPABLE = ("resub", "redownload", "whisper_subtitle")  # one approval per series + season + identical reason (UI/MCP)
 
 
 def approve_many(ids: list[int]) -> dict:
     """Approve a group of proposals: they're marked 'queued' at once and run one after another in the background
-    (a Bazarr search can take minutes per episode). Track-edit batches and Whisper keep their own approval."""
+    (a Bazarr search or Whisper transcription can take minutes per episode). Track-edit batches keep their own."""
     import threading
 
     claimed = []
@@ -206,7 +245,7 @@ def _run_queued(ids: list[int]) -> None:
     ok = failed = 0
     for i in ids:
         try:
-            r = execute(i)
+            r = execute(i, wait=True)
         except Exception as e:  # noqa: BLE001
             db.x("UPDATE actions SET status='failed', result=?, updated_at=? WHERE id=? AND status IN ('queued','running')",
                  (f"crashed: {e}", time.time(), i))
@@ -216,7 +255,8 @@ def _run_queued(ids: list[int]) -> None:
            "info" if not failed else "warning")
 
 
-def execute(action_id: int) -> dict:
+def execute(action_id: int, wait: bool = False) -> dict:
+    """Run one action. wait=True runs a Whisper request to the end in this thread (group approvals go one by one)."""
     a = db.q1("SELECT * FROM actions WHERE id=?", (action_id,))
     if not a or a["status"] not in ("proposed", "failed", "queued"):
         return {"ok": False, "error": "action not runnable"}
@@ -236,7 +276,7 @@ def execute(action_id: int) -> dict:
         if not f or not item:
             raise RuntimeError("file no longer in library")
         if a["kind"] == "whisper_subtitle":
-            return _start_whisper(action_id, f, item)
+            return _start_whisper(action_id, f, item, wait)
         if a["kind"] == "resub":
             msg = _resub(f, item)
         elif a["kind"] == "redownload":
@@ -256,7 +296,7 @@ def execute(action_id: int) -> dict:
     return {"ok": status == "done", "result": msg}
 
 
-def _start_whisper(action_id: int, f: dict, item: dict) -> dict:
+def _start_whisper(action_id: int, f: dict, item: dict, wait: bool = False) -> dict:
     """Bazarr transcribes while it 'downloads' the Whisper result, which can take a long time: run it in a thread."""
     import threading
 
@@ -264,6 +304,9 @@ def _start_whisper(action_id: int, f: dict, item: dict) -> dict:
     if why:
         raise RuntimeError(why)
     db.x("UPDATE actions SET result=?, updated_at=? WHERE id=?", ("asking Bazarr's Whisper provider", time.time(), action_id))
+    if wait:
+        _whisper_run(action_id, f, item)
+        return {"ok": db.scalar("SELECT status FROM actions WHERE id=?", (action_id,)) == "done"}
     threading.Thread(target=_whisper_run, args=(action_id, f, item), name=f"whisper-{action_id}", daemon=True).start()
     return {"ok": True, "result": "started - Bazarr is transcribing (this can take several minutes)"}
 

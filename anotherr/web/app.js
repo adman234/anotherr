@@ -251,7 +251,18 @@ function showFrames(fid) {
 }
 
 // ------------------------------------------------------------------ issues
-let ISS = { status: "open", severity: "", code: "", search: "", page: 1 };
+let ISS = { status: "open", severity: "", code: "", search: "", page: 1, group: true };
+const SUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"];
+function issueGroupRow(g) {
+  const n = g.items.length, ids = JSON.stringify(g.ids);
+  const bulkIss = (op, msg) => `act(()=>api('/api/issues/bulk',{method:'POST',body:{op:'${op}',ids:${ids}}}),${msg})`;
+  return `<tr><td>${sev(g.severity)}</td><td><a href="#/item/${g.item_id}">${esc(g.title)}</a> Season ${g.season} <span class="pill">${n} files</span>
+      <div class="small">${g.items.map((i) => `<a href="#/file/${i.file_id}" title="${esc(i.message)}">${esc(epLabel(i))}</a>`).join(", ")}</div></td>
+    <td><b>${esc(g.code)}</b><br><span class="small">${g.message ? esc(g.message) : `<details><summary>details differ per file</summary>${g.items.map((i) => `${esc(epLabel(i))}: ${esc(i.message)}`).join("<br>")}</details>`}</span></td>
+    <td class="muted">${esc(g.disks.join(", "))}</td>
+    <td>${g.status === "open" ? `${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
+      : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
+}
 async function issues() {
   const p = new URLSearchParams({ ...ISS, per_page: 100 });
   const res = await api("/api/issues?" + p);
@@ -259,12 +270,14 @@ async function issues() {
     <div class="toolbar"><select id="is"><option value="open">Open</option><option value="ignored">Ignored</option><option value="resolved">Resolved</option></select>
       <select id="isev"><option value="">Any severity</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="info">Info</option></select>
       <select id="icode"><option value="">Any type</option>${res.codes.map((c) => `<option value="${esc(c.code)}">${esc(c.code)} (${c.n})</option>`).join("")}</select>
-      <input id="iq" placeholder="Search" value="${esc(ISS.search)}"><span class="muted">${res.total}</span>
+      <input id="iq" placeholder="Search" value="${esc(ISS.search)}"><label class="small"><input type="checkbox" id="igroup" ${ISS.group ? "checked" : ""}> Group by show + season</label>
+      <span class="muted">${ISS.group ? `${res.issues} issues in ${res.total} rows` : res.total}</span>
       <button style="margin-left:auto" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'problems',profile:'standard'}}),r=>'Queued '+r.queued)">Rescan all problem files</button></div>
     <table><tr><th>Severity</th><th>File</th><th>Issue</th><th>Disk</th><th></th></tr>
-    ${res.rows.map((i) => `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
+    ${res.rows.map((i) => i.group ? issueGroupRow(i) : `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
       <td>${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> <button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
   $("#is").value = ISS.status; $("#isev").value = ISS.severity; $("#icode").value = ISS.code;
+  $("#igroup").onchange = (e) => { ISS.group = e.target.checked; ISS.page = 1; issues(); };
   for (const [id, k] of [["is", "status"], ["isev", "severity"], ["icode", "code"], ["iq", "search"]])
     $("#" + id).onchange = (e) => { ISS[k] = e.target.value; ISS.page = 1; issues(); };
 }
@@ -310,7 +323,7 @@ async function actionsPage() {
   window._actRows = rows;
 }
 // resub/redownload proposals for the same series + season with the same reason get one Approve
-const GROUPABLE = ["resub", "redownload"];
+const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
 const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
 function groupActions(rows) {
   const out = [], groups = {};
@@ -333,6 +346,7 @@ function groupRow(g) {
 }
 async function approveGroup(ids, kind) {
   if (kind === "redownload" && !confirm(`Blocklist and redownload these ${ids.length} files?`)) return;
+  if (kind === "whisper_subtitle" && !confirm(`Ask Bazarr's Whisper provider (subgen) to transcribe these ${ids.length} episodes? They run one at a time on the GPU - roughly a few minutes each.`)) return;
   await act(() => api("/api/actions/bulk", { method: "POST", body: { op: "approve", ids } }),
     (r) => (r.ok ? `Queued ${r.queued} - they run one after another` : "Nothing to run (already handled?)"));
 }

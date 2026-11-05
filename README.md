@@ -123,9 +123,18 @@ Problems create **proposals**:
 - **Resub**: asks Bazarr to search for new subtitles. Every open issue has a **Propose resub** button.
   After a search fails, automatic resubs for that series pause. They re-arm after 7 days, after the
   file's audio is retagged (Bazarr picks subtitles by the audio tag), or after a Whisper subtitle fetch.
-- **Whisper subtitles** (manual): asks Bazarr's Whisper provider to transcribe and translate one
-  episode. The Whisper provider must be enabled in Bazarr, and the audio tag must be known and not your
-  subtitle language. It can take several minutes.
+- **Whisper subtitles**: asks Bazarr's Whisper provider (e.g. subgen) to transcribe and translate one
+  episode.
+  - It's proposed in place of a resub for missing or signs-only subtitles once Bazarr's normal search
+    has come up empty for that series. Open resub proposals are switched over at startup.
+  - It's also a manual button on each file.
+  - The Whisper provider must be enabled in Bazarr, and the audio tag must be known and not your
+    subtitle language. Otherwise the resub stays, with the reason in its text.
+  - It's never automatic.
+- **One approval per season:** resub, redownload and Whisper proposals for the same series, season and
+  reason show as one row (Approve N). Approved rows run one after another in the background.
+- **Issues page** groups the same issue type per series and season (untick *Group by show + season*
+  for one row per file). Group rows have *Propose subtitle fix (N)* and *Ignore N*.
 - **Redownload**: marks the grab as failed in Sonarr/Radarr (blocklists the release), optionally deletes the bad file, then triggers a search.
 
 **Automation is off by default.** Turn it on in Settings → Automation. It runs only inside its own schedule windows, with a daily cap and a list of issue types allowed to trigger a redownload. Until then, every proposal waits for your approval on the Actions page (or from Claude).

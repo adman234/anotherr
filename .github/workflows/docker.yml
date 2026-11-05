@@ -30,7 +30,15 @@ jobs:
           python-version: "3.12"   # the python3 in the ubuntu24.04 base image
           cache: pip
       - name: System tools the tests need (without them the media tests are skipped)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg tesseract-ocr fonts-dejavu-core mkvtoolnix
+        timeout-minutes: 8  # a hung Ubuntu mirror should fail fast, not block a merge for half an hour
+        run: |
+          for attempt in 1 2; do
+            sudo timeout 180 apt-get update -o Acquire::Retries=3 \
+              && sudo timeout 240 apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+                 ffmpeg tesseract-ocr fonts-dejavu-core mkvtoolnix && exit 0
+            echo "apt attempt $attempt failed, retrying"; sleep 10
+          done
+          exit 1
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest -q -rs
 

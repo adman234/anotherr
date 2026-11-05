@@ -30,7 +30,7 @@ jobs:
           python-version: "3.12"   # the python3 in the ubuntu24.04 base image
           cache: pip
       - name: System tools the tests need (without them the media tests are skipped)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg tesseract-ocr fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg tesseract-ocr fonts-dejavu-core mkvtoolnix
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest -q -rs
 

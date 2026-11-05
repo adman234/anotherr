@@ -38,6 +38,8 @@ def reconcile(file_id: int | None = None) -> int:
     sql = "SELECT * FROM actions WHERE status='proposed'" + (" AND file_id=?" if file_id else "")
     n = 0
     for a in db.q(sql, (file_id,) if file_id else ()):
+        if a["kind"] == "retag_audio":
+            continue  # batches are rebuilt (and withdrawn when empty) by retag.refresh_item
         f = db.q1("SELECT missing FROM files WHERE id=?", (a["file_id"],))
         if not f or f["missing"]:
             why = "the file is no longer in the library"
@@ -81,6 +83,8 @@ def propose(file_id: int, kind: str, reason: str) -> int | None:
 
 def _eligible_auto(a: dict, cfg: dict) -> bool:
     acfg = cfg["automation"]
+    if a["kind"] == "retag_audio":
+        return False  # edits media files: always approved by a person
     if a["kind"] == "resub":
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (a["file_id"],))
         return bool(acfg["auto_resub"]) and not (item_id and resub_failed_before(item_id))
@@ -142,6 +146,10 @@ def execute(action_id: int) -> dict:
     a = db.q1("SELECT * FROM actions WHERE id=?", (action_id,))
     if not a or a["status"] not in ("proposed", "failed"):
         return {"ok": False, "error": "action not runnable"}
+    if a["kind"] == "retag_audio":
+        from . import retag
+
+        return retag.start(action_id)
     codes = db.unj(a["codes"], []) or []
     if codes and not _still_open(a["file_id"], codes):
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",

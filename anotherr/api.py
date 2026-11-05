@@ -109,6 +109,7 @@ def status():
     cfg = settings.get()
     return {
         "version": __version__,
+        "build": os.environ.get("ANOTHERR_BUILD", "dev"),
         "mcp_bridge_version": MCP_BRIDGE_VERSION,
         "current": (scanner.current_scans() or [{}])[0],  # first running scan (older clients)
         "scans": scanner.current_scans(),

@@ -98,6 +98,24 @@ def resolve_path(f: dict) -> str:
     return ""
 
 
+def _release_cache(path: str):
+    """Drop the scanned file from the page cache - unless Plex is playing it right now."""
+    if not path:
+        return
+    try:
+        from . import scheduler
+
+        playing = {os.path.basename((x.get("file") or "").replace("\\", "/"))
+                   for x in scheduler._streams_cache.get("sessions") or []}
+        if os.path.basename(path) in playing:
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    media.drop_cache(path)
+    for sd in media.sidecar_subs(path):
+        media.drop_cache(sd["path"])
+
+
 _resync_at: dict[int, float] = {}
 
 
@@ -177,6 +195,7 @@ def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None,
         log.exception("scan failed for file %s", file_id)
     finally:
         CURRENT.pop(slot, None)
+        _release_cache(ctx.path)
     return persist(ctx, scan_id, status, error, time.time() - started)
 
 

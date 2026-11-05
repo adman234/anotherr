@@ -57,6 +57,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=sha,format=short
+      - id: build
+        run: echo "id=$(echo ${{ github.sha }} | cut -c1-7) $(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_OUTPUT"
       # The registry cache keeps unchanged layers byte-identical between builds,
       # so Unraid only re-downloads the layers that actually changed.
       - uses: docker/build-push-action@v6
@@ -65,5 +67,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ANOTHERR_BUILD=${{ steps.build.outputs.id }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

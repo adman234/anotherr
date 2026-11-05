@@ -483,6 +483,21 @@ def image_sub_times(path: str, s_index: int | None = None, timeout: float = 1800
     return out
 
 
+def drop_cache(path: str) -> bool:
+    """Tell the kernel we're done with a file so its pages leave the page cache (and the container's memory)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        return True
+    except (OSError, AttributeError):
+        return False
+    finally:
+        os.close(fd)
+
+
 def extract_ocr_frame(path: str, t: float, width: int = 1280, bottom_third: bool = False) -> bytes:
     """Greyscale PNG frame for OCR (optionally just the bottom third, where subtitles sit)."""
     vf = f"scale={int(width)}:-2,format=gray"

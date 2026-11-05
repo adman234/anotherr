@@ -105,11 +105,28 @@ async function dashboard() {
     <div class="grid" style="margin-top:12px">
       <div><h3>Next up</h3><table>${c.next_up.map((r) => `<tr><td><a href="#/file/${r.id}">${esc(r.title)} ${esc(r.label || "")}</a></td><td class="muted">${esc(r.disk)}</td><td class="muted">${r.score}</td></tr>`).join("") || '<tr><td class="muted">Nothing due</td></tr>'}</table></div>
       <div><h3>Activity</h3><div id="activity" class="card small" style="max-height:340px;overflow:auto"></div></div>
-    </div>`;
+    </div>
+    <h3>Where scan time goes <select id="tdays" class="sm"><option value="1">last 24 h</option><option value="7" selected>last 7 days</option><option value="30">last 30 days</option></select></h3>
+    <div id="timings" class="muted small">Loading…</div>`;
+  $("#tdays").onchange = () => loadTimings();
+  loadTimings();
   const a = await api("/api/activity?limit=60");
   $("#activity").innerHTML = a.map((r) => `<div><span class="muted">${new Date(r.ts * 1000).toLocaleString()}</span> <span style="color:var(--${r.level === "info" ? "text" : r.level})">${esc(r.message)}</span></div>`).join("");
 }
 
+async function loadTimings() {
+  const t = await api("/api/stats/timings?days=" + ($("#tdays") ? $("#tdays").value : 7));
+  if (!$("#timings")) return;
+  if (!t.scans) { $("#timings").innerHTML = "No finished scans in this period."; return; }
+  const top = t.steps.length ? t.steps[0].seconds : 1;
+  $("#timings").innerHTML = `<div class="small" style="margin-bottom:6px">${t.scans} scans · ${fmtDur(t.seconds)} in total · ${t.avg_per_scan}s per scan on average
+      (${Object.entries(t.profiles).map(([k, v]) => `${esc(k)}: ${v.scans} × ${v.avg}s`).join(", ")})</div>
+    <table><tr><th>Step</th><th>Share</th><th>Total</th><th>Avg when it runs</th><th>Slowest</th><th>Runs</th><th>Controlled by</th></tr>
+    ${t.steps.map((s) => `<tr><td>${esc(s.step)}</td><td style="min-width:140px"><div style="background:var(--accent2);height:8px;border-radius:4px;width:${Math.max(2, 100 * s.seconds / top)}%"></div><span class="small">${s.share}%</span></td>
+      <td>${fmtDur(s.seconds)}</td><td>${s.avg}s</td><td>${s.max}s</td><td>${s.scans}</td><td class="small">${s.control.startsWith("scan.") || s.control.startsWith("review.") ? `<a href="#/settings">${esc(s.control)}</a>` : esc(s.control)}</td></tr>`).join("")}</table>
+    <div class="small muted" style="margin-top:4px">Settings named scan.checks.* can be turned off in Settings → Scanning. "Avg when it runs" is per scan that ran the step.</div>`;
+}
+const fmtDur = (sec) => (sec >= 3600 ? (sec / 3600).toFixed(1) + " h" : sec >= 60 ? Math.round(sec / 60) + " min" : Math.round(sec) + "s");
 const gbs = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB");
 function memCard(m) {
   if (m.docker_shows_mb == null) return `<div style="font-weight:600;margin:4px 0">${gbs(m.anotherr_mb + m.children_mb)}</div><div class="small muted">Anotherr + ${m.ffmpeg} ffmpeg</div>`;
@@ -222,7 +239,7 @@ async function filePage(id) {
         <div>Container</div><div>${fx.found ? `${esc(fx.container)} · ${fx.nlink > 1 ? `<b>hardlinked</b> (${fx.nlink} links)` : "not hardlinked"} · ${fx.writable ? `writable${fx.allowed ? "" : ' <span class="muted">(not under an allowed retag path)</span>'}` : '<span class="muted">read-only</span>'} · edits by ${esc(fx.edit_method || "?")}` : '<span class="muted">file not found</span>'}</div>
         <div>Last scan</div><div>${f.last_scan ? `${ago(f.last_scan.finished_at)} · ${esc(f.last_scan.profile)} · seed ${f.last_scan.seed} · ${r.elapsed_s || "?"}s` : "never"}</div></div></div>
       <div class="card"><b>Issues</b>${f.issues.map((i) => `<div style="margin:6px 0">${sev(i.severity)} <b>${esc(i.code)}</b> ${i.status === "ignored" ? '<span class="pill">ignored</span>' : ""}<br>${esc(i.message)}
-        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `<button class="sm" onclick="${propose("resub", i.id)}">Propose resub</button> ${i.code === "subs_missing" && !f.whisper_blocker ? `<button class="sm" onclick="${propose("whisper_subtitle", i.id)}">Whisper subtitles</button> ` : ""}` : ""}${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
+        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="${propose("resub", i.id)}">Propose resub</button> ` : ""}${i.code === "subs_missing" && !f.whisper_blocker ? `<button class="sm" onclick="${propose("whisper_subtitle", i.id)}">Whisper subtitles</button> ` : ""}` : ""}${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
     </div>
     <h3>Audio tracks</h3><table><tr><th>Track</th><th>Tag</th><th>Detected</th><th>Speech</th><th>Peak level</th><th>Info</th></tr>${audio || '<tr><td colspan=6 class="muted">Not analysed</td></tr>'}</table>
     <h3>Subtitles</h3><table><tr><th>Track</th><th>Lang</th><th>Kind</th><th>Dialogue cues</th></tr>${subs || `<tr><td colspan=4 class="muted">${(st.subs || []).length} track(s); content not analysed in this profile</td></tr>`}</table>
@@ -253,6 +270,17 @@ function showFrames(fid) {
 // ------------------------------------------------------------------ issues
 let ISS = { status: "open", severity: "", code: "", search: "", page: 1, group: true };
 const SUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"];
+// default-track / retag issues are fixed by a track-edit proposal: link to it, or rescan files scanned before it existed
+function trackFixButtons(r, items) {
+  if (!r.fix_actions) return null;
+  const noFix = (m) => /can't fix|no confidently/i.test(m || "");
+  const rescan = items.filter((i) => (r.fix_missing || []).includes(i.file_id) && !noFix(i.message)).map((i) => i.file_id);
+  const out = [];
+  if (r.fix_actions.length) out.push(`<a class="btn sm primary" href="#/actions" title="Proposal(s) ${r.fix_actions.join(", ")}">View proposed fix</a>`);
+  if (rescan.length) out.push(`<button class="sm" title="Scanned before the default-track fix existed (or the fix is waiting on a rescan) - a rescan builds the proposal" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${rescan}],profile:'standard'}}),r=>'Queued '+r.queued+' - the proposal appears in Actions after the scan')">Rescan ${rescan.length > 1 ? rescan.length + " " : ""}to find fix</button>`);
+  if (!out.length && items.some((i) => noFix(i.message))) out.push('<span class="small muted">no flag fix (no confident track)</span>');
+  return out.join(" ");
+}
 function issueGroupRow(g) {
   const n = g.items.length, ids = JSON.stringify(g.ids);
   const bulkIss = (op, msg) => `act(()=>api('/api/issues/bulk',{method:'POST',body:{op:'${op}',ids:${ids}}}),${msg})`;
@@ -260,7 +288,7 @@ function issueGroupRow(g) {
       <div class="small">${g.items.map((i) => `<a href="#/file/${i.file_id}" title="${esc(i.message)}">${esc(epLabel(i))}</a>`).join(", ")}</div></td>
     <td><b>${esc(g.code)}</b><br><span class="small">${g.message ? esc(g.message) : `<details><summary>details differ per file</summary>${g.items.map((i) => `${esc(epLabel(i))}: ${esc(i.message)}`).join("<br>")}</details>`}</span></td>
     <td class="muted">${esc(g.disks.join(", "))}</td>
-    <td>${g.status === "open" ? `${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
+    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
       : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
 }
 async function issues() {
@@ -275,7 +303,7 @@ async function issues() {
       <button style="margin-left:auto" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'problems',profile:'standard'}}),r=>'Queued '+r.queued)">Rescan all problem files</button></div>
     <table><tr><th>Severity</th><th>File</th><th>Issue</th><th>Disk</th><th></th></tr>
     ${res.rows.map((i) => i.group ? issueGroupRow(i) : `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
-      <td>${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> <button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
+      <td>${i.status === "open" ? `${trackFixButtons(i, [i]) ? trackFixButtons(i, [i]) + " " : ""}${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> ` : ""}<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
   $("#is").value = ISS.status; $("#isev").value = ISS.severity; $("#icode").value = ISS.code;
   $("#igroup").onchange = (e) => { ISS.group = e.target.checked; ISS.page = 1; issues(); };
   for (const [id, k] of [["is", "status"], ["isev", "severity"], ["icode", "code"], ["iq", "search"]])
@@ -414,6 +442,11 @@ const HELP = {
   "scan.hw_decode": "auto = decode video on the NVIDIA GPU (NVDEC), falling back to CPU. Needs NVIDIA_DRIVER_CAPABILITIES to include 'video'.",
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
+  "scan.checks.interlace": "Sample the video for interlacing (idet). Cheap; finds combing artifacts.",
+  "scan.checks.extra_language_samples": "When no track seems to be in the expected language, analyse more audio windows before saying so. Prevents false 'wrong language' issues.",
+  "scan.checks.hardsubs": "OCR a few frames for burned-in subtitles (English only).",
+  "scan.checks.subtitle_sync": "Compare subtitle timing with detected speech (finds out-of-sync subtitles).",
+  "scan.checks.subtitle_content": "Transcribe some speech with Whisper and compare it with the subtitle text (finds wrong-episode / wrong-language subtitles and dubtitles). Usually the most expensive subtitle check.",
   "review.title_cards": "When to queue title-card checks: never | multi_episode | flagged | always.",
   "review.visual_quality_on_deep": "Deep scans queue a picture-quality check (hardcoded subs, watermarks, cam rips).",
   "schedule.max_disks": "Hard drives scanned at the same time (each slot works on a different disk).",

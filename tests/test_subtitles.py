@@ -132,3 +132,20 @@ def test_duration_plus_sub_mismatch_becomes_wrong_content_but_duration_alone_sta
     c.issue("integrity", "duration_short", "error", "short")
     scanner.consolidate(c)
     assert [i["code"] for i in c.issues] == ["duration_short"]
+
+
+def test_turned_off_checks_skip_their_steps_and_timings_add_up(d, fake_whisper):
+    from fastapi.testclient import TestClient
+
+    from anotherr import api, settings
+
+    v = make_video(d, "checksoff", [(440, "eng")], [([(a + 4, b + 4) for a, b in CUES], TEXTS, "eng", "English")])
+    settings.save({**settings.get(), "scan": {**settings.get()["scan"], "checks": {"subtitle_sync": False, "interlace": False}}})
+    fid, codes = scan(v)
+    assert "subs_out_of_sync" not in codes  # the sync check didn't run
+    res = db.unj(db.scalar("SELECT result FROM scans WHERE file_id=? ORDER BY id DESC", (fid,)))
+    assert "interlace check" not in res["timings"] and not any(k.startswith("subtitle sync") for k in res["timings"])
+    assert res["sync_skipped"].startswith("subtitle sync check turned off")
+    t = TestClient(api.app).get("/api/stats/timings").json()
+    assert t["scans"] >= 1 and t["steps"] and all(s["control"] for s in t["steps"])
+    assert abs(sum(s["share"] for s in t["steps"]) - 100) < 1

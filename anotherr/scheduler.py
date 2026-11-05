@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-from . import actions, arr, db, frames, health, paths, scanner, settings, stt, sync, unraid
+from . import actions, arr, db, frames, health, paths, scanner, settings, stt, sync, trackedit, unraid
 from .schedule_util import active_window, next_window_start
 
 log = logging.getLogger("anotherr.scheduler")
@@ -340,6 +340,10 @@ class Worker(threading.Thread):
         now = time.time()
         if now - getattr(self, "_last_beat", 0) > 60:
             self._last_beat = now
+            try:
+                trackedit.reap()
+            except Exception:  # noqa: BLE001
+                log.exception("action reaper failed")
             health.beat({"scans": [s.get("disk") for s in STATUS.get("slots", [])]})
         if now - getattr(self, "_last_prune", 0) > 3600:
             self._last_prune = now

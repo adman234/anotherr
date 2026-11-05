@@ -8,6 +8,9 @@ from . import arr, db, langs, settings
 from .schedule_util import in_windows
 
 log = logging.getLogger("anotherr.actions")
+TRACK_KINDS = ("retag_audio", "set_default_audio", "set_default_subtitle")  # run by trackedit
+MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle")  # what a person can propose from a file/issue
+REARM_AFTER = 7 * 86400
 
 
 def propose_for_file(file_id: int) -> list[int]:
@@ -17,7 +20,9 @@ def propose_for_file(file_id: int) -> list[int]:
     created = []
     # don't re-propose a fix that already ran in the last week (avoids resub -> rescan -> resub loops)
     recent = {r["kind"] for r in db.q("SELECT kind FROM actions WHERE file_id=? AND status IN ('done','failed') "
-                                      "AND updated_at > ?", (file_id, time.time() - 7 * 86400))}
+                                      "AND updated_at > ?", (file_id, time.time() - REARM_AFTER))}
+    if "resub" in recent and _rearmed(file_id):
+        recent.discard("resub")
     redl = sorted(codes & set(settings.REDOWNLOAD_CODES))
     resub = sorted(codes & set(settings.RESUB_CODES))
     if redl and "redownload" not in recent:
@@ -38,8 +43,8 @@ def reconcile(file_id: int | None = None) -> int:
     sql = "SELECT * FROM actions WHERE status='proposed'" + (" AND file_id=?" if file_id else "")
     n = 0
     for a in db.q(sql, (file_id,) if file_id else ()):
-        if a["kind"] == "retag_audio":
-            continue  # batches are rebuilt (and withdrawn when empty) by retag.refresh_item
+        if a["kind"] in TRACK_KINDS:
+            continue  # batches are rebuilt (and withdrawn when empty) by their proposal refresh
         f = db.q1("SELECT missing FROM files WHERE id=?", (a["file_id"],))
         if not f or f["missing"]:
             why = "the file is no longer in the library"
@@ -58,10 +63,27 @@ def _still_open(file_id: int, codes: list[str]) -> bool:
                       [file_id, *codes]))
 
 
+def _rearm_point(file_id: int) -> float:
+    """When something changed that makes a new Bazarr search worthwhile: the audio language was retagged (Bazarr
+    picks subtitles by it) or a Whisper subtitle was fetched."""
+    return db.scalar("SELECT MAX(updated_at) FROM actions a WHERE status='done' AND kind IN ('retag_audio','whisper_subtitle') "
+                     "AND (file_id=? OR payload LIKE ?)", (file_id, f'%"file_id": {int(file_id)},%')) or 0
+
+
+def _rearmed(file_id: int) -> bool:
+    last = db.scalar("SELECT MAX(updated_at) FROM actions WHERE file_id=? AND kind='resub' AND status IN ('done','failed')",
+                     (file_id,)) or 0
+    return _rearm_point(file_id) > last
+
+
 def resub_failed_before(item_id: int) -> bool:
-    """A Bazarr search already ran for this series and the rescan afterwards still found the same problem."""
+    """A Bazarr search already ran for this series and the rescan afterwards still found the same problem.
+    Re-arms after 7 days, after a retag of that file's audio, or after a Whisper subtitle fetch."""
     for a in db.q("""SELECT a.file_id, a.updated_at, a.codes FROM actions a JOIN files f ON f.id=a.file_id
-                     WHERE f.item_id=? AND a.kind='resub' AND a.status='done'""", (item_id,)):
+                     WHERE f.item_id=? AND a.kind='resub' AND a.status='done' AND a.updated_at > ?""",
+                  (item_id, time.time() - REARM_AFTER)):
+        if _rearm_point(a["file_id"]) > a["updated_at"]:
+            continue
         codes = db.unj(a["codes"], []) or list(settings.RESUB_CODES)
         if db.q1(f"SELECT id FROM issues WHERE file_id=? AND status='open' AND created_at > ? AND code IN "
                  f"({','.join('?' * len(codes))})", [a["file_id"], a["updated_at"] + 60, *codes]):
@@ -77,13 +99,33 @@ def _propose(file_id: int, kind: str, reason: str, codes: list[str], auto: bool 
                 "VALUES (?,?,?,?,?,?,?,?)", (file_id, kind, reason, db.j(codes), "proposed", int(auto), now, now))
 
 
-def propose(file_id: int, kind: str, reason: str) -> int | None:
-    return _propose(file_id, kind, reason, [])
+def propose(file_id: int, kind: str, reason: str, codes: list[str] | None = None) -> int | None:
+    return _propose(file_id, kind, reason, codes or [])
+
+
+def whisper_blocker(file_id: int) -> str | None:
+    """Why a Whisper subtitle can't be requested for this file (None = it can)."""
+    f = db.q1("SELECT f.episodes, f.audio_evidence, i.source FROM files f JOIN items i ON i.id=f.item_id WHERE f.id=?",
+              (file_id,))
+    if not f:
+        return "file not found"
+    if f["source"] == "sonarr" and len(db.unj(f["episodes"], []) or []) != 1:
+        return "Whisper subtitles are requested for one episode at a time; this file holds several (or none)"
+    ev = db.unj(f.get("audio_evidence"), {}) or {}
+    tracks = ev.get("tracks") or []
+    cur = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
+    sub = langs.norm(settings.get()["languages"]["subtitle_language"]) or "eng"
+    tag = langs.norm((cur or {}).get("tag"))
+    if not tag or tag == "und":
+        return "the default audio track has no language tag - Bazarr's Whisper provider needs it (retag it first)"
+    if tag == sub:
+        return f"the audio is already {langs.name(sub)} - Whisper would only transcribe, not translate"
+    return None
 
 
 def _eligible_auto(a: dict, cfg: dict) -> bool:
     acfg = cfg["automation"]
-    if a["kind"] == "retag_audio":
+    if a["kind"] in TRACK_KINDS:
         return False  # edits media files: always approved by a person
     if a["kind"] == "resub":
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (a["file_id"],))
@@ -146,10 +188,10 @@ def execute(action_id: int) -> dict:
     a = db.q1("SELECT * FROM actions WHERE id=?", (action_id,))
     if not a or a["status"] not in ("proposed", "failed"):
         return {"ok": False, "error": "action not runnable"}
-    if a["kind"] == "retag_audio":
-        from . import retag
+    if a["kind"] in TRACK_KINDS:
+        from . import trackedit
 
-        return retag.start(action_id)
+        return trackedit.start(action_id)
     codes = db.unj(a["codes"], []) or []
     if codes and not _still_open(a["file_id"], codes):
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",
@@ -161,6 +203,8 @@ def execute(action_id: int) -> dict:
     try:
         if not f or not item:
             raise RuntimeError("file no longer in library")
+        if a["kind"] == "whisper_subtitle":
+            return _start_whisper(action_id, f, item)
         if a["kind"] == "resub":
             msg = _resub(f, item)
         elif a["kind"] == "redownload":
@@ -178,6 +222,48 @@ def execute(action_id: int) -> dict:
         db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?,?,?,?)",
              (f["id"], "standard", "action", time.time() + 120))
     return {"ok": status == "done", "result": msg}
+
+
+def _start_whisper(action_id: int, f: dict, item: dict) -> dict:
+    """Bazarr transcribes while it 'downloads' the Whisper result, which can take a long time: run it in a thread."""
+    import threading
+
+    why = whisper_blocker(f["id"])
+    if why:
+        raise RuntimeError(why)
+    db.x("UPDATE actions SET result=?, updated_at=? WHERE id=?", ("asking Bazarr's Whisper provider", time.time(), action_id))
+    threading.Thread(target=_whisper_run, args=(action_id, f, item), name=f"whisper-{action_id}", daemon=True).start()
+    return {"ok": True, "result": "started - Bazarr is transcribing (this can take several minutes)"}
+
+
+def _whisper_run(action_id: int, f: dict, item: dict) -> None:
+    label = f"{item['title']} {f.get('label', '')}"
+    try:
+        b = arr.Bazarr()
+        sub2 = langs.iso1(settings.get()["languages"]["subtitle_language"]) or "en"
+        if item["source"] == "sonarr":
+            ep = (db.unj(f["episodes"], []) or [{}])[0]
+            res = b.provider_results(episode_id=ep["id"])
+        else:
+            res = b.provider_results(radarr_id=item["arr_id"])
+        wh = [r for r in res if "whisper" in str(r.get("provider", "")).lower()]
+        if not wh:
+            raise RuntimeError("Bazarr returned no Whisper result - is the Whisper provider enabled in Bazarr "
+                               "(Settings > Providers > Whisper) and the subtitle language in the series' profile?")
+        pick = next((r for r in wh if (langs.iso1(r.get("language") or "") or str(r.get("language", ""))[:2]) == sub2), wh[0])
+        if item["source"] == "sonarr":
+            b.provider_download(pick, series_id=item["arr_id"], episode_id=ep["id"])
+        else:
+            b.provider_download(pick, radarr_id=item["arr_id"])
+        msg, status = f"Bazarr Whisper subtitle ({pick.get('language') or sub2}) downloaded", "done"
+    except Exception as e:  # noqa: BLE001
+        msg, status = str(e), "failed"
+    db.x("UPDATE actions SET status=?, result=?, updated_at=? WHERE id=? AND status='running'",
+         (status, msg, time.time(), action_id))
+    db.log(f"Action whisper_subtitle on {label}: {status} - {msg}", "info" if status == "done" else "error")
+    if status == "done":
+        db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?,?,?,?)",
+             (f["id"], "standard", "action", time.time() + 120))
 
 
 def _resub(f: dict, item: dict) -> str:

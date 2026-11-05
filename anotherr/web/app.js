@@ -200,12 +200,17 @@ async function filePage(id) {
   const f = await api("/api/files/" + id);
   const r = (f.last_scan && f.last_scan.result) || {};
   const st = r.streams || {};
-  const audio = (r.audio_tracks || []).map((t) => `<tr><td>#${t.a_index + 1}${t.default ? " (default)" : ""}</td><td>${esc(t.tag || "und")}</td><td>${t.detected ? `${esc(t.detected)} ${Math.round(t.prob * 100)}%` : '<span class="muted">-</span>'}</td><td>${t.speech_s}s</td><td>${t.level_db} dB</td><td>${esc(t.codec)} ${t.channels || ""}ch ${esc(t.title || "")}</td></tr>`).join("");
-  const subs = (r.subtitle_tracks || []).map((t) => `<tr><td>${esc(t.title || t.codec)}${t.external ? ' <span class="pill">external</span>' : ""}${t.default ? ' <span class="pill">default</span>' : ""}${t.forced ? ' <span class="pill">forced</span>' : ""}</td><td>${esc(t.lang)}</td><td>${esc(t.kind)}</td><td>${t.cues} (${t.per_min}/min)</td></tr>`).join("");
+  const analysed = Object.fromEntries((r.audio_tracks || []).map((t) => [t.a_index, t]));
+  const allAudio = (f.audio_tracks || []).length ? f.audio_tracks.map((t) => ({ ...t, ...(analysed[t.a_index] || {}), default: t.default, analysed: t.analysed })) : (r.audio_tracks || []).map((t) => ({ ...t, analysed: true }));
+  const audio = allAudio.map((t) => `<tr><td>#${t.a_index + 1}${t.default ? ' <span class="pill">default</span>' : ""}${t.forced ? ' <span class="pill">forced</span>' : ""}${t.commentary ? ' <span class="pill">commentary</span>' : ""}</td><td>${esc(t.tag || "und")}</td><td>${t.detected ? `${esc(t.detected)} ${Math.round(t.prob * 100)}%` : t.analysed === false ? '<span class="muted">not analysed</span>' : '<span class="muted">-</span>'}</td><td>${t.speech_s ?? "-"}${t.speech_s != null ? "s" : ""}</td><td>${t.level_db != null ? t.level_db + " dB" : "-"}</td><td>${esc(t.codec || "")} ${t.channels || ""}ch ${esc(t.title || "")}</td></tr>`).join("");
+  const fx = f.facts || {};
+  const propose = (kind, issue) => `act(()=>api('/api/actions',{method:'POST',body:{file_id:${f.id},kind:'${kind}'${issue ? ",issue_id:" + issue : ""}}}),r=>r.action_id?'Proposed - see Actions':r.note)`;
+  const subs = (r.subtitle_tracks || f.subtitle_tracks || []).map((t) => `<tr><td>${t.s_index != null ? "s" + (t.s_index + 1) + " " : ""}${esc(t.title || t.codec)}${t.external ? ' <span class="pill">external</span>' : ""}${t.default ? ' <span class="pill">default</span>' : ""}${t.forced ? ' <span class="pill">forced</span>' : ""}</td><td>${esc(t.lang)}</td><td>${esc(t.kind)}</td><td>${t.cues} (${t.per_min}/min)</td></tr>`).join("");
   const sync = (r.subtitle_sync || []).map((v) => `<tr><td>${esc(v.track)}</td><td>${esc(v.verdict)}</td><td>${v.offset ?? ""}s</td><td>${v.score ?? ""} (at 0: ${v.score_at_zero ?? ""})</td><td>${v.windows}</td></tr>`).join("");
   $("#app").innerHTML = `<h2><a href="#/item/${f.item.id}">${esc(f.item.title)}</a> ${esc(f.label || "")} ${sev(f.status)}</h2>
     <div class="toolbar">${profileSelect()}<button onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${f.id}],profile:$('#profile').value}}),'Queued')">Scan now</button>
-      <button onclick="act(()=>api('/api/actions',{method:'POST',body:{file_id:${f.id},kind:'resub',reason:'manual'}}),'Proposed')">Propose resub</button>
+      <button onclick="${propose("resub")}">Propose resub</button>
+      <button ${f.whisper_blocker ? `disabled title="${esc(f.whisper_blocker)}"` : 'title="Ask Bazarr\'s Whisper provider to transcribe + translate this episode"'} onclick="${propose("whisper_subtitle")}">Whisper subtitles</button>
       <button onclick="act(()=>api('/api/actions',{method:'POST',body:{file_id:${f.id},kind:'redownload',reason:'manual'}}),'Proposed')">Propose redownload</button>
       <button onclick="framePicker(${f.id}, ${st.duration || 0})">View frames</button></div>
     <div class="grid">
@@ -214,9 +219,10 @@ async function filePage(id) {
         <div>Duration</div><div>${st.duration ? fmtTs(st.duration) : "?"} ${r.expected_runtime_s ? `(expected ~${Math.round(r.expected_runtime_s / 60)} min, ratio ${r.runtime_ratio})` : ""}</div>
         <div>Episodes</div><div>${f.episodes.map((e) => `S${String(e.season).padStart(2, "0")}E${String(e.episode).padStart(2, "0")} ${esc(e.title)}`).join("<br>") || "-"}</div>
         <div>Expected audio</div><div>${esc(r.expected_language || "?")}${r.dual_audio ? " · dual audio ✓" : ""}</div>
+        <div>Container</div><div>${fx.found ? `${esc(fx.container)} · ${fx.nlink > 1 ? `<b>hardlinked</b> (${fx.nlink} links)` : "not hardlinked"} · ${fx.writable ? `writable${fx.allowed ? "" : ' <span class="muted">(not under an allowed retag path)</span>'}` : '<span class="muted">read-only</span>'} · edits by ${esc(fx.edit_method || "?")}` : '<span class="muted">file not found</span>'}</div>
         <div>Last scan</div><div>${f.last_scan ? `${ago(f.last_scan.finished_at)} · ${esc(f.last_scan.profile)} · seed ${f.last_scan.seed} · ${r.elapsed_s || "?"}s` : "never"}</div></div></div>
       <div class="card"><b>Issues</b>${f.issues.map((i) => `<div style="margin:6px 0">${sev(i.severity)} <b>${esc(i.code)}</b> ${i.status === "ignored" ? '<span class="pill">ignored</span>' : ""}<br>${esc(i.message)}
-        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
+        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `<button class="sm" onclick="${propose("resub", i.id)}">Propose resub</button> ${i.code === "subs_missing" && !f.whisper_blocker ? `<button class="sm" onclick="${propose("whisper_subtitle", i.id)}">Whisper subtitles</button> ` : ""}` : ""}${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
     </div>
     <h3>Audio tracks</h3><table><tr><th>Track</th><th>Tag</th><th>Detected</th><th>Speech</th><th>Peak level</th><th>Info</th></tr>${audio || '<tr><td colspan=6 class="muted">Not analysed</td></tr>'}</table>
     <h3>Subtitles</h3><table><tr><th>Track</th><th>Lang</th><th>Kind</th><th>Dialogue cues</th></tr>${subs || `<tr><td colspan=4 class="muted">${(st.subs || []).length} track(s); content not analysed in this profile</td></tr>`}</table>
@@ -257,7 +263,7 @@ async function issues() {
       <button style="margin-left:auto" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'problems',profile:'standard'}}),r=>'Queued '+r.queued)">Rescan all problem files</button></div>
     <table><tr><th>Severity</th><th>File</th><th>Issue</th><th>Disk</th><th></th></tr>
     ${res.rows.map((i) => `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
-      <td>${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
+      <td>${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> <button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
   $("#is").value = ISS.status; $("#isev").value = ISS.severity; $("#icode").value = ISS.code;
   for (const [id, k] of [["is", "status"], ["isev", "severity"], ["icode", "code"], ["iq", "search"]])
     $("#" + id).onchange = (e) => { ISS[k] = e.target.value; ISS.page = 1; issues(); };
@@ -295,27 +301,36 @@ async function actionsPage() {
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${rows.map((a) => `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
-      <td>${a.kind === "retag_audio" ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? retagTable(a) : ""}</td><td class="small">${esc(a.result)}</td>
+      <td>${TRACK_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? trackTable(a) : ""}</td><td class="small">${esc(a.result)}</td>
       <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
-        ${a.kind === "retag_audio" && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original audio tags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
+        ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original track languages and default flags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
   if (rows.some((a) => a.status === "running")) setTimeout(() => { if (location.hash.startsWith("#/actions")) actionsPage(); }, 3000);
   $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(); };
   window._actRows = rows;
 }
-const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language" };
-function retagTable(a) {
+const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
+  set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle" };
+const TRACK_KINDS = ["retag_audio", "set_default_audio", "set_default_subtitle"];
+function opsText(f) {
+  if (!f.ops) return `audio ${f.a_index + 1}: ${esc(f.old || "untagged")} → <b>${esc(f.new)}</b>`;
+  return f.ops.map((o) => `${o.type === "a" ? "audio" : "subtitle"} ${o.type === "s" ? "s" : ""}${o.index + 1}: ${o.language ? `${esc(o.old || "untagged")} → <b>${esc(o.language)}</b>` : ""}${"default" in o ? (o.language ? ", " : "") + (o.default ? "<b>make default</b>" : "clear default") : ""}`).join("<br>");
+}
+function trackTable(a) {
   const p = a.payload, fs = p.files || [];
   const lang = p.series_language ? ` · series language: ${esc(p.series_language)}` : "";
-  return `<details style="margin-top:6px"><summary>${fs.length} track(s) - preview${lang}</summary><table class="small" style="margin-top:4px">
-    <tr><th>File</th><th>Track</th><th>Tag</th><th>Evidence</th><th>${a.status === "proposed" ? "Command (dry run)" : "Result"}</th></tr>
-    ${fs.map((f) => `<tr><td>${esc(f.label || "file " + f.file_id)}</td><td>${f.a_index + 1}</td><td>${esc(f.old || "untagged")} → <b>${esc(f.new)}</b></td>
-      <td>${esc(f.why)} (${Math.round((f.conf || 0) * 100)}%)</td><td>${a.status === "proposed" ? `<code style="word-break:break-all">${esc(f.command)}</code>`
-      : `${esc(f.status || "")}${f.status === "skipped" || f.status === "failed" ? ": " + esc(f.outcome || "") : ""}${f.status === "edited" ? (f.verified === true ? " ✓ read back" : f.verified === false ? " ✗ read-back failed" : " (waiting for rescan)") : ""}`}</td></tr>`).join("")}</table></details>`;
+  const notes = fs.flatMap((f) => (f.notes || []).map((n) => `${esc(f.label)}: ${esc(n)}`));
+  return `<details style="margin-top:6px"><summary>${fs.length} file(s) - preview${lang}</summary><table class="small" style="margin-top:4px">
+    <tr><th>File</th><th>Change</th><th>Evidence</th><th>${a.status === "proposed" ? "Command (dry run)" : "Result"}</th></tr>
+    ${fs.map((f) => `<tr><td>${esc(f.label || "file " + f.file_id)}</td><td>${opsText(f)}</td>
+      <td>${esc(f.why)}${a.kind === "retag_audio" ? ` (${Math.round((f.conf || 0) * 100)}%)` : ""}</td><td>${a.status === "proposed" ? `<code style="word-break:break-all">${esc(f.command)}</code>`
+      : `${esc(f.status || "")}${f.status === "skipped" || f.status === "failed" ? ": " + esc(f.outcome || "") : ""}${f.status === "edited" ? (f.verified === true ? " ✓ read back" : f.verified === false ? " ✗ read-back failed" : " (waiting for rescan)") : ""}`}</td></tr>`).join("")}</table>${notes.length ? `<div class="muted">${notes.join("<br>")}</div>` : ""}</details>`;
 }
 async function approveAction(id, kind, n) {
   if (kind === "redownload" && !confirm("Blocklist and redownload this file?")) return;
   if (kind === "retag_audio" && !confirm(`Write the audio language tag into ${n} file(s)? Each change is logged and can be undone.`)) return;
+  if ((kind === "set_default_audio" || kind === "set_default_subtitle") && !confirm(`Change the default track flags in ${n} file(s)? Other defaults of the same type are cleared, forced flags are kept. Each change is logged and can be undone.`)) return;
+  if (kind === "whisper_subtitle" && !confirm("Ask Bazarr's Whisper provider to transcribe this episode? It uses Bazarr's Whisper server (GPU) for several minutes.")) return;
   await act(() => api(`/api/actions/${id}/approve`, { method: "POST" }), (r) => (r.ok ? "Started: " + r.result : "Not run: " + (r.result || r.error)));
 }
 async function bulk(op, kind) {

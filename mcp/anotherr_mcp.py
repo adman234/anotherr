@@ -20,7 +20,6 @@ Claude Desktop config (claude_desktop_config.json):
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 
@@ -33,7 +32,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 4  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 5  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -144,14 +143,35 @@ def item_files(item_id: int) -> str:
 
 @mcp.tool()
 def file_report(file_id: int) -> str:
-    """Full report for one file: streams, audio language detection, subtitle analysis, issues, reviews, actions."""
+    """Full report for one file: every audio track (real tag/default/forced flags, plus the language verdict when it
+    was analysed), subtitle tracks with their index (sN), container / hardlink count / writable, subtitle analysis,
+    issues, reviews, actions."""
     f = _get(f"/api/files/{file_id}")
     res = (f.get("last_scan") or {}).get("result") or {}
+    analysed = {t.get("a_index"): t for t in res.get("audio_tracks") or []}
+    audio = []
+    for t in f.get("audio_tracks") or []:
+        a = analysed.get(t["a_index"]) or {}
+        audio.append({"track": t["a_index"] + 1, "tag": t.get("tag") or "und", "default": t.get("default"),
+                      "forced": t.get("forced"), "commentary": t.get("commentary"), "title": t.get("title"),
+                      "codec": t.get("codec"), "channels": t.get("channels"), "analysed": t.get("analysed"),
+                      "detected": a.get("detected") if t.get("analysed") else None,
+                      "effective": t.get("effective") if t.get("analysed") else None,
+                      "confident": t.get("confident"), "all_windows_agree": t.get("all_agree"),
+                      "windows": t.get("windows"), "speech_s": t.get("speech_s")})
+    subs = [{**{k: s.get(k) for k in ("lang", "kind", "title", "codec", "default", "forced", "hearing_impaired",
+                                       "external", "cues", "per_min")},
+             "track": f"s{s['s_index'] + 1}" if s.get("s_index") is not None else "external"}
+            for s in (f.get("subtitle_tracks") or res.get("subtitle_tracks") or [])]
+    facts = f.get("facts") or {}
     slim = {
         "title": f["item"]["title"], "label": f["label"], "path": f["arr_path"], "disk": f["disk"],
         "status": f["status"], "episodes": f["episodes"], "release_group": f["release_group"],
+        "container": facts.get("container"), "hardlinks": facts.get("nlink"), "writable": facts.get("writable"),
+        "under_allowed_retag_path": facts.get("allowed"), "edit_method": facts.get("edit_method"),
+        "whisper_subtitle_possible": not f.get("whisper_blocker"), "whisper_blocker": f.get("whisper_blocker"),
         "expected_language": res.get("expected_language"), "runtime_ratio": res.get("runtime_ratio"),
-        "audio_tracks": res.get("audio_tracks"), "subtitle_tracks": res.get("subtitle_tracks"),
+        "audio_tracks": audio or res.get("audio_tracks"), "subtitle_tracks": subs,
         "subtitle_sync": res.get("subtitle_sync"), "subtitle_content": res.get("subtitle_content"),
         "segment_starts": res.get("segment_starts"), "duration": (res.get("streams") or {}).get("duration"),
         "issues": [{k: i[k] for k in ("id", "severity", "code", "message", "status")} for i in f["issues"]],
@@ -305,33 +325,60 @@ def list_actions(status: str = "proposed") -> str:
                      + (f" -> {a['result']}" if a.get("result") else "") for a in rows)
 
 
+def _ops_text(f: dict) -> str:
+    if not f.get("ops"):
+        return f"audio {f['a_index'] + 1}: {f.get('old') or 'untagged'} -> {f['new']}"
+    out = []
+    for o in f["ops"]:
+        t = f"{'audio ' if o['type'] == 'a' else 'subtitle s'}{o['index'] + 1}:"
+        if o.get("language"):
+            t += f" {o.get('old') or 'untagged'} -> {o['language']}"
+        if "default" in o:
+            t += " make default" if o["default"] else " clear default"
+        out.append(t)
+    return "; ".join(out)
+
+
 @mcp.tool()
-def retag_preview(action_id: int) -> str:
-    """Details of a 'retag_audio' proposal: every file and track it would change (old -> new tag), the language
-    evidence behind each, and the exact command that would run. Nothing is changed by looking."""
+def track_edit_preview(action_id: int) -> str:
+    """Details of a track-edit proposal (retag_audio, set_default_audio, set_default_subtitle): every file and the
+    track changes it would make, the evidence behind each, notes, and the exact command that would run (other
+    defaults of the same type are cleared at run time; forced flags are kept). Nothing is changed by looking."""
     a = _get(f"/api/actions/{action_id}")
     p = a.get("payload") or {}
-    lines = [f"action {a['id']} [{a['status']}] {a['reason']}",
+    lines = [f"action {a['id']} [{a['status']}] {a['kind']}: {a['reason']}",
              f"case: {p.get('case')}  review: {p.get('review')}  series language: {p.get('series_language')}"]
     for f in p.get("files", []):
-        lines.append(f"- {f.get('label') or 'file ' + str(f['file_id'])} track {f['a_index'] + 1}: "
-                     f"{f.get('old') or 'untagged'} -> {f['new']} ({f.get('why')}, {f.get('conf', 0):.0%})"
+        conf = f" {f.get('conf', 0):.0%}" if a["kind"] == "retag_audio" else ""
+        lines.append(f"- {f.get('label') or 'file ' + str(f['file_id'])}: {_ops_text(f)} ({f.get('why')}{conf})"
                      + (f" | {f.get('status')}: {f.get('outcome', '')}" if f.get("status") not in (None, "pending") else "")
+                     + "".join(f"\n    note: {n}" for n in f.get("notes") or [])
                      + (f"\n    {f.get('command')}" if a["status"] == "proposed" else ""))
     return "\n".join(lines)
 
 
 @mcp.tool()
+def retag_preview(action_id: int) -> str:
+    """Alias of track_edit_preview (kept for older prompts)."""
+    return track_edit_preview(action_id)
+
+
+@mcp.tool()
 def undo_retag(action_id: int) -> str:
-    """Restore the original audio tags a finished retag_audio action wrote (from its rollback log).
-    Only do this when the user asks."""
+    """Restore the track languages and default flags a finished track-edit action (retag_audio, set_default_audio,
+    set_default_subtitle) changed, from its rollback log. Only do this when the user asks."""
     return _j(_send("POST", f"/api/actions/{action_id}/undo"))
 
 
 @mcp.tool()
-def propose_action(file_id: int, kind: str, reason: str) -> str:
-    """Propose resub (Bazarr subtitle search) or redownload (blocklist + search in Sonarr/Radarr)."""
-    return _j(_send("POST", "/api/actions", {"file_id": file_id, "kind": kind, "reason": reason}))
+def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0) -> str:
+    """Propose resub (Bazarr subtitle search), redownload (blocklist + search in Sonarr/Radarr) or whisper_subtitle
+    (Bazarr's Whisper provider transcribes + translates one episode; needs a known, non-subtitle-language audio tag).
+    Pass issue_id to tie it to one issue (it's withdrawn when that issue closes). Nothing runs until approved."""
+    body = {"file_id": file_id, "kind": kind, "reason": reason}
+    if issue_id:
+        body["issue_id"] = issue_id
+    return _j(_send("POST", "/api/actions", body))
 
 
 @mcp.tool()

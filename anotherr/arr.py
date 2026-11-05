@@ -123,6 +123,26 @@ class Bazarr(Client):
         return self.req("PATCH", "/api/movies/subtitles", timeout=300, params={
             "radarrid": radarr_id, "language": lang2, "forced": str(forced).lower(), "hi": str(hi).lower()})
 
+    # manual search + download (used to pick one provider, e.g. Whisper). Bazarr's Whisper provider transcribes
+    # while downloading, so the download call can take many minutes.
+    def provider_results(self, episode_id: int | None = None, radarr_id: int | None = None) -> list[dict]:
+        r = (self.get("/api/providers/episodes", episodeid=episode_id) if episode_id is not None
+             else self.get("/api/providers/movies", radarrid=radarr_id))
+        return (r or {}).get("data", []) if isinstance(r, dict) else (r or [])
+
+    def provider_download(self, result: dict, series_id: int | None = None, episode_id: int | None = None,
+                          radarr_id: int | None = None, timeout: int = 3600):
+        params = {"hi": str(result.get("hearing_impaired", False)).lower(), "forced": str(result.get("forced", False)).lower(),
+                  "original_format": str(result.get("original_format", False)).lower(),
+                  "provider": result["provider"], "subtitle": result["subtitle"]}
+        if result.get("language"):
+            params["language"] = result["language"]
+        if episode_id is not None:
+            params.update(seriesid=series_id, episodeid=episode_id)
+            return self.req("POST", "/api/providers/episodes", timeout=timeout, params=params, data=params)
+        params["radarrid"] = radarr_id
+        return self.req("POST", "/api/providers/movies", timeout=timeout, params=params, data=params)
+
 
 class Tautulli(Client):
     service = "tautulli"

@@ -14,7 +14,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, sync, unraid
+from . import __version__, actions, arr, db, defaults, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, sync, trackedit, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -43,8 +43,20 @@ def auth(request: Request):
         raise HTTPException(401, "invalid or missing API key")
 
 
+def _thread_crash(args):
+    """Any background thread that dies unexpectedly says so in the activity log (not just stderr)."""
+    if args.exc_type is SystemExit:
+        return
+    log.error("thread %s crashed", getattr(args.thread, "name", "?"), exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    try:
+        db.log(f"Background task {getattr(args.thread, 'name', '?')} crashed: {args.exc_type.__name__}: {args.exc_value}", "error")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _startup():
     redact.install()
+    threading.excepthook = _thread_crash
     db.init()
     note = health.check_previous_run()
     if note:
@@ -56,7 +68,11 @@ def _startup():
     n = actions.reconcile()
     if n:
         db.log(f"Withdrew {n} proposed action(s) whose issues are no longer open")
-    threading.Thread(target=retag.refresh_all, daemon=True, name="anotherr-retag-refresh").start()
+    def _refresh_track_proposals():
+        retag.refresh_all()
+        defaults.refresh_all()
+
+    threading.Thread(target=_refresh_track_proposals, daemon=True, name="anotherr-track-proposals").start()
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
     db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
@@ -258,10 +274,18 @@ def file_detail(file_id: int):
     f["reviews"] = [dict(r, timestamps=db.unj(r["timestamps"], [])) for r in
                     db.q("SELECT * FROM reviews WHERE file_id=? ORDER BY id DESC LIMIT 10", (file_id,))]
     f["actions"] = db.q("SELECT * FROM actions WHERE file_id=? ORDER BY id DESC LIMIT 10", (file_id,))
+    ev = db.unj(f.pop("audio_evidence", None), {}) or {}
+    f["audio_tracks"] = ev.get("tracks") or []  # every audio track with its real flags + the language verdict
+    f["subtitle_tracks"] = ev.get("subs") or []
+    try:
+        f["facts"] = trackedit.file_facts(f)
+    except Exception as e:  # noqa: BLE001
+        f["facts"] = {"error": str(e)}
+    f["whisper_blocker"] = actions.whisper_blocker(file_id)
     return f
 
 
-MCP_BRIDGE_VERSION = 4  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 5  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -373,12 +397,12 @@ def queue_list(limit: int = 200):
 
 @app.delete("/api/queue", dependencies=[Depends(auth)])
 def queue_clear():
-    return {"removed": db.x("DELETE FROM queue")}
+    return {"removed": db.n("DELETE FROM queue")}
 
 
 @app.delete("/api/queue/{qid}", dependencies=[Depends(auth)])
 def queue_remove(qid: int):
-    return {"removed": db.x("DELETE FROM queue WHERE id=?", (qid,))}
+    return {"removed": db.n("DELETE FROM queue WHERE id=?", (qid,))}
 
 
 @app.post("/api/control/pause", dependencies=[Depends(auth)])
@@ -479,6 +503,7 @@ def issue_update(issue_id: int, body: dict = Body(...)):
     item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (fid,))
     if item_id:
         retag.refresh_item(item_id)  # ignoring a file's untagged/mislabeled issue takes it out of its retag batch
+        defaults.refresh_item(item_id)
     return {"ok": True}
 
 
@@ -570,10 +595,24 @@ def actions_list(status: str = "proposed", limit: int = 200):
 
 @app.post("/api/actions", dependencies=[Depends(auth)])
 def action_create(body: dict = Body(...)):
+    """Manual proposal: kind resub | redownload | whisper_subtitle, optionally for one issue (issue_id)."""
     kind = body.get("kind")
-    if kind not in ("resub", "redownload"):
-        raise HTTPException(400, "kind must be resub | redownload")
-    aid = actions.propose(int(body["file_id"]), kind, body.get("reason") or "manual")
+    if kind not in actions.MANUAL_KINDS:
+        raise HTTPException(400, "kind must be " + " | ".join(actions.MANUAL_KINDS))
+    file_id, reason, codes = int(body.get("file_id") or 0), body.get("reason") or "manual", []
+    if body.get("issue_id"):
+        i = db.q1("SELECT file_id, code, message FROM issues WHERE id=?", (int(body["issue_id"]),))
+        if not i:
+            raise HTTPException(404, "issue not found")
+        file_id, codes = i["file_id"], [i["code"]]
+        reason = f"Manual, for {i['code']}: {i['message'][:200]}"
+    if kind == "whisper_subtitle":
+        why = actions.whisper_blocker(file_id)
+        if why:
+            raise HTTPException(400, why)
+        reason = reason.replace("Manual,", "Bazarr Whisper subtitle (translate),", 1) if codes else \
+            "Bazarr Whisper subtitle (translate) - manual"
+    aid = actions.propose(file_id, kind, reason, codes)
     return {"action_id": aid, "note": None if aid else "an open proposal of this kind already exists"}
 
 
@@ -584,11 +623,11 @@ def action_approve(action_id: int):
 
 @app.post("/api/actions/{action_id}/undo", dependencies=[Depends(auth)])
 def action_undo(action_id: int):
-    """Restore the audio tags a retag_audio action changed (from the rollback log)."""
+    """Restore the track languages/default flags a track-edit action changed (from the rollback log)."""
     a = db.q1("SELECT kind, status FROM actions WHERE id=?", (action_id,))
-    if not a or a["kind"] != retag.KIND or a["status"] not in ("done", "failed"):
-        raise HTTPException(400, "only finished retag_audio actions can be undone")
-    return retag.undo(action_id)
+    if not a or a["kind"] not in actions.TRACK_KINDS or a["status"] not in ("done", "failed"):
+        raise HTTPException(400, "only finished track-edit actions (retag/default track) can be undone")
+    return trackedit.undo(action_id)
 
 
 @app.get("/api/actions/{action_id}", dependencies=[Depends(auth)])

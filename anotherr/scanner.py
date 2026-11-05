@@ -676,8 +676,14 @@ def check_language(ctx: Ctx):
     any_flag = any(a["default"] for a in ctx.info["audio"])
     default = next((t for t in tracks if t["default"]), None) if any_flag else ctx.tracks.get(0)
     if orig and default and not lang_match(default["effective"], exp):
+        from . import defaults
+
+        view = _track_view(ctx)
+        tgt = defaults.pick_audio(view, exp)
         ctx.issue("language", "default_audio_not_preferred", "warning",
-                  f"Default audio track is {langs.name(default['effective'])}, not {langs.name(exp)}.")
+                  defaults.fix_text_audio(view, exp) or
+                  f"Default audio track is {langs.name(default['effective'])}, not {langs.name(exp)}.",
+                  fix_available=bool(tgt), target_track=tgt["a_index"] + 1 if tgt else None)
     if ctx.item.get("is_anime") and ctx.cfg["anime"]["prefer_dual_audio"] and not lang_match(exp, dub):
         has_dub = any(lang_match(t["effective"], dub) for t in tracks)
         ctx.result["dual_audio"] = bool(orig) and has_dub
@@ -812,6 +818,8 @@ def check_subtitles(ctx: Ctx):
     ctx.result["subtitle_tracks"] = [
         {"title": a["track"]["title"], "lang": a["track"]["lang"], "codec": a["track"]["codec"],
          "external": a["track"]["external"], "default": a["track"]["default"], "forced": a["track"]["forced"],
+         "s_index": a["track"].get("s_index"), "hearing_impaired": bool(a["track"].get("hearing_impaired")),
+         "text": bool(a["track"].get("text")), "path": a["track"].get("path") if a["track"]["external"] else None,
          "kind": a["kind"], "cues": len(a["cues"]), "per_min": a["per_min"]}
         for a in analysed]
     if needs and not mine:
@@ -828,8 +836,13 @@ def check_subtitles(ctx: Ctx):
     # A default forced track in a film whose audio is already in your language (translating the odd
     # foreign-language scene) is correct - only flag it when the main audio is foreign.
     if needs and dflt and dflt["kind"] == "signs" and full and exp and not lang_match(exp, sub_lang):
+        emb_full = sorted([a for a in full if not a["track"]["external"]],
+                          key=lambda a: (not a["track"]["text"], bool(a["track"].get("hearing_impaired")), a["track"]["s_index"]))
+        fix = (f" Fix available: make subtitle track s{emb_full[0]['track']['s_index'] + 1} ('{emb_full[0]['name']}') "
+               "the default." if emb_full else " The full track is an external file, so its flag can't be changed.")
         ctx.issue("subtitles", "default_subs_signs", "info",
-                  "The default-flagged subtitle track is signs/songs only; the full track is not default.")
+                  f"The default-flagged subtitle track s{dflt['track']['s_index'] + 1} is signs/songs only; the full "
+                  f"track is not default.{fix}", fix_available=bool(emb_full))
 
     # ---- timing against the ORIGINAL-language speech
     at = ctx.orig_track
@@ -1135,15 +1148,25 @@ def _audio_evidence(ctx: Ctx) -> str | None:
     audio = (ctx.info or {}).get("audio") or []
     if not audio or not ctx.tracks:
         return None
+    return db.j({"scan_started": ctx.live.get("started_at") or time.time(), "container": ctx.info.get("format", ""),
+                 "tracks": _track_view(ctx), "subs": ctx.result.get("subtitle_tracks") or []})
+
+
+def _track_view(ctx: Ctx) -> list[dict]:
+    """Every audio track (analysed or not) with its real flags and the language verdict, if any."""
     out = []
-    for a in audio:
-        t = ctx.tracks.get(a["a_index"], {})
-        out.append({"a_index": a["a_index"], "tag": a["lang"], "title": a.get("title", ""),
+    for i, a in enumerate((ctx.info or {}).get("audio") or []):
+        ai = a.get("a_index", i)
+        t = ctx.tracks.get(ai, {})
+        out.append({"a_index": ai, "tag": a.get("lang", ""), "title": a.get("title", ""), "codec": a.get("codec"),
+                    "channels": a.get("channels"), "default": bool(a.get("default")),
                     "commentary": bool(a.get("commentary")), "forced": bool(a.get("forced")),
                     "hi": bool(a.get("hearing_impaired") or a.get("visual_impaired")),
-                    "speech_s": t.get("speech_s"), "windows": [{"lang": w["lang"], "prob": w["prob"]}
-                                                                for w in t.get("windows", [])]})
-    return db.j({"scan_started": ctx.live.get("started_at") or time.time(), "tracks": out})
+                    "analysed": bool(t), "speech_s": t.get("speech_s"),
+                    "effective": t.get("effective", a.get("lang", "") if not t else ""), "confident": bool(t.get("confident")),
+                    "all_agree": bool(t.get("all_agree")),
+                    "windows": [{"lang": w["lang"], "prob": w["prob"]} for w in t.get("windows", [])]})
+    return out
 
 
 # ====================================================================== persist
@@ -1188,8 +1211,11 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
         try:
             from . import retag
 
+            from . import defaults
+
             retag.after_scan(fid, ctx.info or {}, scan_id)
             retag.refresh_item(ctx.item["id"])
+            defaults.refresh_item(ctx.item["id"])
         except Exception:  # noqa: BLE001
             log.exception("retag bookkeeping failed")
         try:

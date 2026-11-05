@@ -30,4 +30,8 @@ EXPOSE 9797
 VOLUME ["/config"]
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s \
   CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9797/healthz', timeout=5)" || exit 1
+# Which build is running (commit + build time), shown on the dashboard and in /api/status.
+# Last, so it never invalidates the cached layers above.
+ARG ANOTHERR_BUILD=dev
+ENV ANOTHERR_BUILD=$ANOTHERR_BUILD
 ENTRYPOINT ["/entrypoint.sh"]

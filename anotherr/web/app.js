@@ -96,6 +96,7 @@ async function dashboard() {
         <div class="small muted">${s.automation.today}/${s.automation.max_per_day} auto actions today · <a href="#/settings">configure</a></div></div>
       <div class="card"><div class="muted">Whisper</div><div style="font-weight:600;margin:4px 0">${esc(s.whisper.model)} ${s.whisper.device ? "on " + esc(s.whisper.device) : "(loads on demand)"}</div>
         <div class="small" style="color:var(--error)">${esc(s.whisper.error || "")}</div><div class="small muted">Video decode: ${s.gpu_decode.mode === "off" ? "CPU (GPU off in settings)" : s.gpu_decode.available === false ? '<span style="color:var(--warning)">CPU (GPU unavailable)</span>' : s.gpu_decode.available ? '<span style="color:var(--ok)">GPU (NVDEC)</span>' : "GPU (not used yet)"}</div><div class="small muted">${s.unraid.detected ? "Unraid detected" : "Unraid not detected"}${s.unraid.parity_running ? " · parity check running" : ""}</div></div>
+      <div class="card"><div class="muted">Memory</div>${memCard(s.memory || {})}<div class="small muted" style="margin-top:4px">Build ${esc(s.build || "dev")}</div></div>
     </div>
     <h3>Coverage by library</h3>
     <table><tr><th>Library</th><th>Files</th><th>Checked</th><th>Health</th><th>Bad</th><th></th></tr>${c.libraries.map(covRow).join("") || '<tr><td colspan=6 class="muted">No data yet - sync first.</td></tr>'}</table>
@@ -109,6 +110,14 @@ async function dashboard() {
   $("#activity").innerHTML = a.map((r) => `<div><span class="muted">${new Date(r.ts * 1000).toLocaleString()}</span> <span style="color:var(--${r.level === "info" ? "text" : r.level})">${esc(r.message)}</span></div>`).join("");
 }
 
+const gbs = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB");
+function memCard(m) {
+  if (m.docker_shows_mb == null) return `<div style="font-weight:600;margin:4px 0">${gbs(m.anotherr_mb + m.children_mb)}</div><div class="small muted">Anotherr + ${m.ffmpeg} ffmpeg</div>`;
+  return `<div style="font-weight:600;margin:4px 0">${gbs(m.docker_shows_mb)} <span class="small muted">(what Docker shows)</span></div>
+    <div class="small">${gbs(m.processes_mb)} used by Anotherr${m.ffmpeg ? ` + ${m.ffmpeg} ffmpeg` : ""} · ${gbs(m.file_cache_mb)} file cache</div>
+    <div class="small muted">File cache is video the kernel keeps in RAM after reading it; it's released whenever memory is needed.</div>
+    ${m.oom_kills ? `<div class="small" style="color:var(--error)">${m.oom_kills} out-of-memory kill(s) since the container started</div>` : ""}`;
+}
 function profileSelect(id = "profile") {
   return `<select id="${id}"><option value="quick">quick</option><option value="standard" selected>standard</option><option value="deep">deep</option></select>`;
 }

@@ -61,12 +61,53 @@ def oom_kills() -> int | None:
     return None
 
 
+def _read_kv(path: str) -> dict[str, int]:
+    out = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                k, _, v = line.partition(" ")
+                if v.strip().isdigit():
+                    out[k] = int(v)
+    except OSError:
+        pass
+    return out
+
+
+def container_memory() -> dict:
+    """The container's memory as Docker sees it, split into what processes use and reclaimable file cache.
+
+    Docker counts the page cache of files the container read (minus the 'inactive' part). Scanning reads a
+    lot of video, so that number grows toward free RAM - the kernel gives it back on demand, it isn't a leak.
+    """
+    mb = 1024 * 1024
+    st = _read_kv("/sys/fs/cgroup/memory.stat")  # cgroup v2
+    try:
+        with open("/sys/fs/cgroup/memory.current") as fh:
+            cur = int(fh.read().strip())
+    except (OSError, ValueError):
+        cur = None
+    if st and cur is not None:
+        docker = cur - st.get("inactive_file", 0)
+        return {"container_mb": cur // mb, "docker_shows_mb": docker // mb, "processes_mb": st.get("anon", 0) // mb,
+                "file_cache_mb": st.get("file", 0) // mb, "active_file_cache_mb": st.get("active_file", 0) // mb}
+    st = _read_kv("/sys/fs/cgroup/memory/memory.stat")  # cgroup v1
+    try:
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as fh:
+            cur = int(fh.read().strip())
+    except (OSError, ValueError):
+        return {}
+    docker = cur - st.get("total_inactive_file", 0)
+    return {"container_mb": cur // mb, "docker_shows_mb": docker // mb, "processes_mb": st.get("total_rss", 0) // mb,
+            "file_cache_mb": st.get("total_cache", 0) // mb, "active_file_cache_mb": st.get("total_active_file", 0) // mb}
+
+
 def memory() -> dict:
     kids = children()
     return {"anotherr_mb": _rss_kb("self") // 1024, "children": len(kids),
             "children_mb": sum(k["rss_mb"] for k in kids),
             "ffmpeg": sum(1 for k in kids if k["name"].startswith(("ffmpeg", "ffprobe"))),
-            "oom_kills": oom_kills()}
+            "oom_kills": oom_kills(), **container_memory()}
 
 
 def beat(extra: dict | None = None):

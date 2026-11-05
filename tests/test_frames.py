@@ -57,3 +57,23 @@ def test_unclean_shutdown_is_reported(monkeypatch, tmp_path):
     health.beat()
     health.mark_clean_shutdown()
     assert health.check_previous_run() is None
+
+
+def test_scanned_file_is_released_from_page_cache(monkeypatch):
+    from anotherr import scanner, scheduler
+
+    dropped = []
+    monkeypatch.setattr(media, "drop_cache", lambda p: dropped.append(p) or True)
+    monkeypatch.setattr(media, "sidecar_subs", lambda p: [])
+    scheduler._streams_cache["sessions"] = [{"file": "/plex/tv/Show/playing.mkv"}]
+    scanner._release_cache("/mnt/disk1/tv/Show/done.mkv")
+    scanner._release_cache("/mnt/disk1/tv/Show/playing.mkv")  # Plex is reading it: leave its cache alone
+    scheduler._streams_cache["sessions"] = []
+    assert dropped == ["/mnt/disk1/tv/Show/done.mkv"]
+
+
+def test_drop_cache_works_on_a_real_file(tmp_path):
+    p = tmp_path / "x.bin"
+    p.write_bytes(b"x" * 100000)
+    assert media.drop_cache(str(p)) is True
+    assert media.drop_cache(str(tmp_path / "missing")) is False

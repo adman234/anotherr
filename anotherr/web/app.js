@@ -297,17 +297,44 @@ async function actionsPage() {
   const s = window.STATUS || (await api("/api/status"));
   $("#app").innerHTML = `<h2>Actions</h2>
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
-    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running">Running</option><option value="undone">Undone</option><option value="">All</option></select>
+    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
-    ${rows.map((a) => `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
+    ${groupActions(rows).map((a) => a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
       <td>${TRACK_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? trackTable(a) : ""}</td><td class="small">${esc(a.result)}</td>
       <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
         ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original track languages and default flags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
-  if (rows.some((a) => a.status === "running")) setTimeout(() => { if (location.hash.startsWith("#/actions")) actionsPage(); }, 3000);
+  if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith("#/actions")) actionsPage(); }, 3000);
   $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(); };
   window._actRows = rows;
+}
+// resub/redownload proposals for the same series + season with the same reason get one Approve
+const GROUPABLE = ["resub", "redownload"];
+const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
+function groupActions(rows) {
+  const out = [], groups = {};
+  for (const a of rows) {
+    if (a.status !== "proposed" || !GROUPABLE.includes(a.kind) || a.season == null) { out.push(a); continue; }
+    const k = [a.kind, a.item_id, a.season, a.reason].join("|");
+    if (!groups[k]) { groups[k] = { group: true, kind: a.kind, title: a.title, season: a.season, reason: a.reason, rows: [] }; out.push(groups[k]); }
+    groups[k].rows.push(a);
+  }
+  return out.map((g) => (g.group && g.rows.length === 1 ? g.rows[0] : g));
+}
+function groupRow(g) {
+  const ids = g.rows.map((a) => a.id), n = ids.length;
+  g.rows.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  return `<tr><td><span class="st s-proposed">proposed</span> <span class="pill">${n} files</span></td><td>${KIND_LABEL[g.kind] || esc(g.kind)}</td>
+    <td>${esc(g.title)} Season ${g.season}<div class="small">${g.rows.map((a) => `<a href="#/file/${a.file_id}">${esc(epLabel(a))}</a>`).join(", ")}</div></td>
+    <td class="small">${esc(g.reason)}</td><td></td>
+    <td><button class="sm primary" onclick="approveGroup([${ids}], '${g.kind}')">Approve ${n}</button>
+      <button class="sm" onclick="act(()=>api('/api/actions/bulk',{method:'POST',body:{op:'reject',ids:[${ids}]}}),r=>'Rejected '+r.rejected)">Reject ${n}</button></td></tr>`;
+}
+async function approveGroup(ids, kind) {
+  if (kind === "redownload" && !confirm(`Blocklist and redownload these ${ids.length} files?`)) return;
+  await act(() => api("/api/actions/bulk", { method: "POST", body: { op: "approve", ids } }),
+    (r) => (r.ok ? `Queued ${r.queued} - they run one after another` : "Nothing to run (already handled?)"));
 }
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
   set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle" };
@@ -334,9 +361,8 @@ async function approveAction(id, kind, n) {
   await act(() => api(`/api/actions/${id}/approve`, { method: "POST" }), (r) => (r.ok ? "Started: " + r.result : "Not run: " + (r.result || r.error)));
 }
 async function bulk(op, kind) {
-  for (const a of window._actRows.filter((a) => a.status === "proposed" && (!kind || a.kind === kind))) {
-    try { await api(`/api/actions/${a.id}/${op}`, { method: "POST" }); } catch (e) { toast(e.message); }
-  }
+  const ids = window._actRows.filter((a) => a.status === "proposed" && (!kind || a.kind === kind)).map((a) => a.id);
+  try { const r = await api("/api/actions/bulk", { method: "POST", body: { op, ids } }); toast(op === "approve" ? `Queued ${r.queued}` : `Rejected ${r.rejected}`); } catch (e) { toast(e.message); }
   route();
 }
 

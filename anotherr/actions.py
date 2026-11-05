@@ -184,9 +184,41 @@ def reject(action_id: int):
     db.x("UPDATE actions SET status='rejected', updated_at=? WHERE id=? AND status='proposed'", (time.time(), action_id))
 
 
+GROUPABLE = ("resub", "redownload")  # one approval per series + season + identical reason (UI/MCP)
+
+
+def approve_many(ids: list[int]) -> dict:
+    """Approve a group of proposals: they're marked 'queued' at once and run one after another in the background
+    (a Bazarr search can take minutes per episode). Track-edit batches and Whisper keep their own approval."""
+    import threading
+
+    claimed = []
+    for i in dict.fromkeys(int(x) for x in ids):
+        if db.n(f"UPDATE actions SET status='queued', result='queued', updated_at=? WHERE id=? AND status='proposed' "
+                f"AND kind IN ({','.join('?' * len(GROUPABLE))})", (time.time(), i, *GROUPABLE)):
+            claimed.append(i)
+    if claimed:
+        threading.Thread(target=_run_queued, args=(claimed,), name="anotherr-approve-many", daemon=True).start()
+    return {"ok": bool(claimed), "queued": len(claimed), "skipped": len(ids) - len(claimed)}
+
+
+def _run_queued(ids: list[int]) -> None:
+    ok = failed = 0
+    for i in ids:
+        try:
+            r = execute(i)
+        except Exception as e:  # noqa: BLE001
+            db.x("UPDATE actions SET status='failed', result=?, updated_at=? WHERE id=? AND status IN ('queued','running')",
+                 (f"crashed: {e}", time.time(), i))
+            r = {"ok": False}
+        ok, failed = ok + bool(r.get("ok")), failed + (not r.get("ok"))
+    db.log(f"Group approval: {ok} of {len(ids)} action(s) done" + (f", {failed} failed or withdrawn" if failed else ""),
+           "info" if not failed else "warning")
+
+
 def execute(action_id: int) -> dict:
     a = db.q1("SELECT * FROM actions WHERE id=?", (action_id,))
-    if not a or a["status"] not in ("proposed", "failed"):
+    if not a or a["status"] not in ("proposed", "failed", "queued"):
         return {"ok": False, "error": "action not runnable"}
     if a["kind"] in TRACK_KINDS:
         from . import trackedit

@@ -291,15 +291,32 @@ async function actionsPage() {
   const s = window.STATUS || (await api("/api/status"));
   $("#app").innerHTML = `<h2>Actions</h2>
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
-    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="">All</option></select>
+    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
-    ${rows.map((a) => `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${a.kind === "resub" ? "Bazarr resub" : "Blocklist + redownload"}</td>
-      <td><a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a></td><td class="small">${esc(a.reason)}</td><td class="small">${esc(a.result)}</td>
-      <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="if(${a.kind === "redownload"} && !confirm('Blocklist and redownload this file?'))return; act(()=>api('/api/actions/${a.id}/approve',{method:'POST'}),r=>r.ok?'Done: '+r.result:'Failed: '+(r.result||r.error))">Approve</button>` : ""}
-        ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
+    ${rows.map((a) => `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
+      <td>${a.kind === "retag_audio" ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? retagTable(a) : ""}</td><td class="small">${esc(a.result)}</td>
+      <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
+        ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
+        ${a.kind === "retag_audio" && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original audio tags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
+  if (rows.some((a) => a.status === "running")) setTimeout(() => { if (location.hash.startsWith("#/actions")) actionsPage(); }, 3000);
   $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(); };
   window._actRows = rows;
+}
+const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language" };
+function retagTable(a) {
+  const p = a.payload, fs = p.files || [];
+  const lang = p.series_language ? ` · series language: ${esc(p.series_language)}` : "";
+  return `<details style="margin-top:6px"><summary>${fs.length} track(s) - preview${lang}</summary><table class="small" style="margin-top:4px">
+    <tr><th>File</th><th>Track</th><th>Tag</th><th>Evidence</th><th>${a.status === "proposed" ? "Command (dry run)" : "Result"}</th></tr>
+    ${fs.map((f) => `<tr><td>${esc(f.label || "file " + f.file_id)}</td><td>${f.a_index + 1}</td><td>${esc(f.old || "untagged")} → <b>${esc(f.new)}</b></td>
+      <td>${esc(f.why)} (${Math.round((f.conf || 0) * 100)}%)</td><td>${a.status === "proposed" ? `<code style="word-break:break-all">${esc(f.command)}</code>`
+      : `${esc(f.status || "")}${f.status === "skipped" || f.status === "failed" ? ": " + esc(f.outcome || "") : ""}${f.status === "edited" ? (f.verified === true ? " ✓ read back" : f.verified === false ? " ✗ read-back failed" : " (waiting for rescan)") : ""}`}</td></tr>`).join("")}</table></details>`;
+}
+async function approveAction(id, kind, n) {
+  if (kind === "redownload" && !confirm("Blocklist and redownload this file?")) return;
+  if (kind === "retag_audio" && !confirm(`Write the audio language tag into ${n} file(s)? Each change is logged and can be undone.`)) return;
+  await act(() => api(`/api/actions/${id}/approve`, { method: "POST" }), (r) => (r.ok ? "Started: " + r.result : "Not run: " + (r.result || r.error)));
 }
 async function bulk(op, kind) {
   for (const a of window._actRows.filter((a) => a.status === "proposed" && (!kind || a.kind === kind))) {
@@ -329,7 +346,8 @@ async function queue() {
 const LABELS = {
   sonarr: "Sonarr", radarr: "Radarr", bazarr: "Bazarr", tautulli: "Tautulli (Plex activity)", path_mappings: "Path mappings",
   languages: "Languages", anime: "Anime", scan: "Scanning", review: "Visual reviews (Claude / manual)", schedule: "Scan schedule",
-  imports: "New imports (webhook)", sync: "Library sync", whisper: "Whisper (speech recognition)", automation: "Automation",
+  imports: "New imports (webhook)", sync: "Library sync", whisper: "Whisper (speech recognition)", retag: "Retag audio (writes to media files)",
+  automation: "Automation",
 };
 const HELP = {
   "path_mappings": "How Sonarr/Radarr paths map into this container. Example: Sonarr sees /tv → here it's /mnt/user/media/tv.",
@@ -363,6 +381,9 @@ const HELP = {
   "whisper.device": "auto tries CUDA first, then falls back to CPU.",
   "whisper.cpu_fallback_model": "Smaller model used if the GPU is unavailable.",
   "whisper.idle_unload_minutes": "Unload the model after this long idle so Plex gets the VRAM back.",
+  "retag.enabled": "Off by default. When on, approved 'Retag audio language' actions write the detected language into the file's audio track (MKV/WebM in place with mkvpropedit; other formats by a stream copy). Needs the container's /mnt mount set to Read/Write - Slave.",
+  "retag.allowed_paths": "One folder per line, as seen inside the container (e.g. /mnt/user/media/tv). Files outside these folders are never edited.",
+  "retag.break_hardlinks": "Hardlinked files (e.g. a torrent client's seeding copy) are skipped by default. When on, they get a new copy with the tag instead, leaving the seeded file untouched (uses free space equal to the file).",
   "automation.enabled": "Off by default. When on, proposals are executed automatically inside the windows below.",
   "automation.auto_resub": "Automatically ask Bazarr for new subtitles.",
   "automation.auto_redownload": "Automatically blocklist + redownload files with the issue types below.",
@@ -406,6 +427,7 @@ function render(path, val) {
     if (p === "whisper.device") return field(p, pretty(k), `<select data-k="${p}">${["auto", "cuda", "cpu"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.disks") return field(p, pretty(k), `<div data-list="${p}">${SET.disks.filter((d) => d).map((d) => `<label style="margin-right:10px"><input type="checkbox" value="${esc(d)}" ${v.includes(d) ? "checked" : ""}> ${esc(d)}</label>`).join("") || '<span class="muted">No disks detected yet (sync first)</span>'}</div>`);
     if (p === "automation.redownload_codes") return field(p, pretty(k), `<div data-list="${p}">${SET.redownload_codes.map((d) => `<label style="margin-right:10px;display:inline-block"><input type="checkbox" value="${d}" ${v.includes(d) ? "checked" : ""}> ${d}</label>`).join("")}</div>`);
+    if (p === "retag.allowed_paths") return field(p, pretty(k), `<textarea data-k="${p}" data-type="lines" rows="3" style="width:100%" placeholder="/mnt/user/media/tv">${esc((v || []).join("\n"))}</textarea>`);
     if (typeof v === "boolean") return field(p, pretty(k), `<input type="checkbox" data-k="${p}" data-type="bool" ${v ? "checked" : ""}>`);
     if (typeof v === "number") return field(p, pretty(k), `<input type="number" step="any" data-k="${p}" data-type="num" value="${v}" style="width:120px">`);
     if (typeof v === "string") return field(p, pretty(k), `<input data-k="${p}" value="${esc(v)}" style="width:260px">`);
@@ -422,7 +444,8 @@ function collect() {
   const out = {};
   document.querySelectorAll("[data-k]").forEach((el) => {
     let v = el.value;
-    if (el.dataset.type === "bool") v = el.checked; else if (el.dataset.type === "num") v = parseFloat(v); else if (el.dataset.type === "json") { try { v = JSON.parse(v); } catch { return; } }
+    if (el.dataset.type === "lines") v = v.split("\n").map((x) => x.trim()).filter(Boolean);
+    else if (el.dataset.type === "bool") v = el.checked; else if (el.dataset.type === "num") v = parseFloat(v); else if (el.dataset.type === "json") { try { v = JSON.parse(v); } catch { return; } }
     setPath(out, el.dataset.k, v);
   });
   document.querySelectorAll("[data-win]").forEach((el) => {

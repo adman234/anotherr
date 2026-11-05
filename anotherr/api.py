@@ -14,7 +14,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, frames, health, media, paths, redact, scanner, scheduler, settings, stt, sync, unraid
+from . import __version__, actions, arr, db, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, sync, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -56,6 +56,7 @@ def _startup():
     n = actions.reconcile()
     if n:
         db.log(f"Withdrew {n} proposed action(s) whose issues are no longer open")
+    threading.Thread(target=retag.refresh_all, daemon=True, name="anotherr-retag-refresh").start()
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
     db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
@@ -260,7 +261,7 @@ def file_detail(file_id: int):
     return f
 
 
-MCP_BRIDGE_VERSION = 3  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 4  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -475,6 +476,9 @@ def issue_update(issue_id: int, body: dict = Body(...)):
     fid = db.scalar("SELECT file_id FROM issues WHERE id=?", (issue_id,))
     _refresh_file_status(fid)
     actions.reconcile(fid)
+    item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (fid,))
+    if item_id:
+        retag.refresh_item(item_id)  # ignoring a file's untagged/mislabeled issue takes it out of its retag batch
     return {"ok": True}
 
 
@@ -560,6 +564,7 @@ def actions_list(status: str = "proposed", limit: int = 200):
     rows = db.q(sql + " ORDER BY a.id DESC LIMIT ?", args + [min(limit, 1000)])
     for r in rows:
         r["codes"] = db.unj(r["codes"], [])
+        r["payload"] = db.unj(r.get("payload"), None)
     return rows
 
 
@@ -575,6 +580,25 @@ def action_create(body: dict = Body(...)):
 @app.post("/api/actions/{action_id}/approve", dependencies=[Depends(auth)])
 def action_approve(action_id: int):
     return actions.execute(action_id)
+
+
+@app.post("/api/actions/{action_id}/undo", dependencies=[Depends(auth)])
+def action_undo(action_id: int):
+    """Restore the audio tags a retag_audio action changed (from the rollback log)."""
+    a = db.q1("SELECT kind, status FROM actions WHERE id=?", (action_id,))
+    if not a or a["kind"] != retag.KIND or a["status"] not in ("done", "failed"):
+        raise HTTPException(400, "only finished retag_audio actions can be undone")
+    return retag.undo(action_id)
+
+
+@app.get("/api/actions/{action_id}", dependencies=[Depends(auth)])
+def action_detail(action_id: int):
+    a = db.q1(ACTION_SQL + " WHERE a.id=?", (action_id,))
+    if not a:
+        raise HTTPException(404)
+    a["codes"] = db.unj(a["codes"], [])
+    a["payload"] = db.unj(a.get("payload"), None)
+    return a
 
 
 @app.post("/api/actions/{action_id}/reject", dependencies=[Depends(auth)])

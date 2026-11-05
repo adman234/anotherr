@@ -1130,6 +1130,22 @@ def consolidate(ctx: Ctx):
         ctx.result["suppressed"] = suppressed
 
 
+def _audio_evidence(ctx: Ctx) -> str | None:
+    """Per-track language evidence kept on the file row, so retag batches never re-read whole scan results."""
+    audio = (ctx.info or {}).get("audio") or []
+    if not audio or not ctx.tracks:
+        return None
+    out = []
+    for a in audio:
+        t = ctx.tracks.get(a["a_index"], {})
+        out.append({"a_index": a["a_index"], "tag": a["lang"], "title": a.get("title", ""),
+                    "commentary": bool(a.get("commentary")), "forced": bool(a.get("forced")),
+                    "hi": bool(a.get("hearing_impaired") or a.get("visual_impaired")),
+                    "speech_s": t.get("speech_s"), "windows": [{"lang": w["lang"], "prob": w["prob"]}
+                                                                for w in t.get("windows", [])]})
+    return db.j({"scan_started": ctx.live.get("started_at") or time.time(), "tracks": out})
+
+
 # ====================================================================== persist
 
 def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> dict:
@@ -1159,8 +1175,9 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
         open_sev = [r[0] for r in c.execute("SELECT severity FROM issues WHERE file_id=? AND status='open'", (fid,))]
         fstatus = "failed" if status == "failed" else (db.worst(open_sev) or "ok")
         c.execute("UPDATE files SET status=?, open_issues=?, last_scan_at=?, last_scan_id=?, last_profile=?, "
-                  "duration=COALESCE(?, duration) WHERE id=?",
-                  (fstatus, len(open_sev), now, scan_id, ctx.profile, (ctx.info or {}).get("duration") or None, fid))
+                  "duration=COALESCE(?, duration), audio_evidence=COALESCE(?, audio_evidence) WHERE id=?",
+                  (fstatus, len(open_sev), now, scan_id, ctx.profile, (ctx.info or {}).get("duration") or None,
+                   _audio_evidence(ctx), fid))
         c.execute("UPDATE scans SET status=?, finished_at=?, result=?, error=? WHERE id=?",
                   (status, now, db.j(ctx.result), error, scan_id))
         c.execute("DELETE FROM queue WHERE file_id=?", (fid,))
@@ -1168,6 +1185,13 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
     db.log(f"Scanned {label} [{ctx.profile}] -> {fstatus} ({len(ctx.issues)} issues, {elapsed:.0f}s)",
            "warning" if fstatus in ("error", "critical", "failed") else "info")
     if status == "done":
+        try:
+            from . import retag
+
+            retag.after_scan(fid, ctx.info or {}, scan_id)
+            retag.refresh_item(ctx.item["id"])
+        except Exception:  # noqa: BLE001
+            log.exception("retag bookkeeping failed")
         try:
             actions.reconcile(fid)
             actions.propose_for_file(fid)

@@ -33,7 +33,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 3  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 4  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -303,6 +303,29 @@ def list_actions(status: str = "proposed") -> str:
         return "No actions."
     return "\n".join(f"action {a['id']} [{a['status']}] {a['kind']} - {a['title']} {a['label'] or ''}: {a['reason']}"
                      + (f" -> {a['result']}" if a.get("result") else "") for a in rows)
+
+
+@mcp.tool()
+def retag_preview(action_id: int) -> str:
+    """Details of a 'retag_audio' proposal: every file and track it would change (old -> new tag), the language
+    evidence behind each, and the exact command that would run. Nothing is changed by looking."""
+    a = _get(f"/api/actions/{action_id}")
+    p = a.get("payload") or {}
+    lines = [f"action {a['id']} [{a['status']}] {a['reason']}",
+             f"case: {p.get('case')}  review: {p.get('review')}  series language: {p.get('series_language')}"]
+    for f in p.get("files", []):
+        lines.append(f"- {f.get('label') or 'file ' + str(f['file_id'])} track {f['a_index'] + 1}: "
+                     f"{f.get('old') or 'untagged'} -> {f['new']} ({f.get('why')}, {f.get('conf', 0):.0%})"
+                     + (f" | {f.get('status')}: {f.get('outcome', '')}" if f.get("status") not in (None, "pending") else "")
+                     + (f"\n    {f.get('command')}" if a["status"] == "proposed" else ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def undo_retag(action_id: int) -> str:
+    """Restore the original audio tags a finished retag_audio action wrote (from its rollback log).
+    Only do this when the user asks."""
+    return _j(_send("POST", f"/api/actions/{action_id}/undo"))
 
 
 @mcp.tool()

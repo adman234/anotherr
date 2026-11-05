@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-venv ffmpeg tzdata ca-certificates util-linux \
-      tesseract-ocr tesseract-ocr-eng \
+      tesseract-ocr tesseract-ocr-eng mkvtoolnix \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m venv /opt/venv
 

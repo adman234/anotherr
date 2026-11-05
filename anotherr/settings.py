@@ -75,6 +75,11 @@ DEFAULTS: dict = {
         "cpu_fallback_model": "small",
         "idle_unload_minutes": 10,
     },
+    "retag": {
+        "enabled": False,            # writing language tags into media files; needs /mnt mounted read/write
+        "allowed_paths": [],         # only files under these folders may be edited, e.g. /mnt/user/media/tv
+        "break_hardlinks": False,    # hardlinked files (seeding copies): skip (default) or write a new copy
+    },
     "automation": {
         "enabled": False,
         "windows": [{"days": ALL_DAYS, "start": "02:00", "end": "06:00"}],

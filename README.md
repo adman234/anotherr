@@ -50,6 +50,35 @@ Scanning runs **around the clock** in slots:
 - The Whisper model is unloaded after it sits idle, so Plex gets the VRAM back.
 - **Memory:** frames for reviews are rendered during the scan and cached in appdata (capped at 1 GB). At most 2 live frame extractions run at once, so a page full of frames can't start dozens of ffmpeg processes. The dashboard status reports memory use, and if the container is ever killed (e.g. out of memory), the next start logs what happened.
 
+## Retagging audio languages (optional, off by default)
+
+Many releases ship with untagged or wrongly tagged audio tracks (e.g. a Korean show tagged English). Plex,
+Sonarr and Bazarr all go by the tag. For example, Bazarr's Whisper provider only translates when it knows
+the audio language. When language detection is unanimous, Anotherr proposes a **Retag audio language**
+action that writes the detected language into the file.
+
+- **Untagged tracks:** ≥2 sampled windows, all agreeing, ≥0.90 average confidence. A 1/1 or 2/3 result
+  qualifies only if ≥2 other files of the same release agree. A language that differs from the series'
+  language goes to a separate *Manual review* batch.
+- **Wrong tags:** ≥3 windows, all agreeing, ≥0.95, the detected language must be the series' own
+  language, and ≥2 sibling files must agree. These are never automatic.
+- **Excluded:** files with wrong-content, truncation or length issues; no-dialogue files; commentary,
+  forced and hearing-impaired tracks; anything whose issue you've ignored.
+- **One proposal per series and season,** with a dry-run preview of each file's command. Approving runs
+  it; **Undo** restores the old tags from the rollback log (`/config/retag_log.jsonl`).
+- **Editing:** MKV/WebM are edited in place with `mkvpropedit` (header only). Other formats are
+  stream-copied with ffmpeg and atomically replace the original, keeping owner and mode. Before each
+  edit Anotherr checks the file is unchanged since the scan, writable, under an allowed path and not
+  playing in Plex. Afterwards it verifies with ffprobe (same streams, same duration, new tag reads back).
+- **Hardlinked files** (seeding copies) are skipped unless `retag.break_hardlinks` is on, in which case
+  they get a new copy.
+- **Afterwards:** Anotherr asks Sonarr/Radarr to rescan and Bazarr to scan the series from disk, and
+  rescans each file to read the tag back.
+
+To enable: set the container's `/mnt` path to **Read/Write - Slave**, then in **Settings → Retag audio**
+turn it on and list the allowed folders. Start with one small batch and check the result in Sonarr,
+Bazarr and Plex.
+
 ## Actions and automation
 
 Problems create **proposals**:

@@ -97,7 +97,9 @@ def summarize(probe: dict) -> dict:
             video.append(base)
         elif t == "audio":
             base.update(channels=s.get("channels"), a_index=len(audio),
-                        commentary=bool(disp.get("comment")) or "comment" in base["title"].lower())
+                        commentary=bool(disp.get("comment")) or "comment" in base["title"].lower(),
+                        hearing_impaired=bool(disp.get("hearing_impaired")),
+                        visual_impaired=bool(disp.get("visual_impaired")))
             audio.append(base)
         elif t == "subtitle":
             base.update(s_index=len(subs), hearing_impaired=bool(disp.get("hearing_impaired")),

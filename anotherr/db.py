@@ -138,6 +138,8 @@ def conn() -> sqlite3.Connection:
 # Columns added after the first release (CREATE TABLE IF NOT EXISTS won't add them to old DBs)
 _ADDED_COLUMNS = [
     ("files", "duration", "REAL"),  # seconds, from ffprobe; feeds the per-series runtime estimate
+    ("files", "audio_evidence", "TEXT"),  # compact per-track language evidence from the last scan (retag)
+    ("actions", "payload", "TEXT"),  # batch actions (retag_audio): files, tracks, preview, per-file results
 ]
 
 

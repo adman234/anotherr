@@ -75,9 +75,16 @@ action that writes the detected language into the file.
 - **Afterwards:** Anotherr asks Sonarr/Radarr to rescan and Bazarr to scan the series from disk, and
   rescans each file to read the tag back.
 
-To enable: set the container's `/mnt` path to **Read/Write - Slave**, then in **Settings → Retag audio**
-turn it on and list the allowed folders. Start with one small batch and check the result in Sonarr,
-Bazarr and Plex.
+To enable without giving Anotherr write access to all of `/mnt`:
+
+1. Keep the **Unraid /mnt** path **Read Only - Slave**.
+2. Add a **Path** for each media folder you want editable, with the *same* host and container path,
+   e.g. host `/mnt/user/media/tv` → container `/mnt/user/media/tv`, access **Read/Write - Slave**.
+   Docker mounts it on top of the read-only `/mnt`, so only those folders are writable.
+3. In **Settings → Retag audio**, turn it on and list the same folders as allowed paths.
+
+Anotherr reads from the physical disk paths but writes through these share paths. Start with one small
+batch and check the result in Sonarr, Bazarr and Plex.
 
 ## Actions and automation
 

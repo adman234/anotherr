@@ -381,7 +381,7 @@ const HELP = {
   "whisper.device": "auto tries CUDA first, then falls back to CPU.",
   "whisper.cpu_fallback_model": "Smaller model used if the GPU is unavailable.",
   "whisper.idle_unload_minutes": "Unload the model after this long idle so Plex gets the VRAM back.",
-  "retag.enabled": "Off by default. When on, approved 'Retag audio language' actions write the detected language into the file's audio track (MKV/WebM in place with mkvpropedit; other formats by a stream copy). Needs the container's /mnt mount set to Read/Write - Slave.",
+  "retag.enabled": "Off by default. When on, approved 'Retag audio language' actions write the detected language into the file's audio track (MKV/WebM in place with mkvpropedit; other formats by a stream copy). Keep /mnt read-only and add a read/write path for just your media folders (same host and container path, e.g. /mnt/user/media/tv); Anotherr writes through those.",
   "retag.allowed_paths": "One folder per line, as seen inside the container (e.g. /mnt/user/media/tv). Files outside these folders are never edited.",
   "retag.break_hardlinks": "Hardlinked files (e.g. a torrent client's seeding copy) are skipped by default. When on, they get a new copy with the tag instead, leaving the seeded file untouched (uses free space equal to the file).",
   "automation.enabled": "Off by default. When on, proposals are executed automatically inside the windows below.",

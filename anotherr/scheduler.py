@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-from . import actions, arr, db, paths, scanner, settings, stt, sync, unraid
+from . import actions, arr, db, frames, health, paths, scanner, settings, stt, sync, unraid
 from .schedule_util import active_window, next_window_start
 
 log = logging.getLogger("anotherr.scheduler")
@@ -338,6 +338,15 @@ class Worker(threading.Thread):
 
     def _periodic(self, cfg: dict):
         now = time.time()
+        if now - getattr(self, "_last_beat", 0) > 60:
+            self._last_beat = now
+            health.beat({"scans": [s.get("disk") for s in STATUS.get("slots", [])]})
+        if now - getattr(self, "_last_prune", 0) > 3600:
+            self._last_prune = now
+            try:
+                frames.prune()
+            except Exception:  # noqa: BLE001
+                log.exception("frame cache prune failed")
         if now - self._last_poll > 15 * 60 and cfg["imports"].get("enabled") and not sync.STATE["running"]:
             self._last_poll = now
             try:

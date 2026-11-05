@@ -33,6 +33,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+BRIDGE_VERSION = 3  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -70,6 +71,22 @@ def _frame(file_id: int, t: float, width: int = FRAME_WIDTH) -> Image:
         return Image(data=r.content, format="jpeg")
 
 
+_version_note: list = []
+
+
+def _outdated() -> str:
+    """One-line warning (checked once per session) when this bridge script is older than the server expects."""
+    if not _version_note:
+        try:
+            want = int(_get("/api/status").get("mcp_bridge_version") or 0)
+        except Exception:  # noqa: BLE001
+            want = 0
+        _version_note.append(
+            f"NOTE: this Anotherr MCP bridge (v{BRIDGE_VERSION}) is older than the server expects (v{want}). Tell the "
+            f"user to re-download it from {URL}/mcp/anotherr_mcp.py and restart Claude Desktop.\n" if want > BRIDGE_VERSION else "")
+    return _version_note[0]
+
+
 def _j(v) -> str:
     return json.dumps(v, indent=1, default=str)
 
@@ -83,8 +100,8 @@ def _ts(t: float) -> str:
 
 @mcp.tool()
 def status() -> str:
-    """Server status: current scan, queue, scheduler/pause state, Whisper device, issue/review/action counts."""
-    return _j(_get("/api/status"))
+    """Server status: running scans, queue, scheduler/pause state, memory, Whisper device, issue/review/action counts."""
+    return _outdated() + _j(_get("/api/status"))
 
 
 @mcp.tool()
@@ -177,7 +194,7 @@ def list_issues(severity: str = "", code: str = "", search: str = "", status: st
     """List detected issues. severity: info|warning|error|critical (comma-separated ok)."""
     res = _get("/api/issues", severity=severity, code=code, search=search, status=status, page=page, per_page=60)
     by_code = res["codes"]  # every code - the summary always adds up to the open total
-    lines = [f"{res['total']} issues (page {res['page']}). All open issues by code ({sum(c['n'] for c in by_code)}): "
+    lines = [_outdated() + f"{res['total']} issues (page {res['page']}). All open issues by code ({sum(c['n'] for c in by_code)}): "
              + ", ".join(f"{c['code']}({c['severity']})={c['n']}" for c in by_code)]
     for r in res["rows"]:
         lines.append(f"#{r['id']} file {r['file_id']} [{r['severity']}] {r['title']} {r['label'] or ''}: {r['message']}")
@@ -279,7 +296,8 @@ def submit_review(review_id: int, verdict: str, notes: str = "", request_redownl
 
 @mcp.tool()
 def list_actions(status: str = "proposed") -> str:
-    """Proposed/finished fix-up actions. status: proposed|done|failed|rejected (comma-separated ok)."""
+    """Proposed/finished fix-up actions. status: proposed|done|failed|rejected|withdrawn (comma-separated ok).
+    Proposals are withdrawn automatically when the issues behind them are resolved."""
     rows = _get("/api/actions", status=status)
     if not rows:
         return "No actions."

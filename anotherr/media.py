@@ -483,18 +483,22 @@ def image_sub_times(path: str, s_index: int | None = None, timeout: float = 1800
     return out
 
 
-def extract_ocr_frame(path: str, t: float, width: int = 1280) -> bytes:
-    """Greyscale PNG frame for OCR."""
-    cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path, "-frames:v", "1",
-           "-vf", f"scale={int(width)}:-2,format=gray", "-f", "image2", "-c:v", "png", "pipe:1"]
+def extract_ocr_frame(path: str, t: float, width: int = 1280, bottom_third: bool = False) -> bytes:
+    """Greyscale PNG frame for OCR (optionally just the bottom third, where subtitles sit)."""
+    vf = f"scale={int(width)}:-2,format=gray"
+    if bottom_third:
+        vf = "crop=iw:ih/3:0:ih*2/3," + vf
+    cmd = [FFMPEG, "-nostdin", "-v", "error", "-threads", "2", "-ss", f"{max(0.0, t):.3f}", "-i", path,
+           "-frames:v", "1", "-vf", vf, "-f", "image2", "-c:v", "png", "pipe:1"]
     p = run(cmd, timeout=120, binary=True)
     if not p.stdout:
         raise RuntimeError("frame extraction failed")
     return p.stdout
 
 
-def extract_frame(path: str, t: float, width: int = 768) -> bytes:
-    cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path, "-frames:v", "1",
+def extract_frame(path: str, t: float, width: int = 768, threads: int = 2) -> bytes:
+    cmd = [FFMPEG, "-nostdin", "-v", "error", "-threads", str(threads), "-ss", f"{max(0.0, t):.3f}", "-i", path,
+           "-frames:v", "1",
            "-vf", f"scale={int(width)}:-2", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
     p = run(cmd, timeout=120, binary=True)
     if not p.stdout:

@@ -45,3 +45,28 @@ def test_run_bts_mislabel_kept():
 def test_english_only_release_still_errors():
     codes, _ = _ctx("jpn", [{"tag": "eng", "wins": [("eng", .98)] * 3, "default": True}])
     assert codes["original_audio_missing"]["severity"] == "error"
+
+
+def test_sibling_mislabel_downgrades_tag_only_error():
+    import json
+    import time
+
+    from anotherr import db
+
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind, original_language) VALUES ('sonarr', 5, 'Run BTS!', 'series', 'kor')")
+    sib = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, label, first_seen) VALUES (?, 1, '/a', 'S09E01', ?)",
+               (iid, time.time()))
+    db.x("INSERT INTO issues(file_id, code, severity, status, message, details) VALUES (?, 'audio_mislabeled', 'warning', "
+         "'open', 'tagged English but sounds like Korean', ?)", (sib, json.dumps({"tag": "eng", "detected": "kor"})))
+    me = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, label, first_seen) VALUES (?, 2, '/b', 'S09E03', ?)",
+              (iid, time.time()))
+    c = scanner.Ctx(file={"id": me}, item=db.q1("SELECT * FROM items WHERE id=?", (iid,)),
+                    cfg={"anime": {"dub_language": "eng", "prefer_dual_audio": False}}, profile="standard", pcfg={}, seed=1)
+    c.info = {"audio": [{"default": True}], "duration": 60}
+    c.tracks[0] = {"a_index": 0, "tag": "eng", "default": True, "speech_s": 0, "level_db": -20, "windows": [],
+                   "detected": "", "prob": 0.0, "agree": 0, "all_agree": False}
+    c.expected = "kor"
+    scanner.check_language(c)
+    codes = {i["code"]: i for i in c.issues}
+    assert "original_audio_missing" not in codes
+    assert codes["language_unconfirmed"]["details"]["sibling"]["label"] == "S09E01"

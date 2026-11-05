@@ -30,6 +30,32 @@ def read_text(image: bytes) -> str:
     return "\n".join(texts)
 
 
+def confident_words(image: bytes, min_conf: float = 80) -> list[str]:
+    """Words Tesseract is confident about. Textures and edges produce plenty of low-confidence junk
+    ("Pane", "aoe", "See eee"); real subtitle text comes back at high confidence."""
+    try:
+        p = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "6", "-l", "eng", "tsv"], input=image,
+                           capture_output=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    out = []
+    for line in p.stdout.decode("utf-8", "replace").splitlines()[1:]:
+        f = line.split("\t")
+        if len(f) == 12 and f[11].strip():
+            word = f[11].strip().strip(".,!?;:\"'")
+            try:
+                conf = float(f[10])
+            except ValueError:
+                continue
+            if conf >= min_conf and len(word) >= 3 and word.isalpha():
+                out.append(word)
+    return out
+
+
+def looks_like_subtitle(words: list[str]) -> bool:
+    return len(words) >= 2 or any(len(w) >= 5 for w in words)
+
+
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (s or "").lower())).strip()
 
@@ -54,11 +80,21 @@ def threshold(title: str) -> float:
     return 0.95 if len(norm(title)) < 8 else 0.85  # short titles must be near-exact
 
 
-def match(texts: list[str], episodes: list[dict]) -> list[dict]:
-    """Episodes whose title appears in any frame's text."""
+def match(texts: list[str], episodes: list[dict], series_title: str = "") -> list[dict]:
+    """Episodes whose title appears in any frame's text.
+
+    The series' own logo is on screen in most episodes, so its name is removed from the OCR text first,
+    and an episode whose title is (part of) the series name - e.g. the film "The Clone Wars" (S00E01) for
+    "Star Wars: The Clone Wars" - is never matched.
+    """
+    st = norm(series_title)
+    if st:
+        texts = [norm(t).replace(st, " ") for t in texts]
     out = []
     for ep in episodes:
         if not ep.get("title"):
+            continue
+        if st and norm(ep["title"]) in st:
             continue
         best = max(((title_score(ep["title"], tx), i) for i, tx in enumerate(texts)), default=(0.0, -1))
         if best[0] >= threshold(ep["title"]):

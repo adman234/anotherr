@@ -134,7 +134,8 @@ def _mkv(path, tags=("", "")):
 
 @pytest.fixture
 def lib(tmp_path, monkeypatch):
-    monkeypatch.setattr(retag, "LOG_PATH", str(tmp_path / "retag_log.jsonl"))
+    from anotherr import trackedit
+    monkeypatch.setattr(trackedit, "LOG_PATH", str(tmp_path / "retag_log.jsonl"))
     root = tmp_path / "media"
     root.mkdir()
     settings.save({"retag": {"enabled": True, "allowed_paths": [str(root)]}})
@@ -151,8 +152,8 @@ def test_edit_in_place_verify_and_undo(lib):
     iid = _item("Run BTS! X", "kor")
     fid = _file(iid, "S01E01", 1, [{"windows": W("kor", 3)}], path=p)
     aid = db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) VALUES (?, 'retag_audio', "
-               "'proposed', ?, ?, ?)", (fid, json.dumps({"item_id": iid, "files": [_entry(fid)]}), time.time(), time.time()))
-    retag._run(aid)
+               "'running', ?, ?, ?)", (fid, json.dumps({"item_id": iid, "files": [_entry(fid)]}), time.time(), time.time()))
+    retag._run(aid)  # as started by an approval
     a = db.q1("SELECT * FROM actions WHERE id=?", (aid,))
     assert a["status"] == "done", a["result"]
     assert media.summarize(media.ffprobe(p))["audio"][0]["lang"] == "kor"

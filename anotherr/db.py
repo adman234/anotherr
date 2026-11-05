@@ -172,6 +172,12 @@ def x(sql: str, args: tuple | list = ()) -> int:
         return cur.lastrowid or cur.rowcount
 
 
+def n(sql: str, args: tuple | list = ()) -> int:
+    """Run an UPDATE/DELETE and return how many rows it changed (x() returns lastrowid, which isn't that)."""
+    with _write_lock:
+        return conn().execute(sql, args).rowcount
+
+
 @contextmanager
 def tx():
     with _write_lock:

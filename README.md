@@ -86,10 +86,46 @@ To enable without giving Anotherr write access to all of `/mnt`:
 Anotherr reads from the physical disk paths but writes through these share paths. Start with one small
 batch and check the result in Sonarr, Bazarr and Plex.
 
+## Default audio and subtitle tracks
+
+Uses the same switch, allowed paths and safety checks as retagging (Settings → Retag audio).
+
+- **Set default audio** (from `default_audio_not_preferred`): makes the track in your preferred language
+  (the series override, else its original language) the default. That track must have been analysed,
+  with every window agreeing and a confident result. Commentary and description tracks are skipped. If
+  several tracks qualify, the one with the most channels wins, then the lowest index. A track is never
+  promoted on its tag alone. Without such a track, the issue says a flag change can't fix it.
+- **Set default subtitle** (from `default_subs_signs`): this is judged against the default audio *after*
+  any audio fix.
+  - If that audio is in your subtitle language, nothing changes (no subtitle, or the forced signs track,
+    is right).
+  - Otherwise the full embedded track in your subtitle language becomes the default. Text beats image,
+    non-SDH beats SDH, then the lowest index wins.
+  - External subtitle files can't carry flags, so they only get a note.
+- A file that needs both gets **one** proposal and one header write. Proposals are grouped by series,
+  season and identical change, show a dry-run preview, and are always approved by hand.
+- **Executing:** the target track gets the default flag and every other track of the same type loses it.
+  Forced flags are never touched. MKV is edited in place. MP4 is stream-copied with dispositions,
+  verified to read back. The full flag snapshot goes to the rollback log, so **Undo** restores exactly
+  what was there. A rescan reads the change back and closes the issue. Only Sonarr/Radarr are refreshed
+  (Bazarr isn't involved).
+- Plex can remember a per-user track choice that overrides the file's default flags.
+
+**Reliability:** every track-edit action ends *done* or *failed*.
+- Each file has a 60 s limit (a stuck file is skipped and the batch goes on).
+- Progress shows as "n of N files done", with one activity-log line per file.
+- An action with no progress for 10 minutes is marked *failed (stalled)* and its lock is released.
+- Crashes are written to the activity log.
+
 ## Actions and automation
 
 Problems create **proposals**:
-- **Resub**: asks Bazarr to search for new subtitles.
+- **Resub**: asks Bazarr to search for new subtitles. Every open issue has a **Propose resub** button.
+  After a search fails, automatic resubs for that series pause. They re-arm after 7 days, after the
+  file's audio is retagged (Bazarr picks subtitles by the audio tag), or after a Whisper subtitle fetch.
+- **Whisper subtitles** (manual): asks Bazarr's Whisper provider to transcribe and translate one
+  episode. The Whisper provider must be enabled in Bazarr, and the audio tag must be known and not your
+  subtitle language. It can take several minutes.
 - **Redownload**: marks the grab as failed in Sonarr/Radarr (blocklists the release), optionally deletes the bad file, then triggers a search.
 
 **Automation is off by default.** Turn it on in Settings → Automation. It runs only inside its own schedule windows, with a daily cap and a list of issue types allowed to trigger a redownload. Until then, every proposal waits for your approval on the Actions page (or from Claude).

@@ -185,7 +185,10 @@ def test_resub_rearms_after_retag():
          (fid, old, old))
     db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'subs_missing', 'warning', 'open', ?)",
          (fid, time.time()))
-    assert actions.resub_failed_before(iid) and not actions.propose_for_file(fid)
+    assert actions.resub_failed_before(iid)
+    [w] = actions.propose_for_file(fid)  # a plain search failed before: Whisper instead of another resub
+    assert db.scalar("SELECT kind FROM actions WHERE id=?", (w,)) == "whisper_subtitle"
+    db.x("DELETE FROM actions WHERE id=?", (w,))
     db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) VALUES (?, 'retag_audio', 'done', ?, ?, ?)",
          (fid, json.dumps({"files": [{"file_id": fid, "status": "edited"}]}), time.time(), time.time()))
     assert not actions.resub_failed_before(iid)
@@ -218,7 +221,8 @@ def test_group_approve_runs_in_background_and_skips_other_kinds(monkeypatch):
     monkeypatch.setattr(actions, "_resub", lambda f, item: ran.append(f["id"]) or "searched")
     files = [_ep_file("kor")[1] for _ in range(3)]
     ids = [actions.propose(f, "resub", "Issues: subs_missing") for f in files]
-    whisper = actions.propose(files[0], "whisper_subtitle", "manual")
+    whisper = db.x("INSERT INTO actions(file_id, kind, status, created_at, updated_at) VALUES (?, 'retag_audio', 'proposed', ?, ?)",
+                   (files[0], time.time(), time.time()))  # track edits keep their own approval
     c = TestClient(api.app)
     listed = c.get("/api/actions").json()
     assert {a["season"] for a in listed} == {1}
@@ -232,3 +236,94 @@ def test_group_approve_runs_in_background_and_skips_other_kinds(monkeypatch):
     assert db.scalar("SELECT status FROM actions WHERE id=?", (whisper,)) == "proposed"
     assert c.post("/api/actions/bulk", json={"op": "approve", "ids": ids}).json()["queued"] == 0  # no double run
     assert c.post("/api/actions/bulk", json={"op": "reject", "ids": [whisper]}).json()["rejected"] == 1
+
+
+def _failed_series(tag="kor"):
+    """A series where a Bazarr resub already ran and the problem came back."""
+    iid, fid = _ep_file(tag)
+    old = time.time() - 3600
+    db.x("INSERT INTO actions(file_id, kind, status, codes, created_at, updated_at) VALUES (?, 'resub', 'done', '[\"subs_missing\"]', ?, ?)",
+         (fid, old, old))
+    db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'subs_missing', 'warning', 'open', ?)",
+         (fid, time.time()))
+    eps = json.dumps([{"id": 200, "season": 4, "episode": 2}])
+    f2 = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, label, episodes, first_seen, audio_evidence) VALUES (?, 2, '/y.mkv', 'S04E02', ?, ?, ?)",
+              (iid, eps, time.time(), json.dumps({"tracks": [A(0, tag, default=True)]})))
+    db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'subs_missing', 'warning', 'open', ?)",
+         (f2, time.time()))
+    return iid, f2
+
+
+def test_whisper_proposed_after_failed_search():
+    from anotherr import actions
+
+    settings.save({"languages": {"subtitle_language": "eng"}})
+    _, f2 = _failed_series("kor")
+    [aid] = actions.propose_for_file(f2)
+    a = db.q1("SELECT * FROM actions WHERE id=?", (aid,))
+    assert a["kind"] == "whisper_subtitle" and "subgen" in a["reason"]
+
+
+def test_untagged_audio_stays_resub_with_reason():
+    from anotherr import actions
+
+    _, f2 = _failed_series("und")
+    [aid] = actions.propose_for_file(f2)
+    a = db.q1("SELECT * FROM actions WHERE id=?", (aid,))
+    assert a["kind"] == "resub" and "Whisper can't be used yet" in a["reason"]
+
+
+def test_existing_resubs_upgraded_and_group_runs_whisper_one_by_one(monkeypatch):
+    from anotherr import actions, arr
+
+    settings.save({"languages": {"subtitle_language": "eng"}})
+    _, f2 = _failed_series("kor")
+    old = actions._propose(f2, "resub", "Issues: subs_missing", ["subs_missing"])
+    assert actions.upgrade_resubs_to_whisper() == 1
+    assert db.scalar("SELECT status FROM actions WHERE id=?", (old,)) == "withdrawn"
+    wid = db.scalar("SELECT id FROM actions WHERE kind='whisper_subtitle' AND status='proposed'")
+    active, peak = [0], [0]
+
+    class FakeBazarr:
+        def provider_results(self, **kw):
+            return [{"provider": "whisperai", "subtitle": "w", "language": "en"}]
+
+        def provider_download(self, result, **kw):
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            time.sleep(0.05)
+            active[0] -= 1
+
+    monkeypatch.setattr(arr, "Bazarr", FakeBazarr)
+    assert actions.approve_many([wid])["queued"] == 1
+    for _ in range(60):
+        if db.scalar("SELECT status FROM actions WHERE id=?", (wid,)) == "done":
+            break
+        time.sleep(0.05)
+    assert db.scalar("SELECT status FROM actions WHERE id=?", (wid,)) == "done" and peak[0] == 1
+
+
+def test_issues_grouped_by_show_season_and_bulk_ops():
+    from fastapi.testclient import TestClient
+
+    from anotherr import api
+
+    settings.save({"languages": {"subtitle_language": "eng"}})
+    iid, f2 = _failed_series("kor")  # S04E02 + an S01 file, both subs_missing, Bazarr failed before
+    for e in (3, 4):
+        f = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, label, episodes, first_seen, audio_evidence) "
+                 "VALUES (?,?,?,?,?,?,?)", (iid, 10 + e, f"/s4e{e}.mkv", f"S04E0{e}",
+                                          json.dumps([{"id": 300 + e, "season": 4, "episode": e}]), time.time(),
+                                          json.dumps({"tracks": [A(0, "kor", default=True)]})))
+        db.x("INSERT INTO issues(file_id, code, severity, message, status, created_at) VALUES (?, 'subs_missing', 'warning', 'No English subtitles', 'open', ?)",
+             (f, time.time()))
+    c = TestClient(api.app)
+    res = c.get("/api/issues", params={"group": "true"}).json()
+    g = next(r for r in res["rows"] if r.get("group"))
+    assert res["issues"] == 4 and res["total"] == 2 and g["season"] == 4 and len(g["ids"]) == 3
+    assert g["message"] is None  # one message differs -> shown per file
+    r = c.post("/api/issues/bulk", json={"op": "propose_sub_fix", "ids": g["ids"]}).json()
+    assert r["proposed"] == {"whisper_subtitle": 3}
+    assert c.post("/api/issues/bulk", json={"op": "ignore", "ids": g["ids"]}).json()["changed"] == 3
+    assert db.scalar("SELECT COUNT(*) FROM issues WHERE status='ignored'") == 3
+    assert len(c.get("/api/issues").json()["rows"]) == 1  # ungrouped still works

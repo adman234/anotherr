@@ -68,6 +68,9 @@ def _startup():
     n = actions.reconcile()
     if n:
         db.log(f"Withdrew {n} proposed action(s) whose issues are no longer open")
+    n = actions.upgrade_resubs_to_whisper()
+    if n:
+        db.log(f"Replaced {n} resub proposal(s) with Whisper subtitle proposals (Bazarr found nothing for those series before)")
     def _refresh_track_proposals():
         retag.refresh_all()
         defaults.refresh_all()
@@ -434,13 +437,14 @@ def sync_now():
 
 # ====================================================================== issues / reviews / actions
 
-ISSUE_SQL = """SELECT x.*, i.title, f.label, f.disk, i.id AS item_id FROM issues x JOIN files f ON f.id=x.file_id
+ISSUE_SQL = """SELECT x.*, i.title, f.label, f.disk, f.episodes AS file_episodes, i.id AS item_id FROM issues x JOIN files f ON f.id=x.file_id
     JOIN items i ON i.id=f.item_id WHERE f.missing=0"""
 
 
 @app.get("/api/issues", dependencies=[Depends(auth)])
 def issues(status: str = "open", severity: str = "", code: str = "", category: str = "", search: str = "",
-           page_no: int = Query(1, alias="page"), per_page: int = 100):
+           page_no: int = Query(1, alias="page"), per_page: int = 100, group: bool = False):
+    """group=true folds issues of the same code for the same series + season into one row (paged by group)."""
     sql, args = ISSUE_SQL, []
     for col, val in (("x.status", status), ("x.severity", severity), ("x.code", code), ("x.category", category)):
         if val:
@@ -450,13 +454,83 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
     if search:
         sql += " AND (i.title LIKE ? OR x.message LIKE ?)"
         args += [f"%{search}%"] * 2
-    res = page(sql, args, page_no, min(per_page, 500),
-               "CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END, id DESC")
+    order = "CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END, id DESC"
+    if group:
+        res = _grouped_issues(db.q(f"{sql} ORDER BY {order}", args), page_no, min(per_page, 500))
+    else:
+        res = page(sql, args, page_no, min(per_page, 500), order)
     for r in res["rows"]:
-        r["details"] = db.unj(r["details"], {})
+        r["details"] = db.unj(r.get("details"), {})
+        r.pop("file_episodes", None)
     res["codes"] = db.q("SELECT x.code, x.severity, COUNT(*) n FROM issues x JOIN files f ON f.id=x.file_id "
                         "WHERE x.status='open' AND f.missing=0 GROUP BY x.code, x.severity ORDER BY n DESC")
     return res
+
+
+def _season_of(episodes_json) -> int | None:
+    s = [e.get("season") for e in db.unj(episodes_json, []) or [] if e.get("season") is not None]
+    return min(s) if s else None
+
+
+def _grouped_issues(rows: list[dict], page_no: int, per: int) -> dict:
+    groups: dict[tuple, dict] = {}
+    out = []
+    for r in rows:
+        season = _season_of(r.get("file_episodes"))
+        key = (r["item_id"], season, r["code"], r["severity"], r["status"]) if season is not None else ("id", r["id"])
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"group": True, "title": r["title"], "item_id": r["item_id"], "season": season,
+                               "code": r["code"], "severity": r["severity"], "status": r["status"], "items": []}
+            out.append(g)
+        g["items"].append({k: r[k] for k in ("id", "file_id", "label", "disk", "message")})
+    rows_out = []
+    for g in out:
+        if len(g["items"]) == 1:  # a lone issue stays a plain row
+            one = g["items"][0]
+            rows_out.append({**next(r for r in rows if r["id"] == one["id"])})
+            continue
+        g["items"].sort(key=lambda i: i["label"] or "")
+        msgs = list(dict.fromkeys(i["message"] for i in g["items"]))
+        g.update(ids=[i["id"] for i in g["items"]], message=msgs[0] if len(msgs) == 1 else None,
+                 disks=sorted({i["disk"] for i in g["items"] if i["disk"]}))
+        rows_out.append(g)
+    total = len(rows_out)
+    return {"total": total, "issues": len(rows), "page": page_no, "per_page": per,
+            "rows": rows_out[(page_no - 1) * per: page_no * per]}
+
+
+@app.post("/api/issues/bulk", dependencies=[Depends(auth)])
+def issues_bulk(body: dict = Body(...)):
+    """{"ids": [...], "op": "ignore" | "open" | "propose_sub_fix"}. propose_sub_fix proposes a Bazarr resub per file,
+    or a Whisper subtitle where Bazarr's search already came up empty for that series (same rule as automatic
+    proposals)."""
+    ids, op = [int(i) for i in body.get("ids") or []], body.get("op")
+    rows = db.q(f"SELECT x.id, x.file_id, x.code, x.message, f.item_id FROM issues x JOIN files f ON f.id=x.file_id "
+                f"WHERE x.id IN ({','.join('?' * len(ids))})", ids) if ids else []
+    if op in ("ignore", "open"):
+        st = "ignored" if op == "ignore" else "open"
+        for r in rows:
+            db.x("UPDATE issues SET status=?, updated_at=? WHERE id=?", (st, time.time(), r["id"]))
+        for fid in {r["file_id"] for r in rows}:
+            _refresh_file_status(fid)
+            actions.reconcile(fid)
+        for iid in {r["item_id"] for r in rows}:
+            retag.refresh_item(iid)
+            defaults.refresh_item(iid)
+        return {"ok": True, "changed": len(rows)}
+    if op == "propose_sub_fix":
+        made: dict[str, int] = {}
+        existing = 0
+        for r in rows:
+            kind, reason = actions._sub_fix(r["file_id"], r["item_id"], [r["code"]])
+            aid = actions.propose(r["file_id"], kind, reason.replace("Issues:", "Manual, for", 1), [r["code"]])
+            if aid:
+                made[kind] = made.get(kind, 0) + 1
+            else:
+                existing += 1
+        return {"ok": True, "proposed": made, "already_proposed": existing}
+    raise HTTPException(400, "op must be ignore | open | propose_sub_fix")
 
 
 EVIDENCE_KEYS = {

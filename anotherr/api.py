@@ -75,6 +75,7 @@ def _startup():
     threading.Thread(target=_refresh_track_proposals, daemon=True, name="anotherr-track-proposals").start()
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
     db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
+    db.x("UPDATE actions SET status='proposed', result='' WHERE status='queued'")  # group approval cut short
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
         scheduler.start()
     db.log(f"Anotherr {__version__} started")
@@ -576,7 +577,7 @@ def review_verdict(review_id: int, body: dict = Body(...)):
     return out
 
 
-ACTION_SQL = """SELECT a.*, i.title, f.label FROM actions a JOIN files f ON f.id=a.file_id JOIN items i ON i.id=f.item_id"""
+ACTION_SQL = """SELECT a.*, i.title, f.label, f.item_id, f.episodes FROM actions a JOIN files f ON f.id=a.file_id JOIN items i ON i.id=f.item_id"""
 
 
 @app.get("/api/actions", dependencies=[Depends(auth)])
@@ -590,7 +591,24 @@ def actions_list(status: str = "proposed", limit: int = 200):
     for r in rows:
         r["codes"] = db.unj(r["codes"], [])
         r["payload"] = db.unj(r.get("payload"), None)
+        eps = db.unj(r.pop("episodes", None), []) or []
+        seasons = [e.get("season") for e in eps if e.get("season") is not None]
+        r["season"] = min(seasons) if seasons else None
     return rows
+
+
+@app.post("/api/actions/bulk", dependencies=[Depends(auth)])
+def actions_bulk(body: dict = Body(...)):
+    """{"ids": [...], "op": "approve" | "reject"}. Approve runs resub/redownload proposals one after another in the
+    background (they show as 'queued' until their turn)."""
+    ids = [int(i) for i in body.get("ids") or []]
+    if body.get("op") == "reject":
+        n = sum(db.n("UPDATE actions SET status='rejected', updated_at=? WHERE id=? AND status='proposed'",
+                     (time.time(), i)) for i in ids)
+        return {"ok": True, "rejected": n}
+    if body.get("op") == "approve":
+        return actions.approve_many(ids)
+    raise HTTPException(400, "op must be approve | reject")
 
 
 @app.post("/api/actions", dependencies=[Depends(auth)])

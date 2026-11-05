@@ -321,7 +321,8 @@ def list_actions(status: str = "proposed") -> str:
     rows = _get("/api/actions", status=status)
     if not rows:
         return "No actions."
-    return "\n".join(f"action {a['id']} [{a['status']}] {a['kind']} - {a['title']} {a['label'] or ''}: {a['reason']}"
+    return "\n".join(f"action {a['id']} [{a['status']}] {a['kind']} - {a['title']} {a['label'] or ''}"
+                     + (f" (season {a['season']})" if a.get("season") is not None else "") + f": {a['reason']}"
                      + (f" -> {a['result']}" if a.get("result") else "") for a in rows)
 
 
@@ -386,6 +387,13 @@ def decide_action(action_id: int, approve: bool) -> str:
     """Approve (runs immediately) or reject a proposed action. Only approve when the user has agreed."""
     path = f"/api/actions/{action_id}/{'approve' if approve else 'reject'}"
     return _j(_send("POST", path))
+
+
+@mcp.tool()
+def decide_actions(action_ids: list[int], approve: bool) -> str:
+    """Approve or reject several resub/redownload proposals at once (e.g. one season of a show). Approved ones are
+    queued and run one after another in the background. Only approve when the user has agreed."""
+    return _j(_send("POST", "/api/actions/bulk", {"ids": action_ids, "op": "approve" if approve else "reject"}))
 
 
 @mcp.prompt()

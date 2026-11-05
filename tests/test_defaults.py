@@ -207,3 +207,28 @@ def test_manual_resub_for_issue_via_api():
     assert c.post("/api/actions", json={"kind": "resub", "issue_id": iss}).json()["action_id"] is None
     detail = c.get(f"/api/files/{fid}").json()
     assert detail["audio_tracks"][0]["tag"] == "jpn" and "facts" in detail
+
+
+def test_group_approve_runs_in_background_and_skips_other_kinds(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from anotherr import actions, api
+
+    ran = []
+    monkeypatch.setattr(actions, "_resub", lambda f, item: ran.append(f["id"]) or "searched")
+    files = [_ep_file("kor")[1] for _ in range(3)]
+    ids = [actions.propose(f, "resub", "Issues: subs_missing") for f in files]
+    whisper = actions.propose(files[0], "whisper_subtitle", "manual")
+    c = TestClient(api.app)
+    listed = c.get("/api/actions").json()
+    assert {a["season"] for a in listed} == {1}
+    r = c.post("/api/actions/bulk", json={"op": "approve", "ids": ids + [whisper]}).json()
+    assert r == {"ok": True, "queued": 3, "skipped": 1}
+    for _ in range(50):
+        if db.scalar("SELECT COUNT(*) FROM actions WHERE status='done'") == 3:
+            break
+        time.sleep(0.05)
+    assert sorted(ran) == sorted(files)
+    assert db.scalar("SELECT status FROM actions WHERE id=?", (whisper,)) == "proposed"
+    assert c.post("/api/actions/bulk", json={"op": "approve", "ids": ids}).json()["queued"] == 0  # no double run
+    assert c.post("/api/actions/bulk", json={"op": "reject", "ids": [whisper]}).json()["rejected"] == 1

@@ -31,7 +31,7 @@ tr:hover td { background: #222630; }
 .s-ok { background: var(--ok); } .s-info { background: var(--info); } .s-warning { background: var(--warning); }
 .s-error { background: var(--error); } .s-critical, .s-failed { background: var(--critical); color: #fff; }
 .s-unscanned { background: #555c6a; color: #ddd; }
-.s-proposed { background: var(--accent); } .s-done { background: var(--ok); } .s-rejected, .s-withdrawn, .s-undone { background: #555c6a; color: #ddd; } .s-running { background: var(--accent2); }
+.s-proposed { background: var(--accent); } .s-done { background: var(--ok); } .s-rejected, .s-withdrawn, .s-undone { background: #555c6a; color: #ddd; } .s-running, .s-queued { background: var(--accent2); }
 button, .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }

@@ -333,8 +333,23 @@ def _write(path: str, a_index: int, code: str, method: str, size: int) -> tuple[
             _rm(target)
         return False, "verification failed: " + "; ".join(problems)
     if method == "copy":
-        os.replace(target, path)
+        try:
+            os.replace(target, path)
+        except OSError as e:  # e.g. Unraid's share layer refusing a rename across disks
+            _rm(target)
+            return False, f"couldn't replace the original ({e}); it was left untouched"
     return True, "ok"
+
+
+def write_path(f: dict, resolved: str) -> str | None:
+    """Where to write: the user-share path (/mnt/user/...) when that's writable - so only the media folders
+    need a read/write mount - otherwise the path the file was read from. None when neither is writable."""
+    from .sync import map_path
+
+    for p in (map_path(f["arr_path"]), resolved):
+        if p and os.path.exists(p) and os.access(p, os.W_OK) and os.access(os.path.dirname(p), os.W_OK):
+            return p
+    return None
 
 
 def _rm(p: str):
@@ -351,11 +366,14 @@ def edit_one(entry: dict, cfg: dict, action_id: int) -> dict:
     f = db.q1("SELECT * FROM files WHERE id=?", (entry["file_id"],))
     if not f or f["missing"]:
         return {"status": "skipped", "why": "no longer in the library"}
-    path = resolve_path(f)
-    if not path:
+    read_path = resolve_path(f)
+    if not read_path:
         return {"status": "failed", "why": "file not found"}
-    if not _allowed([path, map_path(f["arr_path"])], cfg):
+    if not _allowed([read_path, map_path(f["arr_path"])], cfg):
         return {"status": "skipped", "why": "not under an allowed path (Settings -> Retag -> Allowed paths)"}
+    path = write_path(f, read_path)
+    if not path:
+        return {"status": "skipped", "why": "not writable - mount this media folder read/write (see Settings -> Retag)"}
     try:
         st = os.stat(path)
     except OSError as e:
@@ -364,8 +382,6 @@ def edit_one(entry: dict, cfg: dict, action_id: int) -> dict:
         db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?, 'quick', 'retag', ?)",
              (f["id"], time.time()))
         return {"status": "skipped", "why": "file changed since it was scanned - queued a rescan"}
-    if not os.access(path, os.W_OK) or not os.access(os.path.dirname(path), os.W_OK):
-        return {"status": "skipped", "why": "not writable - is /mnt mounted read-only?"}
     if _playing(path):
         return {"status": "skipped", "why": "Plex is playing it right now"}
     if st.st_nlink > 1 and not cfg["retag"].get("break_hardlinks"):

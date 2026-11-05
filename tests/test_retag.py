@@ -216,3 +216,20 @@ def test_retag_is_never_automatic():
     from anotherr import actions
 
     assert actions._eligible_auto({"kind": "retag_audio", "codes": "[]", "file_id": 1}, settings.get()) is False
+
+
+def test_writes_through_share_path_when_disk_path_is_read_only(monkeypatch, tmp_path):
+    from anotherr import sync
+
+    share, disk = tmp_path / "user" / "tv", tmp_path / "disk3" / "tv"
+    share.mkdir(parents=True)
+    disk.mkdir(parents=True)
+    (share / "ep.mkv").write_bytes(b"x")
+    (disk / "ep.mkv").write_bytes(b"x")
+    monkeypatch.setattr(sync, "map_path", lambda p: str(share / "ep.mkv"))
+    writable = {str(share), str(share / "ep.mkv")}
+    monkeypatch.setattr(os, "access", lambda p, mode: str(p) in writable)
+    f = {"arr_path": "/tv/ep.mkv"}
+    assert retag.write_path(f, str(disk / "ep.mkv")) == str(share / "ep.mkv")   # rw share mount wins
+    writable.clear()
+    assert retag.write_path(f, str(disk / "ep.mkv")) is None                     # nothing writable -> skip

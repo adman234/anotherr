@@ -14,7 +14,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, defaults, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, sync, trackedit, unraid
+from . import __version__, actions, arr, db, defaults, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, subgen, sync, trackedit, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -74,13 +74,18 @@ def _startup():
     def _refresh_track_proposals():
         retag.refresh_all()
         defaults.refresh_all()
+        subgen.refresh_all()
 
     threading.Thread(target=_refresh_track_proposals, daemon=True, name="anotherr-track-proposals").start()
     db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
-    db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running'")
-    db.x("UPDATE actions SET status='proposed', result='' WHERE status='queued'")  # group approval cut short
+    # subgen batches survive a restart: the worker reconciles them with subgen's /queue
+    db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running' AND kind!=?",
+         (subgen.KIND,))
+    db.x("UPDATE actions SET status='proposed', result='' WHERE status='queued' AND kind!=?", (subgen.KIND,))
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
         scheduler.start()
+        if db.scalar("SELECT COUNT(*) FROM actions WHERE kind=? AND status IN ('queued','running')", (subgen.KIND,)):
+            subgen.kick()
     db.log(f"Anotherr {__version__} started")
 
 
@@ -222,6 +227,7 @@ def status():
         "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open'"),
         "pending_reviews": db.scalar("SELECT COUNT(*) FROM reviews WHERE status='pending'"),
         "proposed_actions": db.scalar("SELECT COUNT(*) FROM actions WHERE status='proposed'"),
+        "subgen_configured": subgen.configured(),
         "automation": {"enabled": cfg["automation"]["enabled"], "active_now": actions.automation_active(cfg),
                        "today": actions.actions_today(), "max_per_day": cfg["automation"]["max_actions_per_day"]},
         "unraid": {"detected": unraid.is_unraid(), "parity_running": unraid.parity_running()},
@@ -356,10 +362,13 @@ def file_detail(file_id: int):
     except Exception as e:  # noqa: BLE001
         f["facts"] = {"error": str(e)}
     f["whisper_blocker"] = actions.whisper_blocker(file_id)
+    if subgen.configured():
+        plan, why = subgen.explain(file_id, manual=True)
+        f["subgen"] = {"plan": plan, "blocker": why or None}
     return f
 
 
-MCP_BRIDGE_VERSION = 5  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 6  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -616,12 +625,20 @@ def issues_bulk(body: dict = Body(...)):
         for iid in {r["item_id"] for r in rows}:
             retag.refresh_item(iid)
             defaults.refresh_item(iid)
+            subgen.refresh_item(iid)
         return {"ok": True, "changed": len(rows)}
     if op == "propose_sub_fix":
         made: dict[str, int] = {}
         existing = 0
+        sg = [r["file_id"] for r in rows if subgen.configured() and subgen.wanted(r["file_id"])]
+        if sg:
+            made["subgen_transcribe"] = len(subgen.request(sg)["proposed"])
         for r in rows:
+            if r["file_id"] in sg:
+                continue
             kind, reason = actions._sub_fix(r["file_id"], r["item_id"], [r["code"]])
+            if kind == "skip":
+                kind, reason = "resub", f"Manual, for {r['code']}"
             aid = actions.propose(r["file_id"], kind, reason.replace("Issues:", "Manual, for", 1), [r["code"]])
             if aid:
                 made[kind] = made.get(kind, 0) + 1
@@ -677,6 +694,7 @@ def issue_update(issue_id: int, body: dict = Body(...)):
     if item_id:
         retag.refresh_item(item_id)  # ignoring a file's untagged/mislabeled issue takes it out of its retag batch
         defaults.refresh_item(item_id)
+        subgen.refresh_item(item_id)
     return {"ok": True}
 
 
@@ -804,6 +822,42 @@ def action_create(body: dict = Body(...)):
             "Bazarr Whisper subtitle (translate) - manual"
     aid = actions.propose(file_id, kind, reason, codes)
     return {"action_id": aid, "note": None if aid else "an open proposal of this kind already exists"}
+
+
+# ====================================================================== subgen
+
+@app.get("/api/subgen/status", dependencies=[Depends(auth)])
+def subgen_status():
+    waiting = 0
+    for a in db.q("SELECT payload FROM actions WHERE kind=? AND status IN ('queued','running')", (subgen.KIND,)):
+        waiting += sum(e.get("status") == "waiting" for e in (db.unj(a["payload"], {}) or {}).get("files", []))
+    return {"configured": subgen.configured(), "paused": subgen.paused(), "worker": subgen.STATUS,
+            "waiting_files": waiting, "pilot_done": bool(settings.state_get("subgen_pilot_done", False)),
+            "info": settings.state_get("subgen_info")}
+
+
+@app.post("/api/subgen/pause", dependencies=[Depends(auth)])
+def subgen_pause(body: dict = Body(...)):
+    subgen.set_paused(bool(body.get("paused")))
+    return {"ok": True, "paused": subgen.paused()}
+
+
+@app.post("/api/subgen/request", dependencies=[Depends(auth)])
+def subgen_request(body: dict = Body(...)):
+    """A person asks for subgen subtitles: {"file_ids": [...]} or {"issue_ids": [...]}. Proposed per season."""
+    ids = [int(i) for i in body.get("file_ids") or []]
+    iss = [int(i) for i in body.get("issue_ids") or []]
+    if iss:
+        ids += [r["file_id"] for r in db.q(f"SELECT file_id FROM issues WHERE id IN ({','.join('?' * len(iss))})", iss)]
+    if not subgen.configured():
+        raise HTTPException(400, "subgen isn't set up (Settings -> Subgen -> url)")
+    return subgen.request(sorted(set(ids)))
+
+
+@app.post("/api/actions/{action_id}/control", dependencies=[Depends(auth)])
+def action_control(action_id: int, body: dict = Body(...)):
+    """subgen batches: {"op": "pause" | "resume" | "cancel"}."""
+    return subgen.control(action_id, body.get("op", ""))
 
 
 @app.post("/api/actions/{action_id}/approve", dependencies=[Depends(auth)])

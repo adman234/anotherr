@@ -135,6 +135,10 @@ def pause_reasons(cfg: dict) -> list[str]:
         n = stream_count()
         if n > int(sc.get("max_streams", 0)):
             r.append(f"{n} active Plex stream(s)")
+    from . import subgen
+
+    if (cfg.get("subgen") or {}).get("gpu") and subgen.in_flight():
+        r.append("subgen job using the GPU")
     if paths.mappings_look_wrong():
         r.append("files not found - fix path mappings in Settings")
     return r

@@ -166,6 +166,7 @@ def test_whisper_runs_in_background_and_picks_whisper_provider(monkeypatch):
             calls["download"] = (result["provider"], kw)
 
     monkeypatch.setattr(arr, "Bazarr", FakeBazarr)
+    monkeypatch.setattr(actions, "_wait_for_srt", lambda aid, f, since: "/x.en.srt")  # the subtitle appeared
     aid = actions.propose(fid, "whisper_subtitle", "manual")
     assert actions.execute(aid)["ok"]
     for _ in range(50):
@@ -295,6 +296,7 @@ def test_existing_resubs_upgraded_and_group_runs_whisper_one_by_one(monkeypatch)
             active[0] -= 1
 
     monkeypatch.setattr(arr, "Bazarr", FakeBazarr)
+    monkeypatch.setattr(actions, "_wait_for_srt", lambda aid, f, since: "/x.en.srt")  # the subtitle appeared
     assert actions.approve_many([wid])["queued"] == 1
     for _ in range(60):
         if db.scalar("SELECT status FROM actions WHERE id=?", (wid,)) == "done":
@@ -344,3 +346,32 @@ def test_issue_rows_point_to_default_track_fix_or_rescan():
     res = TestClient(api.app).get("/api/issues", params={"group": "true"}).json()
     [g] = res["rows"]
     assert g["fix_actions"] == [aid] and g["fix_missing"] == [old]
+
+
+def test_whisper_without_a_subtitle_on_disk_fails(monkeypatch):
+    from anotherr import actions, arr
+
+    settings.save({"languages": {"subtitle_language": "eng"}})
+    _, fid = _ep_file("kor")
+
+    class FakeBazarr:
+        def provider_results(self, **kw):
+            return [{"provider": "whisperai", "subtitle": "w", "language": "en"}]
+
+        def provider_download(self, result, **kw):
+            pass  # Bazarr says OK, but nothing is written
+
+    monkeypatch.setattr(arr, "Bazarr", FakeBazarr)
+    monkeypatch.setattr(actions, "_wait_for_srt", lambda aid, f, since: None)
+    aid = actions.propose(fid, "whisper_subtitle", "manual")
+    assert actions.approve_many([aid])["queued"] == 1
+    for _ in range(60):
+        if db.scalar("SELECT status FROM actions WHERE id=?", (aid,)) == "failed":
+            break
+        time.sleep(0.05)
+    a = db.q1("SELECT * FROM actions WHERE id=?", (aid,))
+    assert a["status"] == "failed" and "no subtitle appeared" in a["result"]
+    # and it isn't proposed again for that file
+    db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'subs_missing', 'warning', 'open', ?)",
+         (fid, time.time()))
+    assert actions._sub_fix(fid, db.scalar("SELECT item_id FROM files WHERE id=?", (fid,)), ["subs_missing"])[0] in ("skip", "resub")

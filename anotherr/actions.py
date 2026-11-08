@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from . import arr, db, langs, settings
@@ -9,6 +10,7 @@ from .schedule_util import in_windows
 
 log = logging.getLogger("anotherr.actions")
 TRACK_KINDS = ("retag_audio", "set_default_audio", "set_default_subtitle")  # run by trackedit
+BATCH_KINDS = TRACK_KINDS + ("subgen_transcribe",)  # payload batches, rebuilt by their own refresh
 MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle")  # what a person can propose from a file/issue
 REARM_AFTER = 7 * 86400
 
@@ -29,8 +31,10 @@ def propose_for_file(file_id: int) -> list[int]:
         created += [_propose(file_id, "redownload", "Issues: " + ", ".join(redl), redl)]
     elif resub and not redl:  # a redownload would replace the subs anyway
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (file_id,))
-        kind, reason = _sub_fix(file_id, item_id, resub)
-        if kind not in recent:
+        from . import subgen
+
+        kind, reason = ("subgen", "") if subgen.wanted(file_id) else _sub_fix(file_id, item_id, resub)
+        if kind not in ("subgen", "skip") and kind not in recent:
             created += [_propose(file_id, kind, reason, resub)]
     created = [c for c in created if c]
     if created:
@@ -43,7 +47,7 @@ def reconcile(file_id: int | None = None) -> int:
     sql = "SELECT * FROM actions WHERE status='proposed'" + (" AND file_id=?" if file_id else "")
     n = 0
     for a in db.q(sql, (file_id,) if file_id else ()):
-        if a["kind"] in TRACK_KINDS:
+        if a["kind"] in BATCH_KINDS:
             continue  # batches are rebuilt (and withdrawn when empty) by their proposal refresh
         f = db.q1("SELECT missing FROM files WHERE id=?", (a["file_id"],))
         if not f or f["missing"]:
@@ -73,6 +77,9 @@ def _sub_fix(file_id: int, item_id: int | None, codes: list[str]) -> tuple[str, 
         return "resub", base
     if not set(codes) & set(WHISPER_CODES):
         return "resub", base + " - Bazarr found nothing useful for this series before"
+    if db.q1("SELECT id FROM actions WHERE file_id=? AND kind='whisper_subtitle' AND status IN ('done','failed')",
+             (file_id,)):
+        return "skip", ""  # a Whisper request already ran for this file: don't repeat it (subgen can, if set up)
     why = whisper_blocker(file_id)
     if why:
         return "resub", base + f" - Bazarr found nothing useful for this series before; Whisper can't be used yet: {why}"
@@ -85,8 +92,12 @@ def upgrade_resubs_to_whisper(item_id: int | None = None) -> int:
     n = 0
     sql = ("SELECT a.id, a.file_id, a.codes, f.item_id FROM actions a JOIN files f ON f.id=a.file_id "
            "WHERE a.kind='resub' AND a.status='proposed'" + (" AND f.item_id=?" if item_id else ""))
+    from . import subgen
+
     for a in db.q(sql, (item_id,) if item_id else ()):
         codes = db.unj(a["codes"], []) or []
+        if subgen.wanted(a["file_id"]):
+            continue  # subgen's own refresh replaces it
         kind, reason = _sub_fix(a["file_id"], a["item_id"], codes)
         if kind != "whisper_subtitle":
             continue
@@ -150,11 +161,19 @@ def whisper_blocker(file_id: int) -> str | None:
         return "file not found"
     if f["source"] == "sonarr" and len(db.unj(f["episodes"], []) or []) != 1:
         return "Whisper subtitles are requested for one episode at a time; this file holds several (or none)"
-    ev = _evidence(f) or {}  # also reads scans from before the evidence column
-    tracks = ev.get("tracks") or []
-    cur = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
     sub = langs.norm(settings.get()["languages"]["subtitle_language"]) or "eng"
-    tag = langs.norm((cur or {}).get("tag"))
+    ev = _evidence(f) or {}  # also reads scans from before the evidence column
+    streams = _last_streams(f)
+    subs = ev.get("subs") or []
+    if any(langs.norm(s.get("lang")) == sub and s.get("kind") == "full" for s in subs) or \
+            (not subs and any(langs.norm(s.get("lang")) == sub and not s.get("forced") for s in streams.get("subs") or [])):
+        return f"it already has {langs.name(sub)} subtitles - no Whisper subtitle needed"
+    # the tag as ffprobe reported it in the last scan (older evidence records may lack it)
+    audio = streams.get("audio") or ev.get("tracks") or []
+    cur = next((t for t in audio if t.get("default")), audio[0] if audio else None)
+    tag = langs.norm((cur or {}).get("lang") or (cur or {}).get("tag"))
+    if not cur:
+        return "no audio track information yet - rescan the file"
     if not tag or tag == "und":
         return "the default audio track has no language tag - Bazarr's Whisper provider needs it (retag it first)"
     if tag == sub:
@@ -162,10 +181,17 @@ def whisper_blocker(file_id: int) -> str | None:
     return None
 
 
+def _last_streams(f: dict) -> dict:
+    if not f.get("last_scan_id"):
+        return {}
+    res = db.unj(db.scalar("SELECT result FROM scans WHERE id=?", (f["last_scan_id"],)), {}) or {}
+    return res.get("streams") or {}
+
+
 def _eligible_auto(a: dict, cfg: dict) -> bool:
     acfg = cfg["automation"]
-    if a["kind"] in TRACK_KINDS:
-        return False  # edits media files: always approved by a person
+    if a["kind"] in BATCH_KINDS:
+        return False  # edits media files / long GPU-CPU jobs: always approved by a person
     if a["kind"] == "resub":
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (a["file_id"],))
         return bool(acfg["auto_resub"]) and not (item_id and resub_failed_before(item_id))
@@ -260,6 +286,10 @@ def execute(action_id: int, wait: bool = False) -> dict:
     a = db.q1("SELECT * FROM actions WHERE id=?", (action_id,))
     if not a or a["status"] not in ("proposed", "failed", "queued"):
         return {"ok": False, "error": "action not runnable"}
+    if a["kind"] == "subgen_transcribe":
+        from . import subgen
+
+        return subgen.approve(action_id)
     if a["kind"] in TRACK_KINDS:
         from . import trackedit
 
@@ -313,6 +343,7 @@ def _start_whisper(action_id: int, f: dict, item: dict, wait: bool = False) -> d
 
 def _whisper_run(action_id: int, f: dict, item: dict) -> None:
     label = f"{item['title']} {f.get('label', '')}"
+    started = time.time()
     try:
         b = arr.Bazarr()
         sub2 = langs.iso1(settings.get()["languages"]["subtitle_language"]) or "en"
@@ -330,7 +361,12 @@ def _whisper_run(action_id: int, f: dict, item: dict) -> None:
             b.provider_download(pick, series_id=item["arr_id"], episode_id=ep["id"])
         else:
             b.provider_download(pick, radarr_id=item["arr_id"])
-        msg, status = f"Bazarr Whisper subtitle ({pick.get('language') or sub2}) downloaded", "done"
+        # "done" means a subtitle is on disk, not that Bazarr accepted the request
+        out = _wait_for_srt(action_id, f, started)
+        if not out:
+            raise RuntimeError(f"Bazarr accepted the Whisper request but no subtitle appeared within "
+                               f"{WHISPER_SRT_WAIT // 60} minutes (check Bazarr's and subgen's logs)")
+        msg, status = f"Bazarr Whisper subtitle written: {os.path.basename(out)}", "done"
     except Exception as e:  # noqa: BLE001
         msg, status = str(e), "failed"
     db.x("UPDATE actions SET status=?, result=?, updated_at=? WHERE id=? AND status='running'",
@@ -339,6 +375,25 @@ def _whisper_run(action_id: int, f: dict, item: dict) -> None:
     if status == "done":
         db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?,?,?,?)",
              (f["id"], "standard", "action", time.time() + 120))
+
+
+WHISPER_SRT_WAIT = 600
+
+
+def _wait_for_srt(action_id: int, f: dict, since: float) -> str | None:
+    from .scanner import resolve_path
+    from .subgen import find_output
+
+    local = resolve_path(f)
+    deadline = time.time() + WHISPER_SRT_WAIT
+    while local:
+        out = find_output(local, since)
+        if out or time.time() > deadline:
+            return out
+        db.x("UPDATE actions SET result=?, updated_at=? WHERE id=?",
+             ("Bazarr accepted it - waiting for the subtitle file to appear", time.time(), action_id))
+        time.sleep(15)
+    return None
 
 
 def _resub(f: dict, item: dict) -> str:

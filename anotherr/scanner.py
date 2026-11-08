@@ -1230,6 +1230,9 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
             retag.after_scan(fid, ctx.info or {}, scan_id)
             retag.refresh_item(ctx.item["id"])
             defaults.refresh_item(ctx.item["id"])
+            from . import subgen
+
+            subgen.refresh_item(ctx.item["id"])
         except Exception:  # noqa: BLE001
             log.exception("retag bookkeeping failed")
         try:

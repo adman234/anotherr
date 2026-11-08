@@ -227,6 +227,7 @@ async function filePage(id) {
   $("#app").innerHTML = `<h2><a href="#/item/${f.item.id}">${esc(f.item.title)}</a> ${esc(f.label || "")} ${sev(f.status)}</h2>
     <div class="toolbar">${profileSelect()}<button onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${f.id}],profile:$('#profile').value}}),'Queued')">Scan now</button>
       <button onclick="${propose("resub")}">Propose resub</button>
+      ${f.subgen ? `<button ${f.subgen.plan ? `title="${esc(f.subgen.plan.task)} ${esc(f.subgen.plan.language)} - proposed for approval, then sent to subgen one at a time"` : `disabled title="${esc(f.subgen.blocker)}"`} onclick="${genSub(`file_ids:[${f.id}]`)}">Generate subtitle (subgen)</button>` : ""}
       <button ${f.whisper_blocker ? `disabled title="${esc(f.whisper_blocker)}"` : 'title="Ask Bazarr\'s Whisper provider to transcribe + translate this episode"'} onclick="${propose("whisper_subtitle")}">Whisper subtitles</button>
       <button onclick="act(()=>api('/api/actions',{method:'POST',body:{file_id:${f.id},kind:'redownload',reason:'manual'}}),'Proposed')">Propose redownload</button>
       <button onclick="framePicker(${f.id}, ${st.duration || 0})">View frames</button></div>
@@ -239,7 +240,7 @@ async function filePage(id) {
         <div>Container</div><div>${fx.found ? `${esc(fx.container)} · ${fx.nlink > 1 ? `<b>hardlinked</b> (${fx.nlink} links)` : "not hardlinked"} · ${fx.writable ? `writable${fx.allowed ? "" : ' <span class="muted">(not under an allowed retag path)</span>'}` : '<span class="muted">read-only</span>'} · edits by ${esc(fx.edit_method || "?")}` : '<span class="muted">file not found</span>'}</div>
         <div>Last scan</div><div>${f.last_scan ? `${ago(f.last_scan.finished_at)} · ${esc(f.last_scan.profile)} · seed ${f.last_scan.seed} · ${r.elapsed_s || "?"}s` : "never"}</div></div></div>
       <div class="card"><b>Issues</b>${f.issues.map((i) => `<div style="margin:6px 0">${sev(i.severity)} <b>${esc(i.code)}</b> ${i.status === "ignored" ? '<span class="pill">ignored</span>' : ""}<br>${esc(i.message)}
-        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="${propose("resub", i.id)}">Propose resub</button> ` : ""}${i.code === "subs_missing" && !f.whisper_blocker ? `<button class="sm" onclick="${propose("whisper_subtitle", i.id)}">Whisper subtitles</button> ` : ""}` : ""}${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
+        <div><button class="sm" onclick="showEvidence(${i.id})">Evidence</button> ${i.status === "open" ? `${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="${propose("resub", i.id)}">Propose resub</button> ` : ""}${i.code === "subs_missing" && f.subgen && f.subgen.plan ? `<button class="sm" onclick="${genSub(`issue_ids:[${i.id}]`)}">Generate subtitle</button> ` : ""}${i.code === "subs_missing" && !f.whisper_blocker && !(f.subgen && f.subgen.plan) ? `<button class="sm" onclick="${propose("whisper_subtitle", i.id)}">Whisper subtitles</button> ` : ""}` : ""}${i.status === "open" ? `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : `<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'open'}}),'Reopened')">Un-ignore</button>`}</div></div>`).join("") || '<div class="muted">None</div>'}</div>
     </div>
     <h3>Audio tracks</h3><table><tr><th>Track</th><th>Tag</th><th>Detected</th><th>Speech</th><th>Peak level</th><th>Info</th></tr>${audio || '<tr><td colspan=6 class="muted">Not analysed</td></tr>'}</table>
     <h3>Subtitles</h3><table><tr><th>Track</th><th>Lang</th><th>Kind</th><th>Dialogue cues</th></tr>${subs || `<tr><td colspan=4 class="muted">${(st.subs || []).length} track(s); content not analysed in this profile</td></tr>`}</table>
@@ -271,6 +272,8 @@ function showFrames(fid) {
 let ISS = { status: "open", severity: "", code: "", search: "", page: 1, group: true };
 const SUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"];
 // default-track / retag issues are fixed by a track-edit proposal: link to it, or rescan files scanned before it existed
+const genSub = (body) => `act(()=>api('/api/subgen/request',{method:'POST',body:{${body}}}),r=>r.proposed.length?'Proposed for subgen - approve it in Actions':'Not possible: '+Object.values(r.not_possible).join('; '))`;
+const GEN_CODES = ["subs_missing", "subs_signs_only"];
 function trackFixButtons(r, items) {
   if (!r.fix_actions) return null;
   const noFix = (m) => /can't fix|no confidently/i.test(m || "");
@@ -288,7 +291,7 @@ function issueGroupRow(g) {
       <div class="small">${g.items.map((i) => `<a href="#/file/${i.file_id}" title="${esc(i.message)}">${esc(epLabel(i))}</a>`).join(", ")}</div></td>
     <td><b>${esc(g.code)}</b><br><span class="small">${g.message ? esc(g.message) : `<details><summary>details differ per file</summary>${g.items.map((i) => `${esc(epLabel(i))}: ${esc(i.message)}`).join("<br>")}</details>`}</span></td>
     <td class="muted">${esc(g.disks.join(", "))}</td>
-    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
+    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${GEN_CODES.includes(g.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" title="Propose subgen subtitles for these files (each is checked first)" onclick="${genSub(`issue_ids:${ids}`)}">Generate subtitles (${n})</button> ` : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
       : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
 }
 async function issues() {
@@ -303,7 +306,7 @@ async function issues() {
       <button style="margin-left:auto" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'problems',profile:'standard'}}),r=>'Queued '+r.queued)">Rescan all problem files</button></div>
     <table><tr><th>Severity</th><th>File</th><th>Issue</th><th>Disk</th><th></th></tr>
     ${res.rows.map((i) => i.group ? issueGroupRow(i) : `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
-      <td>${i.status === "open" ? `${trackFixButtons(i, [i]) ? trackFixButtons(i, [i]) + " " : ""}${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> ` : ""}<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
+      <td>${i.status === "open" ? `${trackFixButtons(i, [i]) ? trackFixButtons(i, [i]) + " " : ""}${GEN_CODES.includes(i.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" onclick="${genSub(`issue_ids:[${i.id}]`)}">Generate subtitle</button> ` : ""}${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> ` : ""}<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
   $("#is").value = ISS.status; $("#isev").value = ISS.severity; $("#icode").value = ISS.code;
   $("#igroup").onchange = (e) => { ISS.group = e.target.checked; ISS.page = 1; issues(); };
   for (const [id, k] of [["is", "status"], ["isev", "severity"], ["icode", "code"], ["iq", "search"]])
@@ -336,15 +339,17 @@ let ACT = { status: "proposed" };
 async function actionsPage() {
   const rows = await api("/api/actions?status=" + ACT.status);
   const s = window.STATUS || (await api("/api/status"));
-  $("#app").innerHTML = `<h2>Actions</h2>
+  const sg = s.subgen_configured ? await api("/api/subgen/status") : null;
+  $("#app").innerHTML = `<h2>Actions</h2>${sg ? subgenCard(sg) : ""}
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${groupActions(rows).map((a) => a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
-      <td>${TRACK_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? trackTable(a) : ""}</td><td class="small">${esc(a.result)}</td>
+      <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
       <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
+        ${a.kind === "subgen_transcribe" ? subgenButtons(a) : ""}
         ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original track languages and default flags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
   if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith("#/actions")) actionsPage(); }, 3000);
   $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(); };
@@ -352,12 +357,15 @@ async function actionsPage() {
 }
 // resub/redownload proposals for the same series + season with the same reason get one Approve
 const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
+const GROUP_MAX = { whisper_subtitle: 5 };  // Bazarr's Whisper route: at most 5 episodes per approval
 const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
 function groupActions(rows) {
   const out = [], groups = {};
   for (const a of rows) {
     if (a.status !== "proposed" || !GROUPABLE.includes(a.kind) || a.season == null) { out.push(a); continue; }
-    const k = [a.kind, a.item_id, a.season, a.reason].join("|");
+    const base = [a.kind, a.item_id, a.season, a.reason].join("|"), cap = GROUP_MAX[a.kind];
+    let k = base;
+    for (let n = 1; cap && groups[k] && groups[k].rows.length >= cap; n++) k = base + "#" + n;
     if (!groups[k]) { groups[k] = { group: true, kind: a.kind, title: a.title, season: a.season, reason: a.reason, rows: [] }; out.push(groups[k]); }
     groups[k].rows.push(a);
   }
@@ -378,9 +386,38 @@ async function approveGroup(ids, kind) {
   await act(() => api("/api/actions/bulk", { method: "POST", body: { op: "approve", ids } }),
     (r) => (r.ok ? `Queued ${r.queued} - they run one after another` : "Nothing to run (already handled?)"));
 }
+// ------------------------------------------------------------------ subgen
+function subgenCard(sg) {
+  const w = sg.worker || {}, q = w.subgen || {};
+  const busy = w.action_id ? `working on <b>${esc(w.file || "")}</b> (batch ${w.action_id}) · ${esc(w.note || w.state || "")}` : esc(w.state || "idle");
+  return `<div class="card small" style="margin-bottom:12px"><b>subgen</b> - one file at a time · ${busy} · ${sg.waiting_files} file(s) waiting
+    ${q.version ? ` · subgen ${esc(q.version)} (${esc(q.model || "?")}) ${q.idle ? "idle" : `busy: ${q.processing_count || 0} running, ${q.queued_count || 0} queued`}` : ""}
+    ${w.error ? `<div style="color:var(--error)">${esc(w.error)}</div>` : ""}
+    ${!sg.pilot_done ? '<div class="muted">The first file of the first batch runs alone, then the batch pauses so you can check the subtitle in Plex and Bazarr.</div>' : ""}
+    <button class="sm" style="float:right;margin-top:-4px" onclick="act(()=>api('/api/subgen/pause',{method:'POST',body:{paused:${!sg.paused}}}),r=>r.paused?'subgen worker paused':'subgen worker resumed')">${sg.paused ? "Resume worker" : "Pause worker"}</button></div>`;
+}
+function subgenTable(a) {
+  const fs = (a.payload && a.payload.files) || [];
+  const st = (e) => e.status === "running" || e.status === "submitted" ? `<b>${e.status}</b>` : esc(e.status || "");
+  return `<details style="margin-top:6px" ${a.status === "running" ? "open" : ""}><summary>${fs.length} file(s)</summary><table class="small" style="margin-top:4px">
+    <tr><th>File</th><th>Audio → task</th><th>Path subgen gets</th><th>Status</th><th>Took</th></tr>
+    ${fs.map((e) => `<tr><td><a href="#/file/${e.file_id}">${esc(e.label)}</a></td><td>${esc(e.lang3)}${e.overridden ? ` <span class="pill" title="tagged ${esc(e.tag || "und")}, detected ${esc(e.lang3)}">detected</span>` : ""} → ${esc(e.task)} (${esc(e.language)})<div class="muted">${esc(e.backend || "")}</div></td>
+      <td><code style="word-break:break-all">${esc(e.path)}</code></td><td>${a.status === "proposed" ? "" : st(e)}${e.outcome ? `<div class="muted">${esc(e.outcome)}</div>` : ""}</td><td>${e.took_s ? fmtDur(e.took_s) : ""}</td></tr>`).join("")}</table></details>`;
+}
+function subgenButtons(a) {
+  const p = a.payload || {}, fs = p.files || [];
+  const call = (op, msg) => `act(()=>api('/api/actions/${a.id}/control',{method:'POST',body:{op:'${op}'}}),'${msg}')`;
+  const out = [];
+  if ((a.status === "queued" || a.status === "running") && !p.paused) out.push(`<button class="sm" onclick="${call("pause", "Pausing after the current file")}">Pause</button>`);
+  if (p.paused || (a.status === "failed" && fs.some((e) => e.status === "not attempted") && !p.cancel)) out.push(`<button class="sm primary" onclick="${call("resume", "Resumed")}">Resume</button>`);
+  if (a.status === "queued" || a.status === "running") out.push(`<button class="sm danger" onclick="if(confirm('Cancel this batch? A file subgen is already transcribing finishes on its own.')) ${call("cancel", "Cancelled")}">Cancel</button>`);
+  return out.join(" ");
+}
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
-  set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle" };
+  set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle",
+  subgen_transcribe: "Generate subtitle (subgen)" };
 const TRACK_KINDS = ["retag_audio", "set_default_audio", "set_default_subtitle"];
+const BATCH_KINDS = [...TRACK_KINDS, "subgen_transcribe"];
 function opsText(f) {
   if (!f.ops) return `audio ${f.a_index + 1}: ${esc(f.old || "untagged")} → <b>${esc(f.new)}</b>`;
   return f.ops.map((o) => `${o.type === "a" ? "audio" : "subtitle"} ${o.type === "s" ? "s" : ""}${o.index + 1}: ${o.language ? `${esc(o.old || "untagged")} → <b>${esc(o.language)}</b>` : ""}${"default" in o ? (o.language ? ", " : "") + (o.default ? "<b>make default</b>" : "clear default") : ""}`).join("<br>");
@@ -399,6 +436,7 @@ async function approveAction(id, kind, n) {
   if (kind === "redownload" && !confirm("Blocklist and redownload this file?")) return;
   if (kind === "retag_audio" && !confirm(`Write the audio language tag into ${n} file(s)? Each change is logged and can be undone.`)) return;
   if ((kind === "set_default_audio" || kind === "set_default_subtitle") && !confirm(`Change the default track flags in ${n} file(s)? Other defaults of the same type are cleared, forced flags are kept. Each change is logged and can be undone.`)) return;
+  if (kind === "subgen_transcribe" && !confirm(`Send these ${n} file(s) to subgen? They go one at a time - each waits until the previous subtitle is written and checked.`)) return;
   if (kind === "whisper_subtitle" && !confirm("Ask Bazarr's Whisper provider to transcribe this episode? It uses Bazarr's Whisper server (GPU) for several minutes.")) return;
   await act(() => api(`/api/actions/${id}/approve`, { method: "POST" }), (r) => (r.ok ? "Started: " + r.result : "Not run: " + (r.result || r.error)));
 }
@@ -430,7 +468,7 @@ const LABELS = {
   sonarr: "Sonarr", radarr: "Radarr", bazarr: "Bazarr", tautulli: "Tautulli (Plex activity)", path_mappings: "Path mappings",
   languages: "Languages", anime: "Anime", scan: "Scanning", review: "Visual reviews (Claude / manual)", schedule: "Scan schedule",
   imports: "New imports (webhook)", sync: "Library sync", whisper: "Whisper (speech recognition)", retag: "Retag audio (writes to media files)",
-  automation: "Automation",
+  subgen: "Subgen (generated subtitles)", automation: "Automation",
 };
 const HELP = {
   "path_mappings": "How Sonarr/Radarr paths map into this container. Example: Sonarr sees /tv → here it's /mnt/user/media/tv.",
@@ -442,6 +480,16 @@ const HELP = {
   "scan.hw_decode": "auto = decode video on the NVIDIA GPU (NVDEC), falling back to CPU. Needs NVIDIA_DRIVER_CAPABILITIES to include 'video'.",
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
+  "subgen.url": "Your subgen container, e.g. http://192.168.1.10:9006. Empty = off. Anotherr sends it one file at a time (POST /batch with the language and task) and never has more than one job in flight.",
+  "subgen.path_map": 'How subgen sees your library, e.g. [{"from": "/mnt/user/data/media", "to": "/media"}]. Paths outside subgen\'s SUBGEN_PATH_ALLOWLIST are refused (403).',
+  "subgen.timeout_factor": "Per-file budget = running time x this (at least the minimum). Grows automatically if subgen is measured slower. On timeout a queued job is cancelled; a running one can't be stopped, so the next file waits for it.",
+  "subgen.timeout_min_s": "Minimum per-file budget in seconds.",
+  "subgen.max_consecutive_failures": "Stop a batch after this many failed files in a row (Resume continues it).",
+  "subgen.refresh_every": "Ask Sonarr/Radarr and Bazarr to rescan after this many files, and at the end of a batch.",
+  "subgen.new_episode_days": "Automatic proposals leave newer episodes to a normal Bazarr search first. 'Generate subtitle' ignores this.",
+  "subgen.gpu": "Turn on if subgen runs on the same GPU as Anotherr: Anotherr then finishes its scans, unloads its Whisper model and pauses scanning while a subgen job runs.",
+  "subgen.min_cues_per_min": "Results with fewer cues per minute are rejected (a dialogue track is usually 10-20).",
+  "subgen.min_english_score": "Share of common English words a result must reach - catches a 'transcribe' where a translation was asked for.",
   "scan.checks.interlace": "Sample the video for interlacing (idet). Cheap; finds combing artifacts.",
   "scan.checks.extra_language_samples": "When no track seems to be in the expected language, analyse more audio windows before saying so. Prevents false 'wrong language' issues.",
   "scan.checks.hardsubs": "OCR a few frames for burned-in subtitles (English only).",

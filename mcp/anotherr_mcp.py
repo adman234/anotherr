@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 5  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 6  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -170,6 +170,7 @@ def file_report(file_id: int) -> str:
         "container": facts.get("container"), "hardlinks": facts.get("nlink"), "writable": facts.get("writable"),
         "under_allowed_retag_path": facts.get("allowed"), "edit_method": facts.get("edit_method"),
         "whisper_subtitle_possible": not f.get("whisper_blocker"), "whisper_blocker": f.get("whisper_blocker"),
+        "subgen": f.get("subgen"),  # {"plan": {language, task, path, ...} | None, "blocker": why not}
         "expected_language": res.get("expected_language"), "runtime_ratio": res.get("runtime_ratio"),
         "audio_tracks": audio or res.get("audio_tracks"), "subtitle_tracks": subs,
         "subtitle_sync": res.get("subtitle_sync"), "subtitle_content": res.get("subtitle_content"),
@@ -349,6 +350,14 @@ def track_edit_preview(action_id: int) -> str:
     p = a.get("payload") or {}
     lines = [f"action {a['id']} [{a['status']}] {a['kind']}: {a['reason']}",
              f"case: {p.get('case')}  review: {p.get('review')}  series language: {p.get('series_language')}"]
+    if a["kind"] == "subgen_transcribe":
+        lines[1] = a.get("result") or ""
+        for f in p.get("files", []):
+            lines.append(f"- {f.get('label')}: audio {f.get('lang3')}{' (detected; tag ' + (f.get('tag') or 'und') + ')' if f.get('overridden') else ''}"
+                         f" -> {f.get('task')} {f.get('language')} | {f.get('status')}"
+                         + (f" ({round(f['took_s'] / 60)} min)" if f.get("took_s") else "")
+                         + (f": {f['outcome']}" if f.get("outcome") else "") + f"\n    subgen path: {f.get('path')}")
+        return "\n".join(lines)
     for f in p.get("files", []):
         conf = f" {f.get('conf', 0):.0%}" if a["kind"] == "retag_audio" else ""
         lines.append(f"- {f.get('label') or 'file ' + str(f['file_id'])}: {_ops_text(f)} ({f.get('why')}{conf})"
@@ -387,6 +396,26 @@ def decide_action(action_id: int, approve: bool) -> str:
     """Approve (runs immediately) or reject a proposed action. Only approve when the user has agreed."""
     path = f"/api/actions/{action_id}/{'approve' if approve else 'reject'}"
     return _j(_send("POST", path))
+
+
+@mcp.tool()
+def generate_subtitle(file_ids: list[int]) -> str:
+    """Propose subgen subtitles for these files (grouped per season, needs approval). Each file is checked first:
+    a confidently detected audio language, no full English subtitle, not 'almost no speech', and subgen must pick
+    the right audio track. Approved batches go to subgen strictly one file at a time; see track_edit_preview."""
+    return _j(_send("POST", "/api/subgen/request", {"file_ids": file_ids}))
+
+
+@mcp.tool()
+def subgen_status() -> str:
+    """The subgen worker: current file, files waiting, subgen's own queue, paused or not."""
+    return _j(_get("/api/subgen/status"))
+
+
+@mcp.tool()
+def control_subgen(action_id: int, op: str) -> str:
+    """Pause, resume or cancel a subgen batch (op: pause | resume | cancel). Only when the user asks."""
+    return _j(_send("POST", f"/api/actions/{action_id}/control", {"op": op}))
 
 
 @mcp.tool()

@@ -187,6 +187,11 @@ def refresh_item(item_id: int) -> dict:
             if f.get("status") == "edited" and not f.get("verified"):
                 busy.add((f["file_id"], f["a_index"]))
     rows = [r for r in rows if (r["file_id"], r["a_index"]) not in busy]
+    holds = trackedit.edit_holds()
+    if holds:
+        fs = {f["id"]: f for f in db.q("SELECT id, audio_evidence, last_scan_id FROM files WHERE item_id=?", (item_id,))}
+        rows = [r for r in rows if not trackedit.held(holds, r["file_id"],
+                                                       (_evidence(fs.get(r["file_id"]) or {}) or {}).get("scan_started"))]
     groups: dict[tuple, list] = {}
     for r in rows:
         groups.setdefault((r["case"], r["season"], r["review"]), []).append(r)

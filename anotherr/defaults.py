@@ -138,11 +138,14 @@ def refresh_item(item_id: int) -> dict:
         for e in (db.unj(a["payload"], {}) or {}).get("files", []):
             if e.get("status") == "edited" and not e.get("verified"):
                 busy.add(e["file_id"])
+    holds = trackedit.edit_holds()
     for f in db.q("SELECT * FROM files WHERE item_id=? AND missing=0", (item_id,)):
         codes = {r["code"] for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open'", (f["id"],))}
         if not codes & {"default_audio_not_preferred", "default_subs_signs"} or codes & BLOCKING or f["id"] in busy:
             continue
         ev = retag._evidence(f) or {}
+        if trackedit.held(holds, f["id"], ev.get("scan_started")):
+            continue  # an edit already ran (or is running) since this evidence was gathered
         plan = plan_file(ev.get("tracks") or [], ev.get("subs") or [], codes, pref, sub_lang)
         if not plan["ops"]:
             continue

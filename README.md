@@ -126,6 +126,55 @@ Uses the same switch, allowed paths and safety checks as retagging (Settings →
 - An action with no progress for 10 minutes is marked *failed (stalled)* and its lock is released.
 - Crashes are written to the activity log.
 
+## Generated subtitles with subgen (optional)
+
+When provider searches keep failing for a show, Anotherr can ask your
+[subgen](https://github.com/coaxk/subarr-subgen) container directly for an English subtitle. This was built
+against the subarr-subgen patch stack, rev v4.38 or later.
+
+1. In **Settings → Subgen**, set `url` (e.g. `http://192.168.1.10:9006`).
+2. Set `path_map` from your library path to subgen's view, e.g.
+   `[{"from": "/mnt/user/data/media", "to": "/media"}]`. It must fall inside subgen's
+   `SUBGEN_PATH_ALLOWLIST`.
+3. Anotherr renames each result to `<video>.en.srt`, so give it a read/write path for the media folders,
+   the same as for retagging.
+
+**Proposals:** one per series and season, always approved by hand. A file qualifies when all of these hold:
+- It has an open `subs_missing`, or `subs_signs_only`.
+- Its audio language was detected confidently, with every sampled window agreeing. The detected
+  language is used, not the tag.
+- There's no full English subtitle, and the file isn't flagged "almost no speech".
+- subgen would pick that audio track. subgen chooses by tag, so a dual-audio file with a mislabeled
+  track needs a retag first.
+- Bazarr's search already failed for the show and the episode is over a week old, or you pressed
+  **Generate subtitle** on the file or issue.
+
+English audio is transcribed. Other languages are translated to English. Pending resub and Whisper
+proposals for those files are replaced.
+
+**Running, strictly one file at a time:**
+- Anotherr waits until subgen is idle, including jobs from other clients, then sends one file with
+  `POST /batch` (language, task and `bypass_skip`). It waits until the job leaves subgen's queue.
+- Then it checks the new `.srt`: cue density, how much of the running time the cues cover, and that the
+  text is English. If it passes, it's renamed to `.en.srt` and the file is rescanned. Only then does the
+  next file go.
+- **Time budget:** 4x the running time per file. When it runs out, a queued job is cancelled. subgen
+  can't stop a running job, so the next file waits for it to finish.
+- **Retries:** a job that vanishes without a subtitle (e.g. subgen restarted) is retried once.
+- **Failures:** three failures in a row stop the batch (Resume continues it). Batches can be paused or
+  cancelled, and the worker as a whole can be paused.
+- **Pilot:** the very first file runs alone, then its batch pauses so you can check the subtitle in Plex
+  and Bazarr.
+- **Rescans:** Sonarr/Radarr and Bazarr rescan every 10 files and at the end.
+- **Restarts:** Anotherr restarting mid-job doesn't resubmit. It finds the job in subgen's queue, or
+  the finished `.srt`.
+- `subgen.gpu`: turn it on if subgen shares Anotherr's GPU. Anotherr then pauses its own scans while a
+  subgen job runs.
+
+Bazarr's Whisper route (**Whisper subtitles**) is now marked done only once a subtitle file actually
+appears. It isn't proposed again for a file it already ran on, and it's approved at most 5 episodes at
+a time.
+
 ## Actions and automation
 
 Problems create **proposals**:

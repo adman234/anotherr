@@ -88,6 +88,19 @@ DEFAULTS: dict = {
         "allowed_paths": [],         # only files under these folders may be edited, e.g. /mnt/user/media/tv
         "break_hardlinks": False,    # hardlinked files (seeding copies): skip (default) or write a new copy
     },
+    "subgen": {
+        "url": "",                   # e.g. http://192.168.1.10:9006 - empty = the subgen route is off
+        "path_map": [],              # [{"from": "/mnt/user/data/media", "to": "/media"}]: library path -> subgen's view
+        "timeout_factor": 4,         # per-file budget: running time x this (grows with subgen's measured pace)
+        "timeout_min_s": 600,
+        "poll_s": 15,
+        "max_consecutive_failures": 3,
+        "refresh_every": 10,         # Sonarr/Radarr + Bazarr rescan after this many files (and at the end)
+        "new_episode_days": 7,       # newer episodes get a Bazarr resub first
+        "gpu": False,                # subgen shares the GPU: pause Anotherr's scans while a subgen job runs
+        "min_cues_per_min": 3,
+        "min_english_score": 0.2,
+    },
     "automation": {
         "enabled": False,
         "windows": [{"days": ALL_DAYS, "start": "02:00", "end": "06:00"}],

@@ -40,7 +40,7 @@ LOG_PATH = os.path.join(db.CONFIG_DIR, "retag_log.jsonl")  # rollback records (n
 MKVPROPEDIT = os.environ.get("ANOTHERR_MKVPROPEDIT", "mkvpropedit")
 EDIT_TIMEOUT = 60
 STALL_AFTER = 600
-SLOW_KINDS = {"whisper_subtitle": 2 * 3600}
+SLOW_KINDS = {"whisper_subtitle": 2 * 3600, "subgen_transcribe": 1800}  # subgen heartbeats every poll
 _lock = threading.Lock()
 _owner: dict = {"action": None, "since": 0.0}
 _pool = cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="anotherr-trackedit-file")
@@ -243,6 +243,25 @@ def write_path(f: dict, resolved: str) -> str | None:
     return None
 
 
+def edit_holds() -> dict[int, float]:
+    """file_id -> when a track edit last touched it (inf while one is queued/running). A proposal built from a
+    scan older than that would repeat an edit that already ran ("file changed since scanned")."""
+    out: dict[int, float] = {}
+    for a in db.q(f"SELECT status, payload, updated_at FROM actions WHERE kind IN ({','.join('?' * len(KINDS))}) "
+                  "AND (status IN ('queued','running') OR (status IN ('done','failed') AND updated_at > ?))",
+                  (*KINDS, time.time() - 30 * 86400)):
+        for e in (db.unj(a["payload"], {}) or {}).get("files", []):
+            if a["status"] in ("queued", "running"):
+                out[e["file_id"]] = float("inf")
+            elif e.get("status") == "edited":
+                out[e["file_id"]] = max(out.get(e["file_id"], 0), a["updated_at"])
+    return out
+
+
+def held(holds: dict[int, float], file_id: int, scan_started) -> bool:
+    return file_id in holds and holds[file_id] >= float(scan_started or 0)
+
+
 def file_facts(f: dict) -> dict:
     """Container, hardlink count and whether a track edit could write this file (for the file page / MCP report)."""
     from .scanner import resolve_path
@@ -251,12 +270,16 @@ def file_facts(f: dict) -> dict:
     if not path:
         return {"found": False}
     out = {"found": True, "container": os.path.splitext(path)[1].lstrip(".").lower(), "nlink": 1, "writable": False,
-           "write_path": None, "allowed": _allowed([path], settings.get()), "edit_method": None}
+           "write_path": None, "allowed": None, "edit_method": None}
     try:
         out["nlink"] = os.stat(path).st_nlink
     except OSError:
         pass
     wp = write_path(f, path)
+    from .sync import map_path
+
+    # same test edit_file uses: the read path OR the user-share path (allowed paths are usually /mnt/user/...)
+    out["allowed"] = _allowed([path, map_path(f["arr_path"]), wp or ""], settings.get())
     out.update(writable=bool(wp), write_path=wp, edit_method=method_for(path, out["nlink"]))
     return out
 

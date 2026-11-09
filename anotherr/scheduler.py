@@ -191,7 +191,7 @@ class Worker(threading.Thread):
             scanner.CANCEL.clear()
 
         force = bool(settings.state_get("force_queue", False))
-        if force and not db.scalar("SELECT COUNT(*) FROM queue"):
+        if force and not queue_count():
             settings.state_set("force_queue", False)  # queue drained
             db.log("Queue processed")
             force = False
@@ -405,7 +405,7 @@ def next_run(cfg: dict) -> dict:
     """When scanning will next happen and why not now."""
     sc = cfg["schedule"]
     reasons = STATUS.get("pause_reasons") or []
-    due = db.scalar("SELECT COUNT(*) FROM queue WHERE created_at <= ?", (time.time(),)) or 0
+    due = queue_count(due_only=True)
     if reasons:
         return {"at": None, "why": "paused: " + ", ".join(reasons)}
     if due:
@@ -433,10 +433,21 @@ def start():
 
 
 def enqueue(file_ids: list[int], profile: str, source: str = "manual") -> int:
+    """Queue files for a scan. Files no longer in the library (missing=1) are skipped: the worker never picks
+    them, so their rows would sit in the queue forever and keep it from ever looking empty."""
     now = time.time()
     n = 0
     for fid in file_ids:
-        n += db.x("INSERT INTO queue(file_id, profile, source, created_at) VALUES (?,?,?,?) "
+        n += db.n("INSERT INTO queue(file_id, profile, source, created_at) SELECT id, ?, ?, ? FROM files "
+                  "WHERE id=? AND missing=0 "
                   "ON CONFLICT(file_id) DO UPDATE SET profile=excluded.profile, source=excluded.source",
-                  (fid, profile, source, now)) and 1
+                  (profile, source, now, fid)) and 1
     return n
+
+
+def queue_count(due_only: bool = False) -> int:
+    """Queued files the worker can actually scan (rows for files that left the library don't count)."""
+    sql = "SELECT COUNT(*) FROM queue q JOIN files f ON f.id = q.file_id WHERE f.missing=0"
+    if due_only:
+        return db.scalar(sql + " AND q.created_at <= ?", (time.time(),)) or 0
+    return db.scalar(sql) or 0

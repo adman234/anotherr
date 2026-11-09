@@ -154,3 +154,25 @@ def test_any_mode_pauses_everything(monkeypatch):
     monkeypatch.setattr(arr.Tautulli, "sessions", lambda self: [{"file": "/x/y.mkv", "title": "", "state": ""}])
     scheduler._streams_cache["t"] = 0
     assert "1 active Plex stream(s)" in scheduler.pause_reasons(settings.get())
+
+
+def _file(missing: int) -> int:
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', ?, 'Gone', 'series')", (77 + missing,))
+    return db.x("INSERT INTO files(item_id, arr_file_id, arr_path, disk, first_seen, missing) VALUES (?,?,?,?,?,?)",
+                (iid, 78 + missing, f"/tv/Gone/{missing}.mkv", "cache", time.time(), missing))
+
+
+def test_enqueue_skips_files_that_left_the_library():
+    live, gone = _file(0), _file(1)
+    assert scheduler.enqueue([live, gone], "quick") == 1
+    assert [r["file_id"] for r in db.q("SELECT file_id FROM queue")] == [live]
+
+
+def test_orphan_queue_rows_dont_count_or_keep_forcing_on():
+    live, gone = _file(0), _file(1)
+    db.x("INSERT INTO queue(file_id, profile, source, created_at) VALUES (?, 'quick', 'action', 0)", (gone,))
+    assert scheduler.queue_count() == 0 and scheduler.queue_count(due_only=True) == 0
+    scheduler.STATUS["pause_reasons"] = []
+    assert "queued" not in scheduler.next_run(settings.get())["why"]
+    scheduler.enqueue([live], "quick")
+    assert scheduler.queue_count() == 1

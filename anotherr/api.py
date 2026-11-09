@@ -220,7 +220,7 @@ def status():
         "whisper": {"loaded": stt.WHISPER._model is not None, "device": stt.WHISPER.device,
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
         "files": {"total": sum(counts.values()), **counts},
-        "queue": db.scalar("SELECT COUNT(*) FROM queue"),
+        "queue": scheduler.queue_count(),
         "memory": health.memory(),
         "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
@@ -501,7 +501,7 @@ def queue_process(body: dict = Body(default={})):
     Stops forcing once the queue is empty. stop=true cancels."""
     stop = bool(body.get("stop"))
     settings.state_set("force_queue", not stop)
-    n = db.scalar("SELECT COUNT(*) FROM queue")
+    n = scheduler.queue_count()
     db.log("Stopped forcing the queue" if stop else f"Processing queue now ({n} file(s), ignoring pauses)")
     return {"forcing": not stop, "queued": n}
 

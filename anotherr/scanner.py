@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import analysis, db, frames, langs, media, ocr, runtime, settings, stt
+from . import analysis, audio_request, db, frames, langs, media, ocr, runtime, settings, stt
 
 log = logging.getLogger("anotherr.scan")
 
@@ -672,6 +672,12 @@ def check_language(ctx: Ctx):
     orig = [t for t in tracks if lang_match(t["effective"], exp)]
     orig.sort(key=lambda t: (not t["confident"], not t["default"]))
     overridden_orig = [t for t in tracks if t.get("overridden") and lang_match(t["tag"], exp)]
+    request, request_source = audio_request.effective(ctx.item)
+    ctx.result["audio_request"] = {"request": request or "either", "source": request_source}
+    season = audio_request.season_of(ctx.file)
+    english = [t for t in tracks if lang_match(t["effective"], "eng")]
+    exp_is_english = lang_match(exp, "eng")
+    e_only = False  # no original-language track, but an English one
     if orig:
         ctx.orig_track = orig[0]["a_index"]
     elif overridden_orig:
@@ -693,12 +699,26 @@ def check_language(ctx: Ctx):
                       f"Tracks are tagged {', '.join(found) or 'unknown'}, but {sib['label']} from this series has the "
                       f"same kind of tag and is confirmed {langs.name(exp)} - probably mislabeled too. Not raised as "
                       "missing until speech confirms it.", sibling=sib)
+        elif english:
+            # English only. Fine unless the original language was requested; a season exception can accept that.
+            e_only = True
+            if request == "original" and not audio_request.allows(ctx.item.get("id"), season, "english_only"):
+                ctx.issue("language", "original_audio_missing", "warning",
+                          f"No {langs.name(exp)} audio ({what} language), and it was requested. "
+                          f"Found: {', '.join(found) or 'unknown'}.", expected=exp, found=found, request=request)
         else:
             ctx.issue("language", "original_audio_missing", "error",
                       f"No {langs.name(exp)} audio ({what} language). Found: {', '.join(found) or 'unknown'}.",
                       expected=exp, found=found)
         ctx.orig_track = next((t["a_index"] for t in tracks if t["default"]), tracks[0]["a_index"])
         ctx.result["orig_track_confirmed"] = False  # a stand-in, not a confirmed original-language track
+    if (orig or overridden_orig) and request == "english" and not exp_is_english and not english             and all(t["effective"] for t in tracks):
+        # original audio but no English track, and English was requested; a season exception can accept that
+        if not audio_request.allows(ctx.item.get("id"), season, "original_only"):
+            found = sorted({langs.name(t["effective"]) for t in tracks if t["effective"]})
+            ctx.issue("language", "english_audio_missing", "warning",
+                      f"No English audio, and it was requested. Found: {', '.join(found) or 'unknown'}.",
+                      found=found, request=request)
     # players fall back to the first audio track when nothing is flagged default
     any_flag = any(a["default"] for a in ctx.info["audio"])
     default = next((t for t in tracks if t["default"]), None) if any_flag else ctx.tracks.get(0)
@@ -711,12 +731,19 @@ def check_language(ctx: Ctx):
                   defaults.fix_text_audio(view, exp) or
                   f"Default audio track is {langs.name(default['effective'])}, not {langs.name(exp)}.",
                   fix_available=bool(tgt), target_track=tgt["a_index"] + 1 if tgt else None)
+    elif e_only and default and not lang_match(default["effective"], "eng"):
+        # no original-language track: English should be what plays
+        from . import defaults
+
+        view = _track_view(ctx)
+        tgt = defaults.pick_audio(view, "eng")
+        ctx.issue("language", "default_audio_not_preferred", "warning",
+                  defaults.fix_text_audio(view, "eng") or
+                  f"Default audio track is {langs.name(default['effective'])}, not English.",
+                  fix_available=bool(tgt), target_track=tgt["a_index"] + 1 if tgt else None)
     if ctx.item.get("is_anime") and ctx.cfg["anime"]["prefer_dual_audio"] and not lang_match(exp, dub):
-        has_dub = any(lang_match(t["effective"], dub) for t in tracks)
-        ctx.result["dual_audio"] = bool(orig) and has_dub
-        if not has_dub:
-            ctx.issue("language", "no_dub", "info",
-                      f"Dual audio preferred: no {langs.name(dub)} dub track.")
+        # dual audio is now expressed by the request (english); no_dub is retired
+        ctx.result["dual_audio"] = bool(orig) and any(lang_match(t["effective"], dub) for t in tracks)
 
 
 # ====================================================================== subtitles
@@ -1248,6 +1275,7 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
             retag.after_scan(fid, ctx.info or {}, scan_id)
             retag.refresh_item(ctx.item["id"])
             defaults.refresh_item(ctx.item["id"])
+            audio_request.refresh_item(ctx.item["id"])
             from . import subgen
 
             subgen.refresh_item(ctx.item["id"])

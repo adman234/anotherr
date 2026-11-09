@@ -197,6 +197,9 @@ async function itemPage(id) {
     <div class="card" style="margin-bottom:12px"><div class="kv">
       <div>Source</div><div>${esc(it.source)} #${it.arr_id} ${it.is_anime ? '<span class="pill">anime</span>' : ""}</div>
       <div>Original language</div><div>${esc(it.original_language_name || "?")} (${esc(it.original_language || "?")})</div>
+      <div>Requested audio</div><div><b>${esc(it.audio_request_effective)}</b> <span class="small muted">(${it.audio_request_source === "override" ? "set here" : it.audio_request_source === "profile" ? `from quality profile "${esc(it.quality_profile)}"` : `no mapped profile${it.quality_profile ? ` ("${esc(it.quality_profile)}")` : ""}`})</span>
+        <select id="areq" onchange="saveItem(${it.id})" style="margin-left:8px">${[["", "follow profile"], ["original", "original"], ["english", "english"], ["either", "either"]].map(([v, l]) => `<option value="${v}" ${v === (it.audio_request_override || "") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div>Accepted as is</div><div>${it.audio_exceptions.length ? it.audio_exceptions.map((e) => `<div>${e.season != null ? "Season " + e.season : "Movie"}: ${e.allow === "original_only" ? "no English audio" : "no original-language audio"} <span class="small muted">${esc(e.note || "")}</span> <button class="sm" onclick="if(confirm('Remove this exception? The season is rescanned and the warning comes back if it is still true.')) act(()=>api('/api/audio_exceptions/${e.id}',{method:'DELETE'}),r=>'Removed; queued '+r.queued+' file(s) for a rescan')">Remove</button></div>`).join("") : '<span class="muted">none</span>'}</div>
       <div>Preferred audio override</div><div><input id="ovr" placeholder="e.g. eng (blank = original)" value="${esc(it.language_override)}" style="width:220px"> <button class="sm" onclick="saveItem(${it.id})">Save</button>
         <span class="small muted">Original language is always preferred unless you set this.</span></div>
       <div>Anime rules</div><div><input type="checkbox" id="anime" ${it.is_anime ? "checked" : ""} onchange="saveItem(${it.id})"></div>
@@ -210,7 +213,7 @@ async function itemPage(id) {
       <td><button class="sm" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${f.id}],profile:$('#profile').value}}),'Queued')">Scan</button></td></tr>`).join("")}</table>`;
 }
 async function saveItem(id) {
-  await act(() => api("/api/items/" + id, { method: "PATCH", body: { language_override: $("#ovr").value.trim(), is_anime: $("#anime").checked ? 1 : 0, multi_segment: $("#mseg").checked ? 1 : 0, excluded: $("#excl").checked ? 1 : 0 } }), "Saved");
+  await act(() => api("/api/items/" + id, { method: "PATCH", body: { language_override: $("#ovr").value.trim(), audio_request_override: $("#areq").value, is_anime: $("#anime").checked ? 1 : 0, multi_segment: $("#mseg").checked ? 1 : 0, excluded: $("#excl").checked ? 1 : 0 } }), "Saved");
 }
 
 async function filePage(id) {
@@ -230,6 +233,7 @@ async function filePage(id) {
       ${f.subgen ? `<button ${f.subgen.plan ? `title="${esc(f.subgen.plan.task)} ${esc(f.subgen.plan.language)} - proposed for approval, then sent to subgen one at a time"` : `disabled title="${esc(f.subgen.blocker)}"`} onclick="${genSub(`file_ids:[${f.id}]`)}">Generate subtitle (subgen)</button>` : ""}
       <button ${f.whisper_blocker ? `disabled title="${esc(f.whisper_blocker)}"` : 'title="Ask Bazarr\'s Whisper provider to transcribe + translate this episode"'} onclick="${propose("whisper_subtitle")}">Whisper subtitles</button>
       <button onclick="act(()=>api('/api/actions',{method:'POST',body:{file_id:${f.id},kind:'redownload',reason:'manual'}}),'Proposed')">Propose redownload</button>
+      ${f.issues.some((i) => i.status === "open" && i.severity === "warning" && (i.code === "english_audio_missing" || i.code === "original_audio_missing")) ? `<button title="Accept this whole season (or movie) as it is - the requested audio language is not available" onclick="${propose("accept_season_audio")}">Accept season as is</button>` : ""}
       <button onclick="framePicker(${f.id}, ${st.duration || 0})">View frames</button></div>
     <div class="grid">
       <div class="card"><div class="kv"><div>Path</div><div class="small">${esc(f.arr_path)}</div><div>Read from</div><div class="small">${esc(r.path || f.local_path)}</div>
@@ -237,6 +241,7 @@ async function filePage(id) {
         <div>Duration</div><div>${st.duration ? fmtTs(st.duration) : "?"} ${r.expected_runtime_s ? `(expected ~${Math.round(r.expected_runtime_s / 60)} min, ratio ${r.runtime_ratio})` : ""}</div>
         <div>Episodes</div><div>${f.episodes.map((e) => `S${String(e.season).padStart(2, "0")}E${String(e.episode).padStart(2, "0")} ${esc(e.title)}`).join("<br>") || "-"}</div>
         <div>Expected audio</div><div>${esc(r.expected_language || "?")}${r.dual_audio ? " · dual audio ✓" : ""}</div>
+        <div>Requested audio</div><div>${esc(f.item.audio_request_effective)} <span class="small muted">(${f.item.audio_request_source === "override" ? "set on the show page" : f.item.audio_request_source === "profile" ? `quality profile "${esc(f.item.quality_profile)}"` : "no mapped profile"})</span>${(f.audio_exceptions || []).map((e) => ` <span class="pill">accepted as is: ${e.allow === "original_only" ? "no English" : "no original"}</span>`).join("")}</div>
         <div>Container</div><div>${fx.found ? `${esc(fx.container)} · ${fx.nlink > 1 ? `<b>hardlinked</b> (${fx.nlink} links)` : "not hardlinked"} · ${fx.writable ? `writable${fx.allowed ? "" : ' <span class="muted">(not under an allowed retag path)</span>'}` : '<span class="muted">read-only</span>'} · edits by ${esc(fx.edit_method || "?")}` : '<span class="muted">file not found</span>'}</div>
         <div>Last scan</div><div>${f.last_scan ? `${ago(f.last_scan.finished_at)} · ${esc(f.last_scan.profile)} · seed ${f.last_scan.seed} · ${r.elapsed_s || "?"}s` : "never"}</div></div></div>
       <div class="card"><b>Issues</b>${f.issues.map((i) => `<div style="margin:6px 0">${sev(i.severity)} <b>${esc(i.code)}</b> ${i.status === "ignored" ? '<span class="pill">ignored</span>' : ""}<br>${esc(i.message)}
@@ -346,7 +351,7 @@ async function actionsPage() {
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${groupActions(rows).map((a) => a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
-      <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
+      <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : a.kind === "accept_season_audio" ? acceptTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
       <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
         ${a.kind === "subgen_transcribe" ? subgenButtons(a) : ""}
@@ -415,9 +420,13 @@ function subgenButtons(a) {
 }
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
   set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle",
-  subgen_transcribe: "Generate subtitle (subgen)" };
+  subgen_transcribe: "Generate subtitle (subgen)", accept_season_audio: "Accept season audio as is" };
 const TRACK_KINDS = ["retag_audio", "set_default_audio", "set_default_subtitle"];
-const BATCH_KINDS = [...TRACK_KINDS, "subgen_transcribe"];
+const BATCH_KINDS = [...TRACK_KINDS, "subgen_transcribe", "accept_season_audio"];
+function acceptTable(a) {
+  const fs = (a.payload && a.payload.files) || [];
+  return `<details style="margin-top:6px"><summary>${fs.length} file(s) with the gap</summary><div class="small">${fs.map((f) => esc(f.label || "file " + f.file_id)).join(", ")}</div></details>`;
+}
 function opsText(f) {
   if (!f.ops) return `audio ${f.a_index + 1}: ${esc(f.old || "untagged")} → <b>${esc(f.new)}</b>`;
   return f.ops.map((o) => `${o.type === "a" ? "audio" : "subtitle"} ${o.type === "s" ? "s" : ""}${o.index + 1}: ${o.language ? `${esc(o.old || "untagged")} → <b>${esc(o.language)}</b>` : ""}${"default" in o ? (o.language ? ", " : "") + (o.default ? "<b>make default</b>" : "clear default") : ""}`).join("<br>");
@@ -434,6 +443,7 @@ function trackTable(a) {
 }
 async function approveAction(id, kind, n) {
   if (kind === "redownload" && !confirm("Blocklist and redownload this file?")) return;
+  if (kind === "accept_season_audio" && !confirm("Accept this whole season (or movie) as it is? The missing-audio warnings are resolved and later imports into the season are not flagged. You can remove the exception on the show page.")) return;
   if (kind === "retag_audio" && !confirm(`Write the audio language tag into ${n} file(s)? Each change is logged and can be undone.`)) return;
   if ((kind === "set_default_audio" || kind === "set_default_subtitle") && !confirm(`Change the default track flags in ${n} file(s)? Other defaults of the same type are cleared, forced flags are kept. Each change is logged and can be undone.`)) return;
   if (kind === "subgen_transcribe" && !confirm(`Send these ${n} file(s) to subgen? They go one at a time - each waits until the previous subtitle is written and checked.`)) return;
@@ -475,7 +485,10 @@ const HELP = {
   "languages.subtitle_language": "The language you read subtitles in (ISO code, e.g. eng).",
   "languages.require_subs_for_native_audio": "Also require subtitles when the audio is already in your language.",
   "languages.min_full_sub_cues_per_min": "Tracks with fewer dialogue lines per minute are treated as signs/songs only.",
-  "anime.prefer_dual_audio": "Flag anime without a dub track (info only - original audio is always preferred).",
+  "anime.prefer_dual_audio": "Record whether an anime file has both original and dub audio in its scan result. Whether a dub is wanted is set by the quality profile (see Request profiles).",
+  "languages.request_profiles": "Sonarr/Radarr quality profile names (case-insensitive) that mean original-language audio or English audio was requested. Any other profile means either.",
+  "languages.request_profiles.original": "Profile names meaning original-language audio was requested (a JSON list).",
+  "languages.request_profiles.english": "Profile names meaning English audio was requested (a JSON list).",
   "anime.detect_dubtitles": "Flag subtitle tracks that just transcribe the English dub.",
   "scan.hw_decode": "auto = decode video on the NVIDIA GPU (NVDEC), falling back to CPU. Needs NVIDIA_DRIVER_CAPABILITIES to include 'video'.",
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",

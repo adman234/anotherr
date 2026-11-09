@@ -48,6 +48,10 @@ class Client:
     def get(self, path, **params):
         return self.req("GET", path, params=params)
 
+    def quality_profiles(self) -> dict[int, str]:
+        """Quality profile id -> name (Sonarr and Radarr share the endpoint)."""
+        return {p["id"]: p.get("name", "") for p in self.get("/api/v3/qualityprofile") or [] if "id" in p}
+
 
 class Sonarr(Client):
     service = "sonarr"

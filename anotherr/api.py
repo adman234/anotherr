@@ -14,7 +14,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, db, defaults, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, subgen, sync, trackedit, unraid
+from . import __version__, actions, arr, audio_request, db, defaults, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, subgen, sync, trackedit, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -295,13 +295,20 @@ def item(item_id: int):
     it["files"] = db.q("SELECT * FROM files WHERE item_id=? AND missing=0 ORDER BY label, arr_path", (item_id,))
     for f in it["files"]:
         f["episodes"] = db.unj(f["episodes"], [])
+    it.update(audio_request.describe(it))
+    it["audio_exceptions"] = audio_request.list_for_item(item_id)
     return it
 
 
 @app.patch("/api/items/{item_id}", dependencies=[Depends(auth)])
 def item_update(item_id: int, body: dict = Body(...)):
-    allowed = {"language_override", "multi_segment", "excluded", "is_anime"}
+    allowed = {"language_override", "multi_segment", "excluded", "is_anime", "audio_request_override"}
     sets = {k: v for k, v in body.items() if k in allowed}
+    if "audio_request_override" in sets:
+        v = (sets["audio_request_override"] or "").strip().lower()
+        if v not in ("", "original", "english", "either"):
+            raise HTTPException(400, "audio_request_override must be '' (follow the profile), original, english or either")
+        sets["audio_request_override"] = v
     if "language_override" in sets:
         from . import langs
 
@@ -312,6 +319,22 @@ def item_update(item_id: int, body: dict = Body(...)):
     for k, v in sets.items():
         db.x(f"UPDATE items SET {k}=? WHERE id=?", (v, item_id))
     return item(item_id)
+
+
+@app.get("/api/items/{item_id}/audio_exceptions", dependencies=[Depends(auth)])
+def item_audio_exceptions(item_id: int):
+    if not db.q1("SELECT id FROM items WHERE id=?", (item_id,)):
+        raise HTTPException(404)
+    return audio_request.list_for_item(item_id)
+
+
+@app.delete("/api/audio_exceptions/{exception_id}", dependencies=[Depends(auth)])
+def audio_exception_delete(exception_id: int):
+    """Remove an accept-as-is exception; that season's files are queued for a standard rescan."""
+    r = audio_request.remove(exception_id)
+    if r is None:
+        raise HTTPException(404)
+    return r
 
 
 @app.get("/api/files", dependencies=[Depends(auth)])
@@ -343,6 +366,9 @@ def file_detail(file_id: int):
         raise HTTPException(404)
     f["episodes"] = db.unj(f["episodes"], [])
     f["item"] = db.q1("SELECT * FROM items WHERE id=?", (f["item_id"],))
+    f["item"].update(audio_request.describe(f["item"]))
+    f["audio_exceptions"] = [e for e in audio_request.list_for_item(f["item_id"])
+                             if e["season"] == audio_request.season_of(f)]
     last = db.q1("SELECT * FROM scans WHERE id=?", (f["last_scan_id"],)) if f["last_scan_id"] else None
     if last:
         last["result"] = db.unj(last["result"], {})
@@ -368,7 +394,7 @@ def file_detail(file_id: int):
     return f
 
 
-MCP_BRIDGE_VERSION = 6  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 7  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -814,6 +840,12 @@ def action_create(body: dict = Body(...)):
             raise HTTPException(404, "issue not found")
         file_id, codes = i["file_id"], [i["code"]]
         reason = f"Manual, for {i['code']}: {i['message'][:200]}"
+    if kind == "accept_season_audio":
+        try:
+            aid = audio_request.propose_for_file(file_id, body.get("allow"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"action_id": aid, "note": None if aid else "no open proposal could be made for this season"}
     if kind == "whisper_subtitle" and subgen.configured():
         return _whisper_via_subgen(file_id)
     if kind == "whisper_subtitle":

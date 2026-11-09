@@ -123,6 +123,7 @@ def _fake_sonarr(monkeypatch, files):
     monkeypatch.setattr(arr.Sonarr, "episodes", lambda self, i: [{"id": 10 + f["id"], "seasonNumber": 1, "episodeNumber": f["id"],
                                                                    "title": "t", "episodeFileId": f["id"]} for f in files])
     monkeypatch.setattr(arr.Sonarr, "episode_files", lambda self, i: files)
+    monkeypatch.setattr(arr.Sonarr, "quality_profiles", lambda self: {})
 
 
 def test_new_files_after_first_sync_are_queued(monkeypatch):

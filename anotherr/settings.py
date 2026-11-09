@@ -13,7 +13,7 @@ RESUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mism
 REDOWNLOAD_CODES = [
     "unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "decode_stopped_early",
     "duration_short", "wrong_content",
-    "original_audio_missing", "silent_audio", "visual_review_failed", "full_decode_errors",
+    "original_audio_missing", "english_audio_missing", "silent_audio", "visual_review_failed", "full_decode_errors",
 ]
 
 DEFAULTS: dict = {
@@ -27,6 +27,13 @@ DEFAULTS: dict = {
         "subtitle_language": "eng",            # your reading language
         "require_subs_for_native_audio": False,  # require subs even when audio is already in subtitle_language
         "min_full_sub_cues_per_min": 3.0,      # below this a track is treated as signs/songs only
+        # Quality profile names (Sonarr/Radarr, matched case-insensitively) that say which audio was requested.
+        # Any other profile means "either".
+        "request_profiles": {
+            "original": ["Default TV - Original Language", "Default Movie - Original Language",
+                         "Anime - Original Language Only"],
+            "english": ["Default TV - English Only", "Default Movie - English Only", "Default Anime - Dual Audio"],
+        },
     },
     "anime": {
         "prefer_dual_audio": True,

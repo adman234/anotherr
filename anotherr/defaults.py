@@ -50,11 +50,15 @@ def pick_full_sub(subs: list[dict], sub_lang: str) -> dict | None:
     return sorted(cands, key=lambda s: (not s.get("text"), bool(s.get("hearing_impaired")), s["s_index"]))[0] if cands else None
 
 
-def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, sub_lang: str) -> dict:
-    """What a file needs. Returns {"ops": [...], "audio": {...}|None, "sub": {...}|None, "notes": [...]}."""
+def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, sub_lang: str,
+              fallback: str = "") -> dict:
+    """What a file needs. Returns {"ops": [...], "audio": {...}|None, "sub": {...}|None, "notes": [...]}.
+    fallback: the language that should play when the file has no track in the preferred one (English)."""
     out = {"ops": [], "audio": None, "sub": None, "notes": []}
     cur = current_default_audio(tracks)
     final_lang = (cur or {}).get("effective")
+    if fallback and pref and not any(_same(t.get("effective"), pref) for t in tracks):
+        pref = fallback
     if "default_audio_not_preferred" in codes and pref and cur and not _same(cur.get("effective"), pref):
         tgt = pick_audio(tracks, pref)
         if tgt:
@@ -146,7 +150,7 @@ def refresh_item(item_id: int) -> dict:
         ev = retag._evidence(f) or {}
         if trackedit.held(holds, f["id"], ev.get("scan_started")):
             continue  # an edit already ran (or is running) since this evidence was gathered
-        plan = plan_file(ev.get("tracks") or [], ev.get("subs") or [], codes, pref, sub_lang)
+        plan = plan_file(ev.get("tracks") or [], ev.get("subs") or [], codes, pref, sub_lang, fallback="eng")
         if not plan["ops"]:
             continue
         kind = AUDIO if plan["audio"] else SUBS

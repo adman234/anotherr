@@ -387,6 +387,17 @@ def test_accept_is_never_automatic():
     assert not actions._eligible_auto(a, settings.get())
 
 
+def test_automation_never_redownloads_an_acceptable_language_gap():
+    settings.save({"automation": {"enabled": True, "auto_redownload": True}})
+    iid, files = _show("original")
+    _scan(files[(1, 1)], TRACKS["E"])  # English only, original requested: a warning
+    redl = {"kind": "redownload", "file_id": files[(1, 1)], "codes": db.j(["original_audio_missing"])}
+    assert not actions._eligible_auto(redl, settings.get())
+    _scan(files[(1, 2)], [("ger", True)])  # neither language: still an error, still automatic
+    redl = {"kind": "redownload", "file_id": files[(1, 2)], "codes": db.j(["original_audio_missing"])}
+    assert actions._eligible_auto(redl, settings.get())
+
+
 def test_manual_proposal_and_api_endpoints():
     iid, files = _show("english")
     _scan(files[(1, 1)], TRACKS["O"])

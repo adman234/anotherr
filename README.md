@@ -139,6 +139,37 @@ against the subarr-subgen patch stack, rev v4.38 or later.
 3. Anotherr renames each result to `<video>.en.srt`, so give it a read/write path for the media folders,
    the same as for retagging.
 
+**Path or upload mode** (`subgen.mode`):
+- `path` (default): Anotherr sends subgen the file's path with `POST /batch`. subgen reads the video from
+  your library and writes the `.srt` next to it, so subgen needs the media mounted (read/write) and
+  `path_map` must be right.
+- `upload`: subgen gets no path and needs no access to your media at all. Anotherr extracts the chosen
+  audio track itself with ffmpeg (16 kHz mono, only that one track), uploads just the audio to subgen's
+  `POST /asr` (multipart field `audio_file`, with the task and language), gets the SRT back in the
+  response, checks it and writes `<video>.en.srt` itself. Use this when subgen runs on another machine
+  that shouldn't mount your library. `path_map` is ignored.
+
+Upload mode settings:
+- `subgen.audio_format`: `flac` (default, lossless, roughly 35 to 60 MB for a 45 minute episode), `opus`
+  (about 10 MB, lossy, for a slow link) or `pcm` (raw 16 kHz audio, about 86 MB, sent with `encode=false`).
+- `subgen.temp_dir`: where the extracted audio sits while it uploads (empty = the system temp folder). It
+  is never written next to your media and is deleted after every attempt, whatever the outcome.
+
+How upload mode differs while running:
+- The request blocks until subgen has finished, so Anotherr waits on it (with a 15 s connect timeout and
+  the per-file time budget as the read timeout). The batch keeps its heartbeat and Cancel still works.
+- subgen can't stop a running job. On a timeout or a Cancel, Anotherr drops the request and records the
+  file as failed; subgen finishes the job on its own and the result is discarded.
+- A dropped connection or a 5xx answer is retried once. An empty or unreadable answer, a 4xx, or an
+  error reported by subgen fails the file without a retry. Failures count towards the "three in a row"
+  stop like in path mode.
+- The audio track is the one the plan names (track number, not tag), so the "subgen would pick that
+  audio track" rule below doesn't apply and mislabeled dual-audio files don't need a retag first.
+- The result goes through the same checks. A rejected result is not written to your library; it is kept
+  as `anotherr-subgen-<file id>.srt` in the temp folder so you can look at it. An existing `.en.srt` is
+  never replaced.
+- If Anotherr restarts mid-upload, that file starts over (the answer from the old request is lost).
+
 **Proposals:** one per series and season, always approved by hand. A file qualifies when all of these hold:
 - It has an open `subs_missing`, or `subs_signs_only`.
 - Its audio language was detected confidently, with every sampled window agreeing. The detected

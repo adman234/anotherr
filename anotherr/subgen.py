@@ -11,6 +11,13 @@ subgen keeps its queue in memory (lost on restart) and writes <video stem>[.subg
 <lang> follows its GLOBAL task setting - a per-request translate on a "transcribe" instance names the English
 result after the source language (e.g. .ko.srt). Anotherr checks the result and renames it to <stem>.en.srt.
 
+subgen.mode = "upload" skips /batch: Anotherr extracts the chosen audio track itself (16 kHz mono) and sends only
+that to
+  POST /asr?task=transcribe|translate&language=<iso1>&output=srt&encode=true|false   (multipart field audio_file)
+                                -> the SRT as text/plain once transcription finishes (the request blocks);
+                                   errors come back as HTTP 200 with {"status": "error"|"timeout", "message"}
+Anotherr then checks the text and writes <stem>.en.srt itself, so subgen needs no access to the media library.
+
 Proposal rule: open subs_missing (or subs_signs_only), the chosen audio track's language is confident with every
 window agreeing, not "almost no speech", no full English subtitle, subgen would pick that audio track, and either
 Bazarr's search already failed for the series (and the episode is over a week old) or a person asked for it.
@@ -22,12 +29,14 @@ import logging
 import os
 import re
 import statistics
+import subprocess
+import tempfile
 import threading
 import time
 
 import httpx
 
-from . import db, langs, settings
+from . import db, langs, media, settings
 
 log = logging.getLogger("anotherr.subgen")
 KIND = "subgen_transcribe"
@@ -43,6 +52,23 @@ class SubgenError(Exception):
     pass
 
 
+class AsrError(SubgenError):
+    """A failed /asr upload. retry=True for a dropped connection or a 5xx (worth the one retry)."""
+
+    def __init__(self, msg: str, retry: bool = False):
+        super().__init__(msg)
+        self.retry = retry
+
+
+# upload mode: ffmpeg output args, file extension, MIME type, and subgen's encode flag per audio_format
+AUDIO_FORMATS = {
+    "flac": (["-c:a", "flac", "-sample_fmt", "s16", "-f", "flac"], ".flac", "audio/flac", True),
+    "opus": (["-c:a", "libopus", "-b:a", "32k", "-f", "ogg"], ".ogg", "audio/ogg", True),
+    "pcm": (["-c:a", "pcm_s16le", "-f", "s16le"], ".raw", "application/octet-stream", False),
+}
+CONNECT_TIMEOUT_S = 15.0
+
+
 # ====================================================================== client
 
 def cfg() -> dict:
@@ -51,6 +77,15 @@ def cfg() -> dict:
 
 def configured() -> bool:
     return bool((cfg().get("url") or "").strip())
+
+
+def upload_mode() -> bool:
+    return (cfg().get("mode") or "path").strip().lower() == "upload"
+
+
+def audio_format() -> str:
+    f = (cfg().get("audio_format") or "flac").strip().lower()
+    return f if f in AUDIO_FORMATS else "flac"
 
 
 class Client:
@@ -81,6 +116,47 @@ class Client:
 
     def cancel(self, path: str) -> dict:
         return self._req("POST", "/queue/cancel", path=path)[1]
+
+    def asr(self, audio_path: str, language: str, task: str, fmt: str = "flac", timeout: float = 3600.0) -> str:
+        """Upload one audio file to /asr and return the SRT text. Blocks until subgen has transcribed it.
+
+        The file is streamed from disk (httpx reads the handle in chunks). `timeout` bounds each read, and subgen
+        sends nothing until it is done, so it is effectively the wait for the result."""
+        if not self.url:
+            raise SubgenError("subgen.url is not set")
+        _, ext, mime, encode = AUDIO_FORMATS[fmt]
+        params = {"task": task, "output": "srt", "encode": "true" if encode else "false"}
+        if language:
+            params["language"] = language
+        try:
+            with open(audio_path, "rb") as fh:
+                r = httpx.post(self.url + "/asr", params=params, files={"audio_file": ("audio" + ext, fh, mime)},
+                               timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT_S))
+        except httpx.ConnectTimeout as e:
+            raise AsrError(f"subgen unreachable: {e or 'connect timeout'}", retry=True) from e
+        except httpx.TimeoutException as e:
+            raise AsrError(f"subgen /asr gave no answer within {_fmt(timeout)} - gave up on the request "
+                           "(subgen can't stop a running job; it finishes on its own)") from e
+        except httpx.TransportError as e:
+            raise AsrError(f"subgen /asr connection dropped ({type(e).__name__}: {e})", retry=True) from e
+        except httpx.HTTPError as e:
+            raise AsrError(f"subgen /asr failed: {e}") from e
+        text = r.text or ""
+        if r.status_code != 200:
+            raise AsrError(f"subgen /asr -> {r.status_code}: {text[:200]}", retry=r.status_code >= 500)
+        body = text.strip()
+        if "json" in (r.headers.get("content-type") or "") or body.startswith("{"):
+            try:
+                j = r.json()
+            except ValueError:
+                j = {}
+            if isinstance(j, dict):
+                raise AsrError(f"subgen /asr {j.get('status') or 'error'}: {j.get('message') or body[:200]}")
+        if not body:
+            raise AsrError("subgen /asr returned an empty subtitle")
+        if "-->" not in body:
+            raise AsrError(f"subgen /asr returned something that isn't an SRT: {body[:120]!r}")
+        return text
 
 
 def _paths(q: dict, key: str) -> set[str]:
@@ -180,7 +256,8 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         task = "translate"
     else:
         return None, f"Whisper only translates into English, not {langs.name(sub)}"
-    pick = _subgen_track_pick(tracks, lang3)
+    upload = upload_mode()  # upload mode extracts exactly this track, so subgen's own track choice doesn't matter
+    pick = track if upload else _subgen_track_pick(tracks, lang3)
     if pick is not track:
         return None, (f"subgen would transcribe audio track {pick['a_index'] + 1} (tagged {pick.get('tag') or 'und'}), "
                       f"not the {langs.name(lang3)} track {track['a_index'] + 1} - fix its tag first")
@@ -190,7 +267,8 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         if _too_new(f):
             return None, "a new episode - Bazarr gets a week to find a subtitle first"
     model = ("Whisper " + ((settings.state_get("subgen_info") or {}).get("model") or "")).strip()
-    return {"file_id": f["id"], "label": f.get("label") or "", "season": _season(f), "path": subgen_path(f),
+    return {"file_id": f["id"], "label": f.get("label") or "", "season": _season(f),
+            "path": "" if upload else subgen_path(f), **({"upload": True} if upload else {}),
             "a_index": track["a_index"], "language": lang1, "lang3": lang3, "task": task, "tag": track.get("tag") or "",
             "overridden": langs.norm(track.get("tag")) != lang3,
             "backend": (f"Parakeet if enabled, else {model}" if task == "transcribe" and lang3 == "eng"
@@ -703,9 +781,14 @@ def process_file(action_id: int, p: dict, e: dict, item: dict):
     if not local:
         e.update(status="failed", outcome="file not found on disk")
         return
-    path = e.get("path") or subgen_path(f)
     stem = os.path.splitext(local)[0]
     lang1 = langs.ISO1.get(_sub_lang(), "en")
+    if upload_mode():  # nothing survives an Anotherr restart mid-upload, so an interrupted file starts over
+        if os.path.exists(f"{stem}.{lang1}.srt"):
+            e.update(status="done", outcome=f"an {langs.name(_sub_lang())} subtitle already exists ({os.path.basename(stem)}.{lang1}.srt)")
+            return
+        return _process_upload(action_id, p, e, item, client, f, local)
+    path = e.get("path") or subgen_path(f)
     if e.get("status") == "waiting" and os.path.exists(f"{stem}.{lang1}.srt"):
         e.update(status="done", outcome=f"an {langs.name(_sub_lang())} subtitle already exists ({os.path.basename(stem)}.{lang1}.srt)")
         return
@@ -807,6 +890,189 @@ def _read_back(f: dict, e: dict, local: str, out: str):
     except SubgenError as ex:
         e.update(status="failed", outcome=str(ex))
         return
+    _accepted(e, ev, final, dur)
+
+
+# ====================================================================== upload mode (/asr)
+
+def _temp_dir() -> str:
+    d = (cfg().get("temp_dir") or "").strip() or tempfile.gettempdir()
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _remove(path: str | None):
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def extract_audio_track(video: str, a_index: int, out: str, fmt: str = "flac", timeout: float = 1800) -> int:
+    """Write audio track a_index (0-based among audio streams) as 16 kHz mono to `out`. Returns its size.
+
+    aresample's first_pts=0 pads a late-starting audio stream with silence, so cue times line up with the video
+    (subgen's path mode corrects the same offset from the source file)."""
+    args, _, _, _ = AUDIO_FORMATS[fmt]
+    cmd = media.nice_prefix() + [media.FFMPEG, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", video,
+                                 "-map", f"0:a:{int(a_index)}", "-vn", "-sn", "-dn", "-map_metadata", "-1",
+                                 "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000", *args, out]
+    try:
+        r = media.run(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired as ex:
+        raise SubgenError(f"ffmpeg took over {_fmt(timeout)} to extract audio track {a_index + 1}") from ex
+    except OSError as ex:
+        raise SubgenError(f"couldn't run ffmpeg: {ex}") from ex
+    size = os.path.getsize(out) if os.path.exists(out) else 0
+    if r.returncode != 0 or size < 1024:
+        err = " ".join((r.stderr or "").strip().splitlines()[-3:])[:300]
+        raise SubgenError(f"ffmpeg couldn't extract audio track {a_index + 1} (exit {r.returncode}"
+                          f"{', empty output' if r.returncode == 0 else ''}){': ' + err if err else ''}")
+    return size
+
+
+def place_srt(f: dict, local: str, text: str) -> str:
+    """Write <stem>.<lang1>.srt next to the video without ever replacing an existing one (temp file, then link)."""
+    lang1 = langs.ISO1.get(_sub_lang(), "en")
+    name = os.path.splitext(os.path.basename(local))[0] + f".{lang1}.srt"
+    errors = []
+    for d in _rename_targets(f, local):
+        if not os.path.isdir(d):
+            continue
+        dst = os.path.join(d, name)
+        if os.path.exists(dst):
+            raise SubgenError(f"{name} already exists - left it alone")
+        tmp = os.path.join(d, f".{name}.anotherr-{os.getpid()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(tmp, dst)  # atomic and fails if dst appeared meanwhile
+            except FileExistsError:
+                raise SubgenError(f"{name} already exists - left it alone") from None
+            except OSError:  # no hardlinks on this filesystem
+                if os.path.exists(dst):
+                    raise SubgenError(f"{name} already exists - left it alone") from None
+                os.rename(tmp, dst)
+            return dst
+        except SubgenError:
+            raise
+        except OSError as ex:
+            errors.append(f"{d}: {ex.strerror or ex}")
+        finally:
+            _remove(tmp)
+    raise SubgenError(f"couldn't write {name} ({'; '.join(errors) or 'no media folder found'}) - Anotherr needs a "
+                      "read/write path for the media folder (same as retagging)")
+
+
+_asr_thread: threading.Thread | None = None  # an abandoned /asr request still waiting for its answer
+
+
+def _upload(action_id: int, p: dict, e: dict, client: Client, audio: str, fmt: str) -> str:
+    """Run the blocking /asr call in a helper thread so the batch keeps its heartbeat and sees Cancel."""
+    global _asr_thread
+    poll = max(float(cfg().get("poll_s", 15)), 0.01)
+    while _asr_thread is not None and _asr_thread.is_alive():  # never two requests in flight from Anotherr
+        if _reload(action_id).get("cancel"):
+            raise _Interrupted()
+        _heartbeat(action_id, "waiting for an abandoned subgen request to end")
+        _asr_thread.join(poll)
+    budget = _budget(e)
+    box: dict = {}
+
+    def work():
+        try:
+            box["text"] = client.asr(audio, e["language"], e["task"], fmt=fmt, timeout=budget)
+        except BaseException as ex:  # noqa: BLE001 - handed to the worker thread
+            box["error"] = ex
+        finally:
+            _remove(audio)  # also covers a request the worker abandoned
+
+    t = threading.Thread(target=work, name="anotherr-subgen-asr", daemon=True)
+    _asr_thread = t
+    start = time.time()
+    t.start()
+    while True:
+        t.join(poll)
+        if not t.is_alive():
+            break
+        worked = time.time() - start
+        e["worked_s"] = round(worked)
+        _heartbeat(action_id)
+        db.x("UPDATE actions SET result=? WHERE id=?", (_progress(p), action_id))
+        if _reload(action_id).get("cancel"):
+            e.update(status="failed", outcome="cancelled (subgen can't stop a running job; it finishes on its own "
+                                              "and the result is dropped)")
+            raise _Interrupted()
+        if worked > budget + 120:  # httpx's own read timeout should have fired by now
+            raise AsrError(f"timeout after {_fmt(worked)} (budget {_fmt(budget)}) - gave up on the request "
+                           "(subgen can't stop a running job; it finishes on its own)")
+    e["worked_s"] = round(time.time() - start)
+    if "error" in box:
+        ex = box["error"]
+        if isinstance(ex, SubgenError):
+            raise ex
+        raise AsrError(f"subgen /asr failed: {ex}")
+    return box["text"]
+
+
+def _process_upload(action_id: int, p: dict, e: dict, item: dict, client: Client, f: dict, local: str):
+    """Upload mode: extract the planned audio track, POST it to /asr, check the SRT, write <stem>.en.srt."""
+    fmt = audio_format()
+    while True:  # one retry for a dropped connection or a 5xx
+        _wait_turn(action_id, client, "")
+        STATUS["in_flight"] = True
+        audio = os.path.join(_temp_dir(), f"anotherr-subgen-{e['file_id']}-{os.getpid()}{AUDIO_FORMATS[fmt][1]}")
+        try:
+            now = time.time()
+            e.update(status="submitted", submitted_at=now, started_at=None, worked_s=0)
+            STATUS["state"] = "extracting audio"
+            dur = float(f.get("duration") or e.get("duration") or 0)
+            size = extract_audio_track(local, int(e.get("a_index") or 0), audio, fmt, timeout=max(600.0, dur))
+            e.update(status="running", started_at=time.time(), upload_mb=round(size / 1e6, 1))
+            _save(action_id, p, _progress(p))
+            STATUS["state"] = "waiting for subgen /asr"
+            db.log(f"subgen: uploaded {item['title'] if item else ''} {e['label']} ({e['task']} {e['language']}, "
+                   f"{e['upload_mb']} MB {fmt} audio)")
+            text = _upload(action_id, p, e, client, audio, fmt)
+        except AsrError as ex:
+            if ex.retry and not e.get("retried"):
+                e.update(retried=True, status="waiting", outcome=f"{ex} - retrying once", worked_s=0)
+                db.log(f"subgen: {e['label']}: {ex} - retrying once", "warning")
+                continue
+            e.update(status="failed", outcome=str(ex) + (" (already retried once)" if ex.retry else ""))
+            return
+        except SubgenError as ex:
+            e.update(status="failed", outcome=str(ex))
+            return
+        finally:
+            _remove(audio)
+        return _save_upload(f, e, local, text)
+
+
+def _save_upload(f: dict, e: dict, local: str, text: str):
+    dur = float(f.get("duration") or e.get("duration") or 0)
+    scratch = os.path.join(_temp_dir(), f"anotherr-subgen-{e['file_id']}.srt")
+    with open(scratch, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    ok, ev = check_output(scratch, dur, e["lang3"])
+    e["check"] = ev
+    if not ok:  # kept outside the library for a look; the next attempt for this file overwrites it
+        e.update(status="failed", outcome=f"result rejected: {ev['why']} (kept as {scratch})")
+        return
+    try:
+        final = place_srt(f, local, text)
+    except SubgenError as ex:
+        e.update(status="failed", outcome=str(ex))
+        return
+    _remove(scratch)
+    _accepted(e, ev, final, dur)
+
+
+def _accepted(e: dict, ev: dict, final: str, dur: float):
     took = (time.time() - (e.get("started_at") or e["submitted_at"]))
     if dur:
         r = (_ratios() + [round(took / dur, 2)])[-5:]

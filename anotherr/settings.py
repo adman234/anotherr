@@ -90,7 +90,11 @@ DEFAULTS: dict = {
     },
     "subgen": {
         "url": "",                   # e.g. http://192.168.1.10:9006 - empty = the subgen route is off
+        "mode": "path",              # path: POST /batch with the file's path (subgen reads the library, writes the .srt)
+                                     # upload: Anotherr extracts the audio track and POSTs it to /asr (no media access)
         "path_map": [],              # [{"from": "/mnt/user/data/media", "to": "/media"}]: library path -> subgen's view
+        "audio_format": "flac",      # upload mode: flac (lossless) | opus (smallest, lossy) | pcm (raw, largest)
+        "temp_dir": "",              # upload mode: scratch folder for the extracted audio (empty = the system temp dir)
         "timeout_factor": 4,         # per-file budget: running time x this (grows with subgen's measured pace)
         "timeout_min_s": 600,
         "poll_s": 15,

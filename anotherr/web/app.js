@@ -400,9 +400,9 @@ function subgenTable(a) {
   const fs = (a.payload && a.payload.files) || [];
   const st = (e) => e.status === "running" || e.status === "submitted" ? `<b>${e.status}</b>` : esc(e.status || "");
   return `<details style="margin-top:6px" ${a.status === "running" ? "open" : ""}><summary>${fs.length} file(s)</summary><table class="small" style="margin-top:4px">
-    <tr><th>File</th><th>Audio → task</th><th>Path subgen gets</th><th>Status</th><th>Took</th></tr>
+    <tr><th>File</th><th>Audio → task</th><th>Sent to subgen</th><th>Status</th><th>Took</th></tr>
     ${fs.map((e) => `<tr><td><a href="#/file/${e.file_id}">${esc(e.label)}</a></td><td>${esc(e.lang3)}${e.overridden ? ` <span class="pill" title="tagged ${esc(e.tag || "und")}, detected ${esc(e.lang3)}">detected</span>` : ""} → ${esc(e.task)} (${esc(e.language)})<div class="muted">${esc(e.backend || "")}</div></td>
-      <td><code style="word-break:break-all">${esc(e.path)}</code></td><td>${a.status === "proposed" ? "" : st(e)}${e.outcome ? `<div class="muted">${esc(e.outcome)}</div>` : ""}</td><td>${e.took_s ? fmtDur(e.took_s) : ""}</td></tr>`).join("")}</table></details>`;
+      <td>${e.upload || !e.path ? `audio track ${(e.a_index || 0) + 1} (uploaded)${e.upload_mb ? `, ${esc(e.upload_mb)} MB` : ""}` : `<code style="word-break:break-all">${esc(e.path)}</code>`}</td><td>${a.status === "proposed" ? "" : st(e)}${e.outcome ? `<div class="muted">${esc(e.outcome)}</div>` : ""}</td><td>${e.took_s ? fmtDur(e.took_s) : ""}</td></tr>`).join("")}</table></details>`;
 }
 function subgenButtons(a) {
   const p = a.payload || {}, fs = p.files || [];
@@ -480,8 +480,11 @@ const HELP = {
   "scan.hw_decode": "auto = decode video on the NVIDIA GPU (NVDEC), falling back to CPU. Needs NVIDIA_DRIVER_CAPABILITIES to include 'video'.",
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
-  "subgen.url": "Your subgen container, e.g. http://192.168.1.10:9006. Empty = off. Anotherr sends it one file at a time (POST /batch with the language and task) and never has more than one job in flight.",
-  "subgen.path_map": 'How subgen sees your library, e.g. [{"from": "/mnt/user/data/media", "to": "/media"}]. Paths outside subgen\'s SUBGEN_PATH_ALLOWLIST are refused (403).',
+  "subgen.url": "Your subgen container, e.g. http://192.168.1.10:9006. Empty = off. Anotherr sends it one file at a time and never has more than one job in flight.",
+  "subgen.mode": "path = send the file's path (POST /batch); subgen reads the video from your library and writes the .srt next to it, so it needs the media mounted. upload = Anotherr extracts the chosen audio track itself and uploads only that (POST /asr), then writes the .srt; subgen needs no access to your media.",
+  "subgen.audio_format": "Upload mode only. flac = lossless, about 40 MB per 45 minutes (default) · opus = about 11 MB, lossy (for slow links) · pcm = raw 16 kHz audio, about 86 MB.",
+  "subgen.temp_dir": "Upload mode only. Folder for the extracted audio while it uploads (empty = the system temp folder). Never next to your media; each file is deleted right after its upload.",
+  "subgen.path_map": 'Path mode only. How subgen sees your library, e.g. [{"from": "/mnt/user/data/media", "to": "/media"}]. Paths outside subgen\'s SUBGEN_PATH_ALLOWLIST are refused (403).',
   "subgen.timeout_factor": "Per-file budget = running time x this (at least the minimum). Grows automatically if subgen is measured slower. On timeout a queued job is cancelled; a running one can't be stopped, so the next file waits for it.",
   "subgen.timeout_min_s": "Minimum per-file budget in seconds.",
   "subgen.max_consecutive_failures": "Stop a batch after this many failed files in a row (Resume continues it).",
@@ -560,6 +563,8 @@ function render(path, val) {
     if (p === "review.title_cards") return field(p, pretty(k), `<select data-k="${p}">${["never", "multi_episode", "flagged", "always"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.profile" || p === "scan.default_profile" || p === "imports.profile") return field(p, pretty(k), `<select data-k="${p}">${["quick", "standard", "deep"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "scan.hw_decode") return field(p, pretty(k), `<select data-k="${p}">${["auto", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
+    if (p === "subgen.mode") return field(p, pretty(k), `<select data-k="${p}">${["path", "upload"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
+    if (p === "subgen.audio_format") return field(p, pretty(k), `<select data-k="${p}">${["flac", "opus", "pcm"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "whisper.device") return field(p, pretty(k), `<select data-k="${p}">${["auto", "cuda", "cpu"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.disks") return field(p, pretty(k), `<div data-list="${p}">${SET.disks.filter((d) => d).map((d) => `<label style="margin-right:10px"><input type="checkbox" value="${esc(d)}" ${v.includes(d) ? "checked" : ""}> ${esc(d)}</label>`).join("") || '<span class="muted">No disks detected yet (sync first)</span>'}</div>`);
     if (p === "automation.redownload_codes") return field(p, pretty(k), `<div data-list="${p}">${SET.redownload_codes.map((d) => `<label style="margin-right:10px;display:inline-block"><input type="checkbox" value="${d}" ${v.includes(d) ? "checked" : ""}> ${d}</label>`).join("")}</div>`);

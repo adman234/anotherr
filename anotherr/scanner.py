@@ -282,10 +282,75 @@ def check_streams(ctx: Ctx):
         ctx.issue("integrity", "unreadable", "critical", "Container reports no duration (file may be damaged).")
         return
     check_runtime(ctx, dur)
+    check_file_size(ctx, dur)
     v = info["video"][0] if info["video"] else None
     if v and v.get("duration") and abs(v["duration"] - dur) > max(30, 0.05 * dur):
         ctx.issue("integrity", "stream_duration_mismatch", "warning",
                   f"Video stream length ({v['duration'] / 60:.1f} min) differs from container ({dur / 60:.1f} min).")
+
+
+GB, MB = 1024 ** 3, 1024 ** 2
+
+
+def _res_tier(height) -> str:
+    """SD (< 700), HD (700-1199: 720p/1080p), UHD (>= 1200) from the main video stream's height."""
+    if not height:
+        return ""
+    return "sd" if height < 700 else "hd" if height < 1200 else "uhd"
+
+
+def _hm(seconds: float) -> str:
+    m = int(round(seconds / 60))
+    return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m"
+
+
+def check_file_size(ctx: Ctx, dur: float):
+    """Size per hour of real duration against the resolution tier, plus absolute floors/ceilings. Only clear outliers."""
+    cfg = (ctx.checks.get("file_size") if isinstance(ctx.checks.get("file_size"), dict) else None)         or settings.DEFAULTS["scan"]["checks"]["file_size"]
+    if cfg.get("enabled", True) is False or not dur or dur < 60:
+        return  # duration_short covers very short files
+    size = ctx.info.get("size") or 0
+    if not size and ctx.path:
+        try:
+            size = os.stat(ctx.path).st_size
+        except OSError:
+            size = 0
+    if not size:
+        return
+    dflt = settings.DEFAULTS["scan"]["checks"]["file_size"]
+    movie = ctx.item.get("kind") == "movie"
+    n_eps = 1 if movie else max(1, len(ctx.episodes))
+    v = ctx.info["video"][0] if ctx.info.get("video") else None
+    tier = _res_tier((v or {}).get("height"))
+    per_hour = size / GB / (dur / 3600)
+    kind = "movie" if movie else "episode"
+    height = (v or {}).get("height")
+    what = f"{height}p video" if height else "video"
+    head = f"{size / GB:.1f} GB for {_hm(dur)} of {what} ({per_hour:.1f} GB/hour"
+
+    def lim(key):
+        return float((cfg.get(key) or {}).get(tier, (dflt[key])[tier])) if tier else None
+
+    floor_mb = float(cfg.get(f"min_{kind}_mb", dflt[f"min_{kind}_mb"]))
+    ceil_gb = float(cfg.get(f"max_{kind}_gb", dflt[f"max_{kind}_gb"])) * n_eps  # a multi-episode file scales the ceiling
+    small, large = lim("too_small_gb_per_hour"), lim("too_large_gb_per_hour")
+    data = {"size_bytes": size, "duration_s": round(dur, 1), "gb_per_hour": round(per_hour, 2), "tier": tier or "unknown",
+            "height": height, "kind": kind, "episodes": n_eps}
+    if small is not None and per_hour < small:
+        ctx.issue("integrity", "size_too_small", "warning",
+                  head + f"; flagged below {small:g} GB/hour for {tier.upper()}).", threshold=f"{small:g} GB/hour",
+                  **data)
+    elif size < floor_mb * MB:
+        ctx.issue("integrity", "size_too_small", "warning",
+                  f"{size / MB:.0f} MB for {_hm(dur)} of {what} ({per_hour:.2f} GB/hour); a {kind} file under "
+                  f"{floor_mb:g} MB is almost always broken or a sample.", threshold=f"{floor_mb:g} MB", **data)
+    elif large is not None and per_hour > large:
+        ctx.issue("integrity", "size_too_large", "warning",
+                  head + f"; flagged above {large:g} GB/hour for {tier.upper()}).", threshold=f"{large:g} GB/hour",
+                  **data)
+    elif size > ceil_gb * GB:
+        ctx.issue("integrity", "size_too_large", "warning",
+                  head + f"); over the {ceil_gb:g} GB limit for a {kind} file.", threshold=f"{ceil_gb:g} GB", **data)
 
 
 # per-opinion thresholds: (error below, warning below, double-length band, "much longer" above)

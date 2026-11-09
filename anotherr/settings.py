@@ -45,6 +45,16 @@ DEFAULTS: dict = {
             "hardsubs": True,                # OCR frames for burned-in subtitles
             "subtitle_sync": True,           # compare subtitle timing with speech
             "subtitle_content": True,        # transcribe speech and compare it with the subtitle text
+            # flag files far too large or too small for their length and resolution (ffprobe data only, no extra cost)
+            "file_size": {
+                "enabled": True,
+                "too_small_gb_per_hour": {"sd": 0.15, "hd": 0.30, "uhd": 1.0},
+                "too_large_gb_per_hour": {"sd": 6, "hd": 20, "uhd": 45},
+                "min_episode_mb": 50,        # absolute floor, Sonarr files
+                "min_movie_mb": 500,         # absolute floor, Radarr files
+                "max_episode_gb": 20,        # absolute ceiling regardless of rate (scaled by episodes in a multi-episode file)
+                "max_movie_gb": 80,
+            },
         },
         "profiles": {
             "quick": {"segments": 3, "seconds": 30, "subtitles": False, "full_decode": False},

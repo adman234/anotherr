@@ -497,6 +497,7 @@ const HELP = {
   "scan.checks.extra_language_samples": "When no track seems to be in the expected language, analyse more audio windows before saying so. Prevents false 'wrong language' issues.",
   "scan.checks.hardsubs": "OCR a few frames for burned-in subtitles (English only).",
   "scan.checks.subtitle_sync": "Compare subtitle timing with detected speech (finds out-of-sync subtitles).",
+  "scan.checks.file_size.enabled": "Flag files far too large or too small for their length and resolution (size_too_large / size_too_small, warnings; no action is proposed). A 1080p Blu-ray remux runs about 15-20 GB/hour, so 20 GB/h only catches files bigger than a remux; UHD remuxes run 30-40 GB/h. 0.30 GB/h at HD is about 0.7 Mbps, below any watchable 720p encode, and a 22 minute episode under 50 MB is almost always broken or a sample. Tiers by video height: SD under 700, HD 700-1199, UHD 1200+.",
   "scan.checks.subtitle_content": "Transcribe some speech with Whisper and compare it with the subtitle text (finds wrong-episode / wrong-language subtitles and dubtitles). Usually the most expensive subtitle check.",
   "review.title_cards": "When to queue title-card checks: never | multi_episode | flagged | always.",
   "review.visual_quality_on_deep": "Deep scans queue a picture-quality check (hardcoded subs, watermarks, cam rips).",

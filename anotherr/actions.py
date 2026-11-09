@@ -203,9 +203,21 @@ def _eligible_auto(a: dict, cfg: dict) -> bool:
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (a["file_id"],))
         return bool(acfg["auto_resub"]) and not (item_id and resub_failed_before(item_id))
     if a["kind"] == "redownload":
-        codes = set(db.unj(a["codes"], []))
-        return bool(acfg["auto_redownload"]) and bool(codes & set(acfg["redownload_codes"]))
+        codes = set(db.unj(a["codes"], [])) & set(acfg["redownload_codes"])
+        return bool(acfg["auto_redownload"]) and bool(codes - _acceptable_language_gaps(a["file_id"], codes))
     return False
+
+
+def _acceptable_language_gaps(file_id: int, codes: set[str]) -> set[str]:
+    """Language codes that are only warnings for this file (the other language is there and a season exception
+    could accept it). A person decides those; automation only redownloads files with no usable audio at all."""
+    lang = codes & {"original_audio_missing", "english_audio_missing"}
+    if not lang:
+        return set()
+    errors = {r["code"] for r in db.q(
+        f"SELECT code FROM issues WHERE file_id=? AND status='open' AND severity IN ('error','critical') "
+        f"AND code IN ({','.join('?' * len(lang))})", [file_id, *lang])}
+    return lang - errors
 
 
 def automation_active(cfg: dict | None = None) -> bool:

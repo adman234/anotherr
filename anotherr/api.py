@@ -814,6 +814,8 @@ def action_create(body: dict = Body(...)):
             raise HTTPException(404, "issue not found")
         file_id, codes = i["file_id"], [i["code"]]
         reason = f"Manual, for {i['code']}: {i['message'][:200]}"
+    if kind == "whisper_subtitle" and subgen.configured():
+        return _whisper_via_subgen(file_id)
     if kind == "whisper_subtitle":
         why = actions.whisper_blocker(file_id)
         if why:
@@ -822,6 +824,17 @@ def action_create(body: dict = Body(...)):
             "Bazarr Whisper subtitle (translate) - manual"
     aid = actions.propose(file_id, kind, reason, codes)
     return {"action_id": aid, "note": None if aid else "an open proposal of this kind already exists"}
+
+
+def _whisper_via_subgen(file_id: int) -> dict:
+    """A Whisper request goes to the subgen worker (Bazarr's Whisper provider is unreliable)."""
+    r = subgen.request([file_id])
+    if file_id not in r["proposed"]:
+        raise HTTPException(400, r["not_possible"].get(file_id) or "not possible")
+    for a in db.q("SELECT id, payload FROM actions WHERE kind=? AND status='proposed' ORDER BY id DESC", (subgen.KIND,)):
+        if any(e.get("file_id") == file_id for e in (db.unj(a["payload"], {}) or {}).get("files", [])):
+            return {"action_id": a["id"], "note": "sent to the subgen worker"}
+    raise HTTPException(400, "subgen accepted the file but no proposal was made")
 
 
 # ====================================================================== subgen

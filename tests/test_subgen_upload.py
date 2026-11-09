@@ -344,3 +344,36 @@ def test_upload_mode_skips_before_extracting_when_the_en_srt_is_on_another_disk(
     local0 = db.scalar("SELECT local_path FROM files WHERE id=?", (fids[0],))
     assert all(cmd[cmd.index("-i") + 1] != local0 for cmd in asr.ffmpeg)
     assert not os.path.exists(_stem(fids[0]) + ".en.srt")  # nothing written next to the physical copy either
+
+
+# ---------------------------------------------------------------- replacing a signs-only .en.srt
+
+def test_upload_mode_replaces_the_signs_only_sidecar_atomically(lib, asr):  # noqa: F811
+    from test_subgen import SIGNS, signs_batch
+
+    aid, fid, srt = signs_batch(lib)
+    drain()
+    e = files_of(aid)[0]
+    assert e["status"] == "done" and e["outcome"].startswith("replaced signs-only "), e
+    assert _read(srt) == srt_text() and SIGNS not in _read(srt)
+    assert [n for n in os.listdir(os.path.dirname(srt)) if n.endswith(".tmp")] == []
+    assert len(asr.calls) == 1  # the existing-sub skip did not fire
+
+
+def test_upload_mode_failed_check_leaves_the_signs_only_sidecar(lib, asr):  # noqa: F811
+    from test_subgen import SIGNS, signs_batch
+
+    asr.replies.append(Resp(200, srt_text(["안녕하세요 여러분 반갑습니다"])))
+    aid, fid, srt = signs_batch(lib)
+    drain()
+    assert files_of(aid)[0]["status"] == "failed"
+    assert _read(srt) == SIGNS
+    assert [n for n in os.listdir(os.path.dirname(srt)) if n.endswith(".tmp")] == []
+
+
+def test_upload_mode_does_not_replace_a_full_sidecar(lib, asr):  # noqa: F811
+    from test_subgen import signs_episode
+
+    fid, srt = signs_episode(lib, show(), "S06E09", kind="full")
+    assert subgen.request([fid])["proposed"] == []
+    assert not asr.calls

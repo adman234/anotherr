@@ -71,10 +71,17 @@ WHISPER_CODES = ("subs_missing", "subs_signs_only")  # no usable full subtitle: 
 
 
 def _sub_fix(file_id: int, item_id: int | None, codes: list[str]) -> tuple[str, str]:
-    """Bazarr resub - or, once Bazarr's normal search came up empty for this series, a Whisper subtitle."""
+    """Bazarr resub - or, once Bazarr's normal search came up empty for this series, a Whisper subtitle.
+    With subgen set up the Whisper step is subgen's own proposal (subgen.refresh_item), never a Bazarr one."""
+    from . import subgen
+
     base = "Issues: " + ", ".join(codes)
     if not (item_id and resub_failed_before(item_id)):
         return "resub", base
+    if subgen.configured():
+        if not set(codes) & set(WHISPER_CODES):
+            return "resub", base + " - Bazarr found nothing useful for this series before"
+        return "skip", ""  # subgen's refresh proposes (or explains why not) for eligible files
     if not set(codes) & set(WHISPER_CODES):
         return "resub", base + " - Bazarr found nothing useful for this series before"
     if db.q1("SELECT id FROM actions WHERE file_id=? AND kind='whisper_subtitle' AND status IN ('done','failed')",

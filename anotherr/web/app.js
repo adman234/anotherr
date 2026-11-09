@@ -479,6 +479,7 @@ const HELP = {
   "anime.detect_dubtitles": "Flag subtitle tracks that just transcribe the English dub.",
   "scan.hw_decode": "auto = decode video on the NVIDIA GPU (NVDEC), falling back to CPU. Needs NVIDIA_DRIVER_CAPABILITIES to include 'video'.",
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
+  "scan.child_memory_limit_mb": "Kill an ffmpeg/ffprobe process that uses more than this much memory (MB, Linux only; 0 = no limit). The scan step is reported as an error instead of the container being OOM-killed.",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
   "subgen.url": "Your subgen container, e.g. http://192.168.1.10:9006. Empty = off. Anotherr sends it one file at a time and never has more than one job in flight.",
   "subgen.mode": "path = send the file's path (POST /batch); subgen reads the video from your library and writes the .srt next to it, so it needs the media mounted. upload = Anotherr extracts the chosen audio track itself and uploads only that (POST /asr), then writes the .srt; subgen needs no access to your media.",

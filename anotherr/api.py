@@ -408,7 +408,7 @@ def file_streams(file_id: int):
         scanner.handle_missing(f)
         raise HTTPException(404, "file not found on disk - resyncing it from Sonarr/Radarr")
     info = media.summarize(media.ffprobe(path))
-    info["subs"] += media.sidecar_subs(path)
+    info["subs"] += scanner.file_sidecars(f, path)
     return {"file_id": file_id, "path": path, **info}
 
 

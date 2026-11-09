@@ -440,6 +440,17 @@ def _rename_targets(f: dict, local_video: str) -> list[str]:
     return dirs
 
 
+def existing_sub(f: dict, local_video: str, lang1: str) -> str | None:
+    """<stem>.<lang1>.srt in any folder we'd write to: the physical dir and the user-share dir. Unraid can keep
+    the video on the cache and its old .en.srt on a disk; only the share dir shows both."""
+    name = os.path.splitext(os.path.basename(local_video))[0] + f".{lang1}.srt"
+    for d in _rename_targets(f, local_video):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def finalize(f: dict, local_video: str, out: str) -> str:
     """Rename subgen's file to <stem>.<lang1>.srt so Plex/Bazarr/Anotherr read it as an English subtitle."""
     lang1 = langs.ISO1.get(_sub_lang(), "en")
@@ -781,17 +792,15 @@ def process_file(action_id: int, p: dict, e: dict, item: dict):
     if not local:
         e.update(status="failed", outcome="file not found on disk")
         return
-    stem = os.path.splitext(local)[0]
     lang1 = langs.ISO1.get(_sub_lang(), "en")
-    if upload_mode():  # nothing survives an Anotherr restart mid-upload, so an interrupted file starts over
-        if os.path.exists(f"{stem}.{lang1}.srt"):
-            e.update(status="done", outcome=f"an {langs.name(_sub_lang())} subtitle already exists ({os.path.basename(stem)}.{lang1}.srt)")
-            return
+    # upload mode: nothing survives an Anotherr restart mid-upload, so an interrupted file starts over
+    have = existing_sub(f, local, lang1) if upload_mode() or e.get("status") == "waiting" else None
+    if have:
+        e.update(status="done", outcome=f"an {langs.name(_sub_lang())} subtitle already exists ({have})")
+        return
+    if upload_mode():
         return _process_upload(action_id, p, e, item, client, f, local)
     path = e.get("path") or subgen_path(f)
-    if e.get("status") == "waiting" and os.path.exists(f"{stem}.{lang1}.srt"):
-        e.update(status="done", outcome=f"an {langs.name(_sub_lang())} subtitle already exists ({os.path.basename(stem)}.{lang1}.srt)")
-        return
     poll = float(cfg().get("poll_s", 15))
     while True:  # one retry when subgen loses the job
         q = _wait_turn(action_id, client, path)

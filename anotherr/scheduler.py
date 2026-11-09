@@ -379,16 +379,17 @@ class Worker(threading.Thread):
 
 def recheck_subs(cfg: dict) -> int:
     """Rescan files whose 'subs missing/signs only' issue may be stale (Bazarr has since added a subtitle file)."""
-    from . import langs, media
+    from . import langs
+    from .scanner import file_sidecars
 
     sub_lang = langs.norm(cfg["languages"]["subtitle_language"]) or "eng"
-    rows = db.q("""SELECT DISTINCT f.id, f.local_path, MAX(x.created_at) AS since FROM issues x JOIN files f ON f.id = x.file_id
+    rows = db.q("""SELECT DISTINCT f.id, f.local_path, f.arr_path, MAX(x.created_at) AS since FROM issues x JOIN files f ON f.id = x.file_id
                    WHERE x.status='open' AND x.code IN ('subs_missing','subs_signs_only','subs_maybe_signs_only')
                    AND f.missing=0 AND f.id NOT IN (SELECT file_id FROM queue) GROUP BY f.id LIMIT 500""")
     ids = []
     for r in rows:
         try:
-            new = [sd for sd in media.sidecar_subs(r["local_path"] or "") if langs.same(sd["lang"], sub_lang)
+            new = [sd for sd in file_sidecars(r, r["local_path"] or "") if langs.same(sd["lang"], sub_lang)
                    and os.path.getmtime(sd["path"]) > (r["since"] or 0)]
         except OSError:
             continue

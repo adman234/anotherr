@@ -106,6 +106,14 @@ def resolve_path(f: dict) -> str:
     return ""
 
 
+def file_sidecars(f: dict, path: str) -> list[dict]:
+    """External subtitles for a file: next to the physical file we read AND in its user-share folder, where
+    Unraid shows a .srt that lives on another disk (e.g. a replaced video on the cache, its old .en.srt on disk3)."""
+    from .sync import map_path
+
+    return media.sidecar_subs_any([path, map_path(f["arr_path"]) if f.get("arr_path") else ""])
+
+
 def _release_cache(path: str):
     """Drop the scanned file from the page cache - unless Plex is playing it right now."""
     if not path:
@@ -230,7 +238,7 @@ def run_pipeline(ctx: Ctx):
         ctx.issue("integrity", "unreadable", "critical", f"ffprobe could not read the file: {e}")
         return
     ctx.info = media.summarize(probe)
-    ctx.info["subs"] += media.sidecar_subs(ctx.path)
+    ctx.info["subs"] += file_sidecars(ctx.file, ctx.path)
     ctx.result["streams"] = {k: ctx.info[k] for k in ("duration", "format", "bit_rate", "video", "audio", "subs",
                                                       "chapters")}
     check_streams(ctx)

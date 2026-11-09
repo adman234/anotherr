@@ -206,11 +206,8 @@ def list_audio_exceptions(item_id: int) -> str:
     head = (f"{it['title']}: requested audio = {it['audio_request_effective']} (from {it['audio_request_source']}; "
             f"profile '{it.get('quality_profile') or '?'}')")
     if not rows:
-        return head + "
-No exceptions."
-    return head + "
-" + "
-".join(
+        return head + "\nNo exceptions."
+    return head + "\n" + "\n".join(
         f"exception {r['id']}: {'season ' + str(r['season']) if r['season'] is not None else 'movie'} "
         f"allow={r['allow']} {r.get('note') or ''}".rstrip() for r in rows)
 

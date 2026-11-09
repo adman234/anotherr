@@ -390,3 +390,98 @@ def test_path_mode_skips_a_file_whose_en_srt_is_on_another_disk(lib, fake):
     assert paths == [db.scalar("SELECT local_path FROM files WHERE id=?", (fids[1],))]  # only the other file went
     with open(srt) as fh:
         assert fh.read() == MINE  # untouched
+
+
+# ---------------------------------------------------------------- replacing a signs-only .en.srt
+
+SIGNS = "1\n00:00:01,000 --> 00:00:02,000\nSIGN: Tokyo\n"
+
+
+def signs_episode(lib, iid, label, kind="signs", codes=("subs_signs_only",)):
+    """An episode whose only English subtitle is the external <stem>.en.srt the scan classified as `kind`."""
+    srt = str(lib / f"{iid}-{label}.en.srt")
+    open(srt, "w").write(SIGNS)
+    os.utime(srt, (time.time() - 3600, time.time() - 3600))
+    sub = {**S("eng", kind, external=True), "path": srt}
+    return episode(lib, iid, label, [T(0, "kor", default=True)], subs=[sub], codes=codes), srt
+
+
+def signs_batch(lib, fake=None, kind="signs"):
+    fid, srt = signs_episode(lib, show(), "S06E01", kind)
+    subgen.request([fid])
+    aid = db.scalar("SELECT id FROM actions WHERE kind='subgen_transcribe' AND status='proposed' ORDER BY id DESC")
+    if aid:
+        assert subgen.approve(aid)["ok"]
+    return aid, fid, srt
+
+
+def test_plan_replaces_a_signs_only_sidecar_but_never_a_full_one(lib):
+    fid, srt = signs_episode(lib, show(), "S06E01")
+    p, why = plan(fid)
+    assert p and p["replace"] == srt, why
+    full, _ = signs_episode(lib, show(), "S06E02", kind="full")
+    assert "full English subtitle" in plan(full)[1]
+    other, _ = signs_episode(lib, show(), "S06E03", codes=("subs_missing",))  # not flagged signs-only
+    assert "replace" not in plan(other)[0]
+
+
+def test_proposal_reason_mentions_the_replacement(lib):
+    iid = show()
+    fid, _ = signs_episode(lib, iid, "S06E01")
+    subgen.request([fid])
+    reason = db.scalar("SELECT reason FROM actions WHERE kind='subgen_transcribe' AND status='proposed'")
+    assert "replaces the signs-only .en.srt" in reason
+
+
+def test_path_mode_replaces_the_signs_only_sidecar(lib, fake):
+    aid, fid, srt = signs_batch(lib)
+    drain()
+    e = files_of(aid)[0]
+    assert e["status"] == "done" and e["outcome"].startswith("replaced signs-only "), e
+    assert open(srt).read() != SIGNS and "I think we should go there now" in open(srt).read()
+    assert not [n for n in os.listdir(lib) if "subgen.small" in n]
+    assert db.scalar("SELECT COUNT(*) FROM queue WHERE source='subgen'") == 1  # rescanned, so the issue can close
+
+
+def test_path_mode_failed_check_leaves_the_signs_only_sidecar(lib, fake):
+    fid, srt = signs_episode(lib, show(), "S06E01")
+    fake.mode[db.scalar("SELECT local_path FROM files WHERE id=?", (fid,))] = "korean"
+    subgen.request([fid])
+    aid = db.scalar("SELECT id FROM actions WHERE kind='subgen_transcribe' AND status='proposed'")
+    assert subgen.approve(aid)["ok"]
+    drain()
+    assert files_of(aid)[0]["status"] == "failed"
+    assert open(srt).read() == SIGNS
+
+
+# ---------------------------------------------------------------- Whisper requests go to subgen
+
+def test_sub_fix_never_returns_whisper_when_subgen_is_configured(lib):
+    iid = show()
+    fid = episode(lib, iid, "S07E01", [T(0, "kor", default=True)])
+    failed_before(iid, fid)
+    assert actions._sub_fix(fid, iid, ["subs_missing"])[0] == "skip"
+    assert actions._sub_fix(fid, iid, ["subs_out_of_sync"])[0] == "resub"
+    assert actions.upgrade_resubs_to_whisper() == 0
+
+
+def test_whisper_subtitle_request_becomes_a_subgen_action(lib, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from anotherr import api
+
+    iid = show()
+    fid = episode(lib, iid, "S07E02", [T(0, "kor", default=True)])
+    c = TestClient(api.app)
+    r = c.post("/api/actions", json={"kind": "whisper_subtitle", "file_id": fid})
+    assert r.status_code == 200 and r.json()["note"] == "sent to the subgen worker"
+    a = db.q1("SELECT * FROM actions WHERE id=?", (r.json()["action_id"],))
+    assert a["kind"] == "subgen_transcribe" and a["status"] == "proposed"
+    assert db.scalar("SELECT COUNT(*) FROM actions WHERE kind='whisper_subtitle'") == 0
+    nope = episode(lib, iid, "S07E03", [T(0, "kor", default=True, agree=False)])
+    r = c.post("/api/actions", json={"kind": "whisper_subtitle", "file_id": nope})
+    assert r.status_code == 400 and "confidently" in r.json()["detail"]
+    monkeypatch.setattr(subgen, "configured", lambda: False)  # no subgen: today's Bazarr behaviour
+    monkeypatch.setattr(actions, "whisper_blocker", lambda fid: None)
+    r = c.post("/api/actions", json={"kind": "whisper_subtitle", "file_id": fid})
+    assert db.scalar("SELECT kind FROM actions WHERE id=?", (r.json()["action_id"],)) == "whisper_subtitle"

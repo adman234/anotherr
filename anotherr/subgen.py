@@ -267,13 +267,33 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         if _too_new(f):
             return None, "a new episode - Bazarr gets a week to find a subtitle first"
     model = ("Whisper " + ((settings.state_get("subgen_info") or {}).get("model") or "")).strip()
+    old = _signs_sidecar(f, ev, codes, lang1_sub=langs.ISO1.get(sub, "en"))
     return {"file_id": f["id"], "label": f.get("label") or "", "season": _season(f),
             "path": "" if upload else subgen_path(f), **({"upload": True} if upload else {}),
+            **({"replace": old} if old else {}),
             "a_index": track["a_index"], "language": lang1, "lang3": lang3, "task": task, "tag": track.get("tag") or "",
             "overridden": langs.norm(track.get("tag")) != lang3,
             "backend": (f"Parakeet if enabled, else {model}" if task == "transcribe" and lang3 == "eng"
                         else f"{model} ({task})"),
             "duration": f.get("duration") or 0, "manual": manual, "status": "waiting"}, ""
+
+
+def _signs_sidecar(f: dict, ev: dict, codes: set[str], lang1_sub: str) -> str | None:
+    """The external <stem>.<lang1>.srt to replace: the file has subs_signs_only and the scan classified exactly
+    that sidecar as something other than a full subtitle. None when there is no such file."""
+    from .scanner import resolve_path
+
+    if "subs_signs_only" not in codes:
+        return None
+    local = resolve_path(f)
+    old = existing_sub(f, local, lang1_sub) if local else None
+    if not old:
+        return None
+    name = os.path.basename(old)
+    for s in ev.get("subs") or []:
+        if s.get("external") and os.path.basename(s.get("path") or "") == name:
+            return old if s.get("kind") != "full" else None
+    return None
 
 
 def explain(file_id: int, manual: bool = True) -> tuple[dict | None, str]:
@@ -320,8 +340,10 @@ def wanted(file_id: int) -> bool:
 def _reason(item: dict, season, files: list[dict]) -> str:
     tasks = sorted({f"{'translate' if e['task'] == 'translate' else 'transcribe'} {langs.name(e['lang3'])}" for e in files})
     where = item["title"] + (f" Season {season}" if season is not None else "")
+    swap = sum(bool(e.get("replace")) for e in files)
+    extra = f" For {swap} file(s) this replaces the signs-only .en.srt once the new one passes the checks." if swap else ""
     return (f"{where}: generate English subtitles with subgen for {len(files)} file(s) ({', '.join(tasks)}). "
-            f"Sent one at a time; each result is checked (language, cue density) and renamed to .en.srt.")
+            f"Sent one at a time; each result is checked (language, cue density) and renamed to .en.srt." + extra)
 
 
 def refresh_item(item_id: int) -> dict:
@@ -451,8 +473,9 @@ def existing_sub(f: dict, local_video: str, lang1: str) -> str | None:
     return None
 
 
-def finalize(f: dict, local_video: str, out: str) -> str:
-    """Rename subgen's file to <stem>.<lang1>.srt so Plex/Bazarr/Anotherr read it as an English subtitle."""
+def finalize(f: dict, local_video: str, out: str, replace: str | None = None) -> str:
+    """Rename subgen's file to <stem>.<lang1>.srt so Plex/Bazarr/Anotherr read it as an English subtitle.
+    `replace` names the one existing file (a signs-only sidecar) that may be swapped out, atomically."""
     lang1 = langs.ISO1.get(_sub_lang(), "en")
     name = os.path.splitext(os.path.basename(local_video))[0] + f".{lang1}.srt"
     if os.path.basename(out) == name:
@@ -462,10 +485,10 @@ def finalize(f: dict, local_video: str, out: str) -> str:
         src, dst = os.path.join(d, os.path.basename(out)), os.path.join(d, name)
         if not os.path.exists(src):
             continue
-        if os.path.exists(dst):
+        if os.path.exists(dst) and dst != replace:
             raise SubgenError(f"{name} already exists - left subgen's {os.path.basename(out)} alone")
         try:
-            os.rename(src, dst)
+            os.replace(src, dst) if dst == replace else os.rename(src, dst)
             return dst
         except OSError as e:
             errors.append(f"{d}: {e.strerror or e}")
@@ -795,7 +818,7 @@ def process_file(action_id: int, p: dict, e: dict, item: dict):
     lang1 = langs.ISO1.get(_sub_lang(), "en")
     # upload mode: nothing survives an Anotherr restart mid-upload, so an interrupted file starts over
     have = existing_sub(f, local, lang1) if upload_mode() or e.get("status") == "waiting" else None
-    if have:
+    if have and have != e.get("replace"):
         e.update(status="done", outcome=f"an {langs.name(_sub_lang())} subtitle already exists ({have})")
         return
     if upload_mode():
@@ -895,7 +918,7 @@ def _read_back(f: dict, e: dict, local: str, out: str):
         e.update(status="failed", outcome=f"result rejected: {ev['why']} (left as {os.path.basename(out)})")
         return
     try:
-        final = finalize(f, local, out)
+        final = finalize(f, local, out, e.get("replace"))
     except SubgenError as ex:
         e.update(status="failed", outcome=str(ex))
         return
@@ -941,8 +964,11 @@ def extract_audio_track(video: str, a_index: int, out: str, fmt: str = "flac", t
     return size
 
 
-def place_srt(f: dict, local: str, text: str) -> str:
-    """Write <stem>.<lang1>.srt next to the video without ever replacing an existing one (temp file, then link)."""
+def place_srt(f: dict, local: str, text: str, replace: str | None = None) -> str:
+    """Write <stem>.<lang1>.srt next to the video without ever replacing an existing one (temp file, then link).
+    The one exception is `replace`: that exact path (a signs-only sidecar) is swapped atomically."""
+    if replace:
+        return _replace_srt(replace, text)
     lang1 = langs.ISO1.get(_sub_lang(), "en")
     name = os.path.splitext(os.path.basename(local))[0] + f".{lang1}.srt"
     errors = []
@@ -975,6 +1001,22 @@ def place_srt(f: dict, local: str, text: str) -> str:
             _remove(tmp)
     raise SubgenError(f"couldn't write {name} ({'; '.join(errors) or 'no media folder found'}) - Anotherr needs a "
                       "read/write path for the media folder (same as retagging)")
+
+
+def _replace_srt(dst: str, text: str) -> str:
+    """Write the new text to a temp file beside `dst`, then os.replace it onto exactly `dst`."""
+    tmp = os.path.join(os.path.dirname(dst), f".{os.path.basename(dst)}.anotherr-{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, dst)
+    except OSError as ex:
+        raise SubgenError(f"couldn't replace {os.path.basename(dst)} ({ex.strerror or ex}) - left it alone") from None
+    finally:
+        _remove(tmp)
+    return dst
 
 
 _asr_thread: threading.Thread | None = None  # an abandoned /asr request still waiting for its answer
@@ -1073,7 +1115,7 @@ def _save_upload(f: dict, e: dict, local: str, text: str):
         e.update(status="failed", outcome=f"result rejected: {ev['why']} (kept as {scratch})")
         return
     try:
-        final = place_srt(f, local, text)
+        final = place_srt(f, local, text, e.get("replace"))
     except SubgenError as ex:
         e.update(status="failed", outcome=str(ex))
         return
@@ -1082,6 +1124,7 @@ def _save_upload(f: dict, e: dict, local: str, text: str):
 
 
 def _accepted(e: dict, ev: dict, final: str, dur: float):
+    swapped = bool(e.get("replace")) and final == e["replace"]
     took = (time.time() - (e.get("started_at") or e["submitted_at"]))
     if dur:
         r = (_ratios() + [round(took / dur, 2)])[-5:]
@@ -1089,4 +1132,4 @@ def _accepted(e: dict, ev: dict, final: str, dur: float):
     info = settings.state_get("subgen_info") or {}
     e.update(status="done", srt=os.path.basename(final), machine_generated=True,
              model=info.get("model"), backend=e.get("backend"),
-             outcome=f"{os.path.basename(final)}: {ev['cues']} cues, {ev['per_min']}/min, English score {ev['english_score']}")
+             outcome=("replaced signs-only " if swapped else "") + f"{os.path.basename(final)}: {ev['cues']} cues, {ev['per_min']}/min, English score {ev['english_score']}")

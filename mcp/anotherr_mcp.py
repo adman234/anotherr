@@ -383,7 +383,8 @@ def undo_retag(action_id: int) -> str:
 @mcp.tool()
 def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0) -> str:
     """Propose resub (Bazarr subtitle search), redownload (blocklist + search in Sonarr/Radarr) or whisper_subtitle
-    (Bazarr's Whisper provider transcribes + translates one episode; needs a known, non-subtitle-language audio tag).
+    (transcribes + translates one episode: goes to the subgen worker when subgen is set up, otherwise to Bazarr's
+    Whisper provider, which needs a known, non-subtitle-language audio tag).
     Pass issue_id to tie it to one issue (it's withdrawn when that issue closes). Nothing runs until approved."""
     body = {"file_id": file_id, "kind": kind, "reason": reason}
     if issue_id:

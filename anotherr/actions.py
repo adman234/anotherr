@@ -10,8 +10,8 @@ from .schedule_util import in_windows
 
 log = logging.getLogger("anotherr.actions")
 TRACK_KINDS = ("retag_audio", "set_default_audio", "set_default_subtitle")  # run by trackedit
-BATCH_KINDS = TRACK_KINDS + ("subgen_transcribe",)  # payload batches, rebuilt by their own refresh
-MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle")  # what a person can propose from a file/issue
+BATCH_KINDS = TRACK_KINDS + ("subgen_transcribe", "accept_season_audio")  # payload batches, rebuilt by their own refresh
+MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle", "accept_season_audio")  # what a person can propose from a file/issue
 REARM_AFTER = 7 * 86400
 
 
@@ -301,12 +301,20 @@ def execute(action_id: int, wait: bool = False) -> dict:
         from . import trackedit
 
         return trackedit.start(action_id)
+    if a["kind"] == "accept_season_audio":
+        from . import audio_request
+
+        return audio_request.accept(action_id)
     codes = db.unj(a["codes"], []) or []
     if codes and not _still_open(a["file_id"], codes):
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",
              ("Withdrawn: the issues behind it are no longer open", time.time(), action_id))
         return {"ok": False, "error": "withdrawn - the issues behind this action have since been resolved"}
     db.x("UPDATE actions SET status='running', updated_at=? WHERE id=?", (time.time(), action_id))
+    if a["kind"] == "redownload":
+        from . import audio_request
+
+        audio_request.on_redownload(a["file_id"], codes)
     f = db.q1("SELECT * FROM files WHERE id=?", (a["file_id"],))
     item = db.q1("SELECT * FROM items WHERE id=?", (f["item_id"],)) if f else None
     try:

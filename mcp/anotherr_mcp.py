@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 6  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 7  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -187,6 +187,39 @@ def set_language_override(item_id: int, language: str = "") -> str:
     """Override the preferred audio language for a series/movie (e.g. 'eng' to prefer a dub). Empty clears it."""
     it = _send("PATCH", f"/api/items/{item_id}", {"language_override": language})
     return f"{it['title']}: language_override={it['language_override'] or '(none - original language)'}"
+
+
+@mcp.tool()
+def set_audio_request(item_id: int, request: str = "") -> str:
+    """Set which audio a series/movie was requested as, overriding its Sonarr/Radarr quality profile: original,
+    english or either. Empty follows the profile again."""
+    it = _send("PATCH", f"/api/items/{item_id}", {"audio_request_override": request})
+    return (f"{it['title']}: requested audio = {it['audio_request_effective']} (from {it['audio_request_source']}; "
+            f"profile '{it.get('quality_profile') or '?'}')")
+
+
+@mcp.tool()
+def list_audio_exceptions(item_id: int) -> str:
+    """Seasons (or the movie) accepted as is without the requested audio language, and the requested language."""
+    it = _get(f"/api/items/{item_id}")
+    rows = _get(f"/api/items/{item_id}/audio_exceptions")
+    head = (f"{it['title']}: requested audio = {it['audio_request_effective']} (from {it['audio_request_source']}; "
+            f"profile '{it.get('quality_profile') or '?'}')")
+    if not rows:
+        return head + "
+No exceptions."
+    return head + "
+" + "
+".join(
+        f"exception {r['id']}: {'season ' + str(r['season']) if r['season'] is not None else 'movie'} "
+        f"allow={r['allow']} {r.get('note') or ''}".rstrip() for r in rows)
+
+
+@mcp.tool()
+def remove_audio_exception(exception_id: int) -> str:
+    """Remove an accept-as-is exception. That season's files are queued for a standard rescan, so the missing-audio
+    warning comes back if it is still true. Only when the user asks."""
+    return _j(_send("DELETE", f"/api/audio_exceptions/{exception_id}"))
 
 
 # ---------------------------------------------------------------- scanning
@@ -385,6 +418,9 @@ def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0)
     """Propose resub (Bazarr subtitle search), redownload (blocklist + search in Sonarr/Radarr) or whisper_subtitle
     (transcribes + translates one episode: goes to the subgen worker when subgen is set up, otherwise to Bazarr's
     Whisper provider, which needs a known, non-subtitle-language audio tag).
+    Also accept_season_audio: accept the file's whole season (or movie) as is when the requested audio language is
+    not available (a warning-level english_audio_missing / original_audio_missing); approving records an exception
+    that covers later imports too and resolves the season's warnings.
     Pass issue_id to tie it to one issue (it's withdrawn when that issue closes). Nothing runs until approved."""
     body = {"file_id": file_id, "kind": kind, "reason": reason}
     if issue_id:

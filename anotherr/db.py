@@ -115,6 +115,15 @@ CREATE TABLE IF NOT EXISTS queue (
     created_at REAL,
     UNIQUE(file_id)
 );
+CREATE TABLE IF NOT EXISTS audio_exceptions (
+    id INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    season INTEGER,                    -- NULL for movies
+    allow TEXT NOT NULL,               -- original_only (English missing is fine) | english_only (original missing is fine)
+    created_at REAL,
+    note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audio_exceptions_item ON audio_exceptions(item_id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY, ts REAL, level TEXT, message TEXT
@@ -139,6 +148,9 @@ def conn() -> sqlite3.Connection:
 _ADDED_COLUMNS = [
     ("files", "duration", "REAL"),  # seconds, from ffprobe; feeds the per-series runtime estimate
     ("files", "audio_evidence", "TEXT"),  # compact per-track language evidence from the last scan (retag)
+    ("items", "quality_profile", "TEXT DEFAULT ''"),  # Sonarr/Radarr quality profile name
+    ("items", "audio_request", "TEXT DEFAULT ''"),  # '' (either) | original | english, mapped from the profile name
+    ("items", "audio_request_override", "TEXT DEFAULT ''"),  # manual request; '' = follow the profile
     ("actions", "payload", "TEXT"),  # batch actions (retag_audio): files, tracks, preview, per-file results
 ]
 

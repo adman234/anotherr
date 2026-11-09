@@ -42,9 +42,16 @@ def test_run_bts_mislabel_kept():
     assert "audio_mislabeled" in codes and "original_audio_missing" not in codes
 
 
-def test_english_only_release_still_errors():
-    codes, _ = _ctx("jpn", [{"tag": "eng", "wins": [("eng", .98)] * 3, "default": True}])
+def test_neither_original_nor_english_still_errors():
+    codes, _ = _ctx("jpn", [{"tag": "ger", "wins": [("ger", .98)] * 3, "default": True}])
     assert codes["original_audio_missing"]["severity"] == "error"
+
+
+def test_english_only_release_is_fine_unless_original_was_requested():
+    tracks = [{"tag": "eng", "wins": [("eng", .98)] * 3, "default": True}]
+    assert _ctx("jpn", tracks)[0] == {}  # unmapped = either
+    codes, _ = _ctx("jpn", tracks)
+    assert "original_audio_missing" not in codes
 
 
 def test_sibling_mislabel_downgrades_tag_only_error():

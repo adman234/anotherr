@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from . import arr, db, langs, settings
+from . import arr, audio_request, db, langs, settings
 from .unraid import locate
 
 log = logging.getLogger("anotherr.sync")
@@ -35,6 +35,21 @@ def _quality(q) -> str:
         return q["quality"]["name"]
     except (TypeError, KeyError):
         return ""
+
+
+def _profile_names(client) -> dict[int, str]:
+    """Quality profile id -> name; empty when the app can't be asked (the stored values are then kept)."""
+    try:
+        return client.quality_profiles()
+    except (arr.ServiceError, AttributeError, TypeError, KeyError):
+        return {}
+
+
+def _store_profile(item_id: int, profile_id, names: dict[int, str]) -> None:
+    name = names.get(profile_id) if profile_id is not None else None
+    if name is None:
+        return  # unknown id or no profile list this time: keep what we have
+    db.x("UPDATE items SET quality_profile=?, audio_request=? WHERE id=?", (name, audio_request.map_profile(name), item_id))
 
 
 def _upsert_item(source, arr_id, title, year, kind, is_anime, olang, runtime, monitored, path, extra) -> int:
@@ -119,13 +134,14 @@ def _ep_label(eps: list[dict]) -> str:
     return lab
 
 
-def sync_series(s: arr.Sonarr, series: dict) -> int:
+def sync_series(s: arr.Sonarr, series: dict, profiles: dict[int, str] | None = None) -> int:
     item_id = _upsert_item(
         "sonarr", series["id"], series.get("title", "?"), series.get("year"), "series",
         series.get("seriesType") == "anime", series.get("originalLanguage"), series.get("runtime"),
         series.get("monitored", True), series.get("path", ""),
         {"tvdbId": series.get("tvdbId"), "imdbId": series.get("imdbId"), "network": series.get("network"),
          "genres": series.get("genres", [])})
+    _store_profile(item_id, series.get("qualityProfileId"), _profile_names(s) if profiles is None else profiles)
     if not (series.get("statistics") or {}).get("episodeFileCount", 1):
         _mark_missing(item_id, set())
         return 0
@@ -147,7 +163,7 @@ def sync_series(s: arr.Sonarr, series: dict) -> int:
     return len(files)
 
 
-def sync_movie(m: dict) -> int:
+def sync_movie(m: dict, profiles: dict[int, str] | None = None) -> int:
     genres = m.get("genres") or []
     olang = m.get("originalLanguage") or {}
     is_anime = "Animation" in genres and langs.norm(olang.get("name", "")) == "jpn"
@@ -155,6 +171,7 @@ def sync_movie(m: dict) -> int:
                            m.get("runtime"), m.get("monitored", True), m.get("path", ""),
                            {"tmdbId": m.get("tmdbId"), "imdbId": m.get("imdbId"), "genres": genres,
                             "originalTitle": m.get("originalTitle") or ""})
+    _store_profile(item_id, m.get("qualityProfileId"), _profile_names(arr.Radarr()) if profiles is None else profiles)
     mf = m.get("movieFile")
     if not mf:
         _mark_missing(item_id, set())
@@ -176,12 +193,13 @@ def full_sync() -> dict:
         if s.configured:
             try:
                 all_series = s.series() or []
+                profiles = _profile_names(s)  # fetched once per sync
                 live = set()
                 for i, ser in enumerate(all_series):
                     STATE["progress"] = f"Sonarr {i + 1}/{len(all_series)}: {ser.get('title')}"
                     live.add(ser["id"])
                     try:
-                        counts["episode_files"] += sync_series(s, ser)
+                        counts["episode_files"] += sync_series(s, ser, profiles)
                         counts["series"] += 1
                     except arr.ServiceError as e:
                         counts["errors"].append(str(e))
@@ -192,9 +210,10 @@ def full_sync() -> dict:
         if r.configured:
             try:
                 movies = r.movies() or []
+                profiles = _profile_names(r)
                 STATE["progress"] = f"Radarr: {len(movies)} movies"
                 for mv in movies:
-                    counts["movies"] += sync_movie(mv)
+                    counts["movies"] += sync_movie(mv, profiles)
                 _drop_items("radarr", {mv["id"] for mv in movies})
             except arr.ServiceError as e:
                 counts["errors"].append(str(e))

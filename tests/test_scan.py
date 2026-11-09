@@ -114,9 +114,18 @@ def test_override_and_missing_language(video, fake_whisper):
     fid = _add(video, original="kor", anime=0)
     res = scanner.scan_file(fid, "standard")
     codes = {i["code"] for i in res["issues"]}
+    assert "original_audio_missing" not in codes  # English + Japanese present, nothing requested: either
+    # original-language audio requested: the file only has Japanese + English, so Korean is missing (a warning)
+    db.x("UPDATE items SET audio_request_override='original'")
+    res = scanner.scan_file(fid, "standard")
+    codes = {i["code"] for i in res["issues"]}
     assert "original_audio_missing" in codes
-    acts = db.q("SELECT kind, status FROM actions WHERE file_id=?", (fid,))
-    assert acts == [{"kind": "redownload", "status": "proposed"}]  # automation is off by default
+    assert {i["severity"] for i in res["issues"] if i["code"] == "original_audio_missing"} == {"warning"}
+    acts = db.q("SELECT kind, status FROM actions WHERE file_id=? ORDER BY kind", (fid,))
+    # no Korean track, so English should be the default: the jpn track is the default here, hence a flag change too
+    assert acts == [{"kind": "accept_season_audio", "status": "proposed"},
+                    {"kind": "redownload", "status": "proposed"},
+                    {"kind": "set_default_audio", "status": "proposed"}]  # automation is off by default
     # override to English -> no language problem, subs no longer required
     db.x("UPDATE items SET language_override='eng'")
     res = scanner.scan_file(fid, "standard")

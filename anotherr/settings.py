@@ -37,6 +37,7 @@ DEFAULTS: dict = {
         "default_profile": "standard",
         "hw_decode": "auto",     # auto = NVIDIA GPU (NVDEC) when available, off = CPU only
         "ffmpeg_threads": 0,     # 0 = let ffmpeg decide
+        "child_memory_limit_mb": 3072,  # kill an ffmpeg/ffprobe that grows past this (0 = no limit)
         "max_audio_tracks": 4,
         # optional checks (see Dashboard -> Where scan time goes): turn off the ones that cost more than they find
         "checks": {

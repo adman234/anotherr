@@ -8,6 +8,8 @@ import random
 import re
 import subprocess
 import tempfile
+import threading
+import time
 
 import numpy as np
 
@@ -28,9 +30,90 @@ _BENIGN = re.compile(
     r"Last message repeated|Error parsing Opus packet header|Discarding ID3)", re.I)
 
 
-def run(cmd: list[str], timeout: float, binary: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, timeout=timeout, text=not binary,
-                          **({} if binary else {"errors": "replace"}))
+DEFAULT_CHILD_MEMORY_MB = 3072
+_RSS_POLL_S = 0.25
+
+
+def _mem_limit_mb() -> int:
+    """scan.child_memory_limit_mb (0 = no limit)."""
+    try:
+        from . import settings
+        return int(settings.get()["scan"].get("child_memory_limit_mb", DEFAULT_CHILD_MEMORY_MB))
+    except Exception:  # noqa: BLE001
+        return DEFAULT_CHILD_MEMORY_MB
+
+
+def _rss_mb(pid: int) -> float:
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
+def _child_label(cmd: list[str]) -> tuple[str, str]:
+    """(program name, file name) of an ffmpeg/ffprobe command line, for messages."""
+    prog = next((os.path.basename(c) for c in cmd if os.path.basename(c).lower().startswith(("ffmpeg", "ffprobe"))),
+                os.path.basename(cmd[0]) if cmd else "child")
+    prog = re.sub(r"\.exe$", "", prog, flags=re.I)
+    path = ""
+    for i, c in enumerate(cmd):
+        if c == "-i" and i + 1 < len(cmd):
+            path = cmd[i + 1]
+            break
+    return prog, os.path.basename(path or (cmd[-1] if cmd else ""))
+
+
+def _watch_memory(proc: subprocess.Popen, cmd: list[str], limit_mb: int, stop: threading.Event, hit: list):
+    """Kill the child once its resident memory passes limit_mb (ffmpeg can buffer without bound)."""
+    while not stop.wait(_RSS_POLL_S):
+        if proc.poll() is not None:
+            return
+        if _rss_mb(proc.pid) > limit_mb:
+            hit.append(limit_mb)
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            prog, name = _child_label(cmd)
+            try:
+                from . import db
+                db.log(f"{prog} killed: used more than {limit_mb} MB while processing {name}", "warning")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+
+def run(cmd: list[str], timeout: float, binary: bool = False, mem_limit_mb: int | None = None) -> subprocess.CompletedProcess:
+    """Run a child, capture its output, and kill it if its memory passes the limit (Linux only).
+
+    A killed child comes back as a normal result: `mem_killed` is set and stderr ends with a
+    "[error] ffmpeg killed: used more than N MB" line."""
+    limit = _mem_limit_mb() if mem_limit_mb is None else mem_limit_mb
+    kw = {} if binary else {"text": True, "errors": "replace"}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+    stop, hit = threading.Event(), []
+    if limit and limit > 0 and os.path.isdir("/proc"):
+        threading.Thread(target=_watch_memory, args=(proc, cmd, limit, stop, hit), daemon=True).start()
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        proc.kill()
+        proc.communicate()
+        raise
+    finally:
+        stop.set()
+    cp = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    cp.mem_killed = None
+    if hit:
+        prog, _ = _child_label(cmd)
+        cp.mem_killed = f"{prog} killed: used more than {hit[0]} MB"
+        line = f"{chr(10)}[error] {cp.mem_killed}{chr(10)}"
+        cp.stderr = (err or b"") + line.encode() if binary else (err or "") + line
+    return cp
 
 
 def nice_prefix() -> list[str]:
@@ -72,6 +155,21 @@ def _stream_duration(s: dict) -> float:
     return 0.0
 
 
+def _stream_end(s: dict, duration: float) -> float | None:
+    """Where the stream stops, in seconds (start_time + duration); None when its length is unknown."""
+    if not duration:
+        return None
+    return round(_f(s.get("start_time")) + duration, 3)
+
+
+def live_audio(info: dict, start: float, margin: float = 1.0) -> list[int]:
+    """Audio stream indexes (a_index) still playing at `start`; unknown end counts as playing.
+
+    ffmpeg 6 buffers every decoded video frame when an audio output never gets a frame, so a window past
+    an audio stream's end must not map it."""
+    return [a["a_index"] for a in info.get("audio", []) if a.get("end") is None or a["end"] > start + margin]
+
+
 def summarize(probe: dict) -> dict:
     fmt = probe.get("format") or {}
     video, audio, subs = [], [], []
@@ -88,6 +186,7 @@ def summarize(probe: dict) -> dict:
             "forced": bool(disp.get("forced")),
             "duration": _stream_duration(s),
         }
+        base["end"] = _stream_end(s, base["duration"])
         t = s.get("codec_type")
         if t == "video":
             if disp.get("attached_pic"):
@@ -218,8 +317,10 @@ def _note_hw(hw_lines: list[str], used: bool):
 
 
 def decode_segment(path: str, start: float, dur: float, threads: int = 2, has_video: bool = True,
-                   hw: str = "auto", _force_cpu: bool = False) -> dict:
-    """Decode a segment fully (GPU when possible) to find decoder errors and truncation."""
+                   hw: str = "auto", _force_cpu: bool = False, audio_maps: list[int] | None = None) -> dict:
+    """Decode a segment fully (GPU when possible) to find decoder errors and truncation.
+
+    audio_maps: audio stream indexes to decode (see live_audio); None = every audio stream."""
     use_hw = has_video and hw_wanted(hw) and not _force_cpu
     cmd = nice_prefix() + [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "level+error", "-threads", str(threads)]
     if use_hw:
@@ -227,7 +328,12 @@ def decode_segment(path: str, start: float, dur: float, threads: int = 2, has_vi
     cmd += ["-ss", f"{start:.3f}", "-i", path, "-t", f"{dur:.3f}"]
     if has_video:
         cmd += ["-map", "0:v:0"]
-    cmd += ["-map", "0:a?", "-sn", "-dn", "-f", "null", "-", "-progress", "pipe:1", "-nostats"]
+    if audio_maps is None:
+        cmd += ["-map", "0:a?"]
+    else:
+        for a in audio_maps:
+            cmd += ["-map", f"0:a:{a}"]
+    cmd += ["-sn", "-dn", "-f", "null", "-", "-progress", "pipe:1", "-nostats"]
     try:
         p = run(cmd, timeout=max(300, dur * 20))
     except subprocess.TimeoutExpired:
@@ -240,7 +346,7 @@ def decode_segment(path: str, start: float, dur: float, threads: int = 2, has_vi
     _note_hw(hw_lines, use_hw)
     if use_hw and hw_lines and decoded < dur * 0.9 - 2:
         # the GPU attempt itself failed - redo on CPU so we don't report a false truncation
-        return decode_segment(path, start, dur, threads, has_video, hw, _force_cpu=True)
+        return decode_segment(path, start, dur, threads, has_video, hw, _force_cpu=True, audio_maps=audio_maps)
     if p.returncode != 0 and not errors and not hw_lines:
         errors.append(f"ffmpeg exited with {p.returncode}")
     return {"start": start, "dur": dur, "decoded": decoded, "errors": errors[:50], "error_count": len(errors),
@@ -378,12 +484,17 @@ def full_decode(path: str, threads: int = 2, timeout: float = 4 * 3600, hw: str 
     return {"errors": errors[:100], "error_count": len(errors), "returncode": p.returncode}
 
 
-def boundary_scan(path: str, start: float, dur: float) -> dict:
-    """Low-res black + silence detection in a window (segment breaks in multi-episode files)."""
+def boundary_scan(path: str, start: float, dur: float, audio_end: float | None = None) -> dict:
+    """Low-res black + silence detection in a window (segment breaks in multi-episode files).
+
+    audio_end: where the first audio stream stops, if known; a window past it is scanned without audio."""
+    with_audio = audio_end is None or audio_end > start + 1.0
     cmd = nice_prefix() + [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "level+info",
                            "-ss", f"{start:.3f}", "-i", path, "-t", f"{dur:.3f}",
-                           "-map", "0:v:0", "-vf", "scale=320:-2,blackdetect=d=0.3:pix_th=0.12",
-                           "-map", "0:a:0?", "-af", "silencedetect=n=-45dB:d=0.3", "-f", "null", "-"]
+                           "-map", "0:v:0", "-vf", "scale=320:-2,blackdetect=d=0.3:pix_th=0.12"]
+    if with_audio:
+        cmd += ["-map", "0:a:0?", "-af", "silencedetect=n=-45dB:d=0.3"]
+    cmd += ["-f", "null", "-"]
     try:
         p = run(cmd, timeout=600)
     except subprocess.TimeoutExpired:

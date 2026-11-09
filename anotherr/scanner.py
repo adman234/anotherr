@@ -286,6 +286,12 @@ def check_streams(ctx: Ctx):
     if v and v.get("duration") and abs(v["duration"] - dur) > max(30, 0.05 * dur):
         ctx.issue("integrity", "stream_duration_mismatch", "warning",
                   f"Video stream length ({v['duration'] / 60:.1f} min) differs from container ({dur / 60:.1f} min).")
+    early = [a for a in info["audio"] if not a.get("commentary") and a.get("end") is not None
+             and dur - a["end"] > max(30, 0.05 * dur)]
+    if early:
+        names = ", ".join(f"#{a['a_index'] + 1} ({a['end'] / 60:.1f} min)" for a in early)
+        ctx.issue("integrity", "stream_duration_mismatch", "warning",
+                  f"Audio track {names} ends well before the file does ({dur / 60:.1f} min); the rest plays without that audio.")
 
 
 # per-opinion thresholds: (error below, warning below, double-length band, "much longer" above)
@@ -383,7 +389,8 @@ def check_decode(ctx: Ctx):
     results = []
     for i, (s, d) in enumerate(ctx.segments):
         ctx.step(f"decoding segment {i + 1}/{len(ctx.segments)}")
-        results.append(media.decode_segment(ctx.path, s, d, threads, has_video=has_video, hw=hw))
+        results.append(media.decode_segment(ctx.path, s, d, threads, has_video=has_video, hw=hw,
+                                            audio_maps=media.live_audio(ctx.info, s)))
     ctx.result["decode"] = results
     ctx.result["gpu_decode"] = any(r.get("gpu") for r in results)
     if has_video:
@@ -402,7 +409,8 @@ def check_decode(ctx: Ctx):
     for i, r in enumerate(results):
         if r.get("gpu") and not r.get("timeout") and r["decoded"] < r["dur"] * 0.9 - 2:
             ctx.step("re-checking a segment in software")
-            again = media.decode_segment(ctx.path, r["start"], r["dur"], threads, has_video=has_video, hw="off")
+            again = media.decode_segment(ctx.path, r["start"], r["dur"], threads, has_video=has_video, hw="off",
+                                         audio_maps=media.live_audio(ctx.info, r["start"]))
             again["retried_from_gpu"] = {"decoded": r["decoded"], "errors": r["errors"][:5]}
             again["black"], again["freeze_candidates"] = r.get("black", []), r.get("freeze_candidates", [])
             results[i] = again
@@ -468,7 +476,8 @@ def confirm_truncation(ctx: Ctx, threads: int, has_video: bool) -> dict:
     v = (ctx.info.get("video") or [{}])[0]
     end = min(dur, v.get("duration") or dur)
     start = max(0.0, end - 35)
-    r = media.decode_segment(ctx.path, start, 30, threads, has_video=has_video, hw="off")
+    r = media.decode_segment(ctx.path, start, 30, threads, has_video=has_video, hw="off",
+                             audio_maps=media.live_audio(ctx.info, start))
     ok = r["decoded"] >= 20
     return {"truncated": not ok, "start": round(start, 1), "decoded": round(r["decoded"], 1),
             "container_s": round(dur, 1), "video_stream_s": round(v.get("duration") or 0, 1),
@@ -1013,7 +1022,8 @@ def check_multi_episode(ctx: Ctx):
             target = dur * (k + 1) / mapped
             ch = [c["start"] for c in ctx.info["chapters"] if abs(c["start"] - target) < 120 and c["start"] > 30]
             ctx.step(f"finding segment break {k + 1}")
-            scan = media.boundary_scan(ctx.path, max(0.0, target - 150), 300)
+            a0 = (ctx.info["audio"] or [{}])[0]
+            scan = media.boundary_scan(ctx.path, max(0.0, target - 150), 300, audio_end=a0.get("end"))
             br = analysis.nearest_break(target, scan["black"], scan["silence"])
             if br is None and ch:
                 br = min(ch, key=lambda c: abs(c - target))

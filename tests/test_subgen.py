@@ -360,3 +360,33 @@ def test_cancel_a_queued_batch(lib, fake):
     assert a["status"] == "failed" and all(e["status"] == "not attempted" for e in files_of(aid))
     drain()
     assert fake.submits == []
+
+
+# ---------------------------------------------------------------- a sidecar on another Unraid disk
+
+MINE = "1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+
+
+def split_across_disks(lib, fid):
+    """The video's physical copy (local_path, e.g. on the cache) is in one folder; its user-share path (arr_path)
+    shows another folder that also holds the old .en.srt (e.g. from disk3)."""
+    local = db.scalar("SELECT local_path FROM files WHERE id=?", (fid,))
+    share_dir = lib / "user-share" / str(fid)
+    share_dir.mkdir(parents=True)
+    share = share_dir / os.path.basename(local)
+    stem = os.path.splitext(os.path.basename(local))[0]
+    (share_dir / f"{stem}.en.srt").write_text(MINE)
+    db.x("UPDATE files SET arr_path=? WHERE id=?", (str(share), fid))
+    return str(share_dir / f"{stem}.en.srt")
+
+
+def test_path_mode_skips_a_file_whose_en_srt_is_on_another_disk(lib, fake):
+    aid, fids = _approved(lib, 2, fake=fake)
+    srt = split_across_disks(lib, fids[0])
+    drain()
+    fs = files_of(aid)
+    assert fs[0]["status"] == "done" and "already exists" in fs[0]["outcome"] and srt in fs[0]["outcome"]
+    paths = [p for p, _, _ in fake.submits]
+    assert paths == [db.scalar("SELECT local_path FROM files WHERE id=?", (fids[1],))]  # only the other file went
+    with open(srt) as fh:
+        assert fh.read() == MINE  # untouched

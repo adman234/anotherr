@@ -330,3 +330,17 @@ def test_extract_audio_track_with_real_ffmpeg(tmp_path):
             assert st[0]["sample_rate"] == "16000"
     with pytest.raises(subgen.SubgenError, match="couldn't extract audio track 3"):
         subgen.extract_audio_track(str(src), 2, str(tmp_path / "none.flac"))
+
+
+def test_upload_mode_skips_before_extracting_when_the_en_srt_is_on_another_disk(lib, asr):  # noqa: F811
+    from test_subgen import split_across_disks
+
+    aid, fids = _upload_batch(lib, 2)
+    srt = split_across_disks(lib, fids[0])
+    drain()
+    fs = files_of(aid)
+    assert fs[0]["status"] == "done" and "already exists" in fs[0]["outcome"] and srt in fs[0]["outcome"]
+    assert fs[1]["status"] == "done" and len(asr.ffmpeg) == 1 and len(asr.calls) == 1  # no audio extracted for #1
+    local0 = db.scalar("SELECT local_path FROM files WHERE id=?", (fids[0],))
+    assert all(cmd[cmd.index("-i") + 1] != local0 for cmd in asr.ffmpeg)
+    assert not os.path.exists(_stem(fids[0]) + ".en.srt")  # nothing written next to the physical copy either

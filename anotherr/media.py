@@ -140,6 +140,20 @@ def sidecar_subs(video_path: str) -> list[dict]:
     return out
 
 
+def sidecar_subs_any(video_paths: list[str]) -> list[dict]:
+    """sidecar_subs next to any of these views of one video (e.g. its physical disk path and its /mnt/user path),
+    each subtitle file name once, first view first. Unraid can keep a folder's files on different disks or the
+    cache; only the user share shows them all."""
+    seen, out = set(), []
+    for vp in dict.fromkeys(p for p in video_paths if p):
+        for sd in sidecar_subs(vp):
+            name = os.path.basename(sd["path"])
+            if name not in seen:
+                seen.add(name)
+                out.append(sd)
+    return out
+
+
 # ---------------------------------------------------------------- sampling
 
 def pick_segments(duration: float, n: int, seconds: float, rng: random.Random) -> list[tuple[float, float]]:

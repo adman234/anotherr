@@ -297,6 +297,7 @@ def item(item_id: int):
         f["episodes"] = db.unj(f["episodes"], [])
     it.update(audio_request.describe(it))
     it["audio_exceptions"] = audio_request.list_for_item(item_id)
+    it["open_audio_gaps"] = audio_request.open_gaps(item_id)
     return it
 
 
@@ -326,6 +327,25 @@ def item_audio_exceptions(item_id: int):
     if not db.q1("SELECT id FROM items WHERE id=?", (item_id,)):
         raise HTTPException(404)
     return audio_request.list_for_item(item_id)
+
+
+@app.get("/api/audio_exceptions", dependencies=[Depends(auth)])
+def audio_exceptions_all():
+    """Every accept-as-is exception with its show, scope and how many files it covers (`files`) and how many of
+    those the last scan found with both original-language and English audio (`fixed`)."""
+    return audio_request.list_all()
+
+
+@app.post("/api/items/{item_id}/accept_show_audio", dependencies=[Depends(auth)])
+def item_accept_show_audio(item_id: int, body: dict = Body(default={})):
+    """Accept every season of a series as is (optional {"allow": "original_only" | "english_only"}; default is what
+    its open warnings call for). Series only."""
+    try:
+        return audio_request.accept_show(item_id, body.get("allow") or None)
+    except LookupError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/audio_exceptions/{exception_id}", dependencies=[Depends(auth)])
@@ -394,7 +414,7 @@ def file_detail(file_id: int):
     return f
 
 
-MCP_BRIDGE_VERSION = 8  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 9  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 

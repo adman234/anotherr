@@ -51,7 +51,7 @@ async function refreshStatus() {
 setInterval(refreshStatus, 5000);
 
 // ------------------------------------------------------------------ router
-const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, reviews, actions: actionsPage, queue, settings: settingsPage };
+const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, reviews, actions: actionsPage, queue, settings: settingsPage, exceptions: exceptionsPage };
 async function route() {
   // stop images still loading on the page we're leaving, so they don't hold up the next page
   document.querySelectorAll("#app img").forEach((i) => { i.removeAttribute("src"); });
@@ -199,7 +199,7 @@ async function itemPage(id) {
       <div>Original language</div><div>${esc(it.original_language_name || "?")} (${esc(it.original_language || "?")})</div>
       <div>Requested audio</div><div><b>${esc(it.audio_request_effective)}</b> <span class="small muted">(${it.audio_request_source === "override" ? "set here" : it.audio_request_source === "profile" ? `from quality profile "${esc(it.quality_profile)}"` : `no mapped profile${it.quality_profile ? ` ("${esc(it.quality_profile)}")` : ""}`})</span>
         <select id="areq" onchange="saveItem(${it.id})" style="margin-left:8px">${[["", "follow profile"], ["original", "original"], ["english", "english"], ["either", "either"]].map(([v, l]) => `<option value="${v}" ${v === (it.audio_request_override || "") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-      <div>Accepted as is</div><div>${it.audio_exceptions.length ? it.audio_exceptions.map((e) => `<div>${e.season != null ? "Season " + e.season : "Movie"}: ${e.allow === "original_only" ? "no English audio" : "no original-language audio"} <span class="small muted">${esc(e.note || "")}</span> <button class="sm" onclick="if(confirm('Remove this exception? The season is rescanned and the warning comes back if it is still true.')) act(()=>api('/api/audio_exceptions/${e.id}',{method:'DELETE'}),r=>'Removed; queued '+r.queued+' file(s) for a rescan')">Remove</button></div>`).join("") : '<span class="muted">none</span>'}</div>
+      <div>Accepted as is</div><div>${it.audio_exceptions.length ? it.audio_exceptions.map((e) => `<div>${scopeText(e)}: ${e.allow === "original_only" ? "no English audio" : "no original-language audio"} <span class="small muted">${esc(e.note || "")}</span> <button class="sm" onclick="if(confirm('Remove this exception? The season is rescanned and the warning comes back if it is still true.')) act(()=>api('/api/audio_exceptions/${e.id}',{method:'DELETE'}),r=>'Removed; queued '+r.queued+' file(s) for a rescan')">Remove</button></div>`).join("") : '<span class="muted">none</span>'}${it.kind === "series" ? (it.open_audio_gaps || []).map((al) => `<div><button class="sm" title="Stop flagging this missing audio for every season, now and later" onclick="acceptShowAudio(${it.id}, ${esc(JSON.stringify(it.title))}, '${al}')">Accept entire show as is</button> <span class="small muted">(no ${MISSING_LANG[al]} audio)</span></div>`).join("") : ""}</div>
       <div>Preferred audio override</div><div><input id="ovr" placeholder="e.g. eng (blank = original)" value="${esc(it.language_override)}" style="width:220px"> <button class="sm" onclick="saveItem(${it.id})">Save</button>
         <span class="small muted">Original language is always preferred unless you set this.</span></div>
       <div>Anime rules</div><div><input type="checkbox" id="anime" ${it.is_anime ? "checked" : ""} onchange="saveItem(${it.id})"></div>
@@ -409,21 +409,48 @@ function choiceRow(c) {
     <td>${esc(c.title)}${where}<div class="small">${sorted.map(([id, l]) => `<a href="#/file/${id}">${esc(l)}</a>`).join(", ")}</div></td>
     <td class="small">${issue}</td><td></td>
     <td>${accept.length ? `<button class="sm primary" onclick="choosePick('${c.key}', 'accept_season_audio')">${c.season == null ? "Accept as is" : `Accept Season ${c.season} as is`}</button>` : ""}
+      ${accept.length && c.season != null ? `<button class="sm" title="Stop flagging this missing audio for every season of the show, now and later" onclick="choosePick('${c.key}', 'accept_show_audio', 0, ${esc(JSON.stringify(c.title))}, '${esc(pl.allow || "")}')">Accept entire show as is</button>` : ""}
       ${redl.length ? `<button class="sm" onclick="choosePick('${c.key}', 'redownload', ${redl.length})">Redownload ${redl.length}</button>` : ""}
       <button class="sm" onclick="act(()=>api('/api/actions/bulk',{method:'POST',body:{op:'reject',ids:[${ids}]}}),r=>'Dismissed '+r.rejected)">Dismiss</button>
       <div class="small muted">Pick one; the other is withdrawn.</div></td></tr>`;
 }
-async function choosePick(key, pick, n) {
+const MISSING_LANG = { original_only: "English", english_only: "original-language" };
+const acceptShowText = (title, allow) => `Accept ${title} as is for every season, now and later? It stops flagging missing ${MISSING_LANG[allow] || "requested"} audio for this show.`;
+async function acceptShowAudio(itemId, title, allow) {
+  if (!confirm(acceptShowText(title, allow))) return;
+  await act(() => api(`/api/items/${itemId}/accept_show_audio`, { method: "POST", body: { allow } }), (r) => r.result);
+}
+async function choosePick(key, pick, n, title, allow) {
+  if (pick === "accept_show_audio" && !confirm(acceptShowText(title, allow))) return;
   if (pick === "redownload" && !confirm(`Blocklist and redownload these ${n} files?`)) return;
   if (pick === "accept_season_audio" && !confirm("Accept this whole season (or movie) as it is? The missing-audio warnings are resolved and later imports into the season are not flagged. You can remove the exception on the show page.")) return;
   await act(() => api("/api/actions/choose", { method: "POST", body: { choice_key: key, pick } }),
-    (r) => (pick === "redownload" ? `Queued ${r.queued} redownload(s)` : "Accepted as is"));
+    (r) => (pick === "redownload" ? `Queued ${r.queued} redownload(s)` : pick === "accept_show_audio" ? "Accepted the entire show as is" : "Accepted as is"));
 }
 async function approveGroup(ids, kind) {
   if (kind === "redownload" && !confirm(`Blocklist and redownload these ${ids.length} files?`)) return;
   if (kind === "whisper_subtitle" && !confirm(`Ask Bazarr's Whisper provider (subgen) to transcribe these ${ids.length} episodes? They run one at a time on the GPU - roughly a few minutes each.`)) return;
   await act(() => api("/api/actions/bulk", { method: "POST", body: { op: "approve", ids } }),
     (r) => (r.ok ? `Queued ${r.queued} - they run one after another` : "Nothing to run (already handled?)"));
+}
+// ------------------------------------------------------------------ accepted audio
+const scopeText = (e) => (e.scope === "show" ? "Whole show" : e.season != null ? "Season " + e.season : "Movie");
+const ACCEPTED_TEXT = { original_only: "No English audio accepted", english_only: "No original-language audio accepted" };
+async function exceptionsPage() {
+  const rows = await api("/api/audio_exceptions");
+  $("#app").innerHTML = `<h2>Accepted audio</h2>
+    <div class="card small muted" style="margin-bottom:12px">Shows and seasons accepted without the requested audio language. Remove an entry to start flagging it again, e.g. after a dual-audio release appears.</div>
+    <table><tr><th>Show</th><th>Scope</th><th>Accepted</th><th>Profile</th><th>Date</th><th>Files</th><th></th></tr>${rows.map((e) => `<tr>
+      <td><a href="#/item/${e.item_id}">${esc(e.title)}</a>${e.note ? `<div class="small muted">${esc(e.note)}</div>` : ""}</td>
+      <td>${scopeText(e)}</td><td>${ACCEPTED_TEXT[e.allow] || esc(e.allow)}</td>
+      <td class="small">${esc(e.quality_profile || "-")} <span class="muted">(${esc(e.audio_request_effective)})</span></td>
+      <td class="small">${esc(new Date((e.created_at || 0) * 1000).toLocaleDateString())}</td>
+      <td>${e.files}${e.fixed ? ` <span class="pill" title="Files whose last scan found both original-language and English audio">${e.fixed} now have both</span>` : ""}</td>
+      <td><button class="sm" onclick="removeException(${e.id}, ${esc(JSON.stringify(e.title))}, '${esc(scopeText(e))}')">Remove</button></td></tr>`).join("") || '<tr><td colspan=7 class="muted">Nothing accepted as is.</td></tr>'}</table>`;
+}
+async function removeException(id, title, scope) {
+  if (!confirm(`Remove "${scope}" of ${title}? ${scope === "Whole show" ? "The whole show" : "It"} is rescanned and flagged again where the audio is still missing.`)) return;
+  await act(() => api("/api/audio_exceptions/" + id, { method: "DELETE" }), (r) => `Removed; queued ${r.queued} file(s) for a rescan`);
 }
 // ------------------------------------------------------------------ subgen
 function subgenCard(sg) {

@@ -328,6 +328,8 @@ def choose(rows: list[dict], key: str, pick: str) -> dict | None:
     group = [r for r in rows if r.get("choice_key") == key]
     if not group:
         return None
+    if pick == SHOW_PICK:
+        return _accept_show(group)
     if pick not in {r["kind"] for r in group}:
         raise ValueError("pick must be one of: " + ", ".join(sorted({r["kind"] for r in group})))
     label = CHOICE_LABELS.get(pick, pick)
@@ -346,6 +348,26 @@ def choose(rows: list[dict], key: str, pick: str) -> dict | None:
         res = {"ok": True, "results": {i: execute(i) for i in ids}}
         approved = [i for i in ids if res["results"][i].get("ok")]
     return {**res, "pick": pick, "approved": approved, "rejected": rejected}
+
+
+SHOW_PICK = "accept_show_audio"  # extra pick on a language choice: accept every season of the series as is
+
+
+def _accept_show(group: list[dict]) -> dict:
+    from . import audio_request
+
+    accept = [r for r in group if r["kind"] == audio_request.KIND]
+    item_id = group[0].get("item_id")
+    item = db.q1("SELECT kind FROM items WHERE id=?", (item_id,)) if item_id else None
+    if not accept or not item or item["kind"] != "series":
+        raise ValueError("accept_show_audio only applies to a series with an accept-as-is proposal")
+    out = {"ok": True, "pick": SHOW_PICK, "approved": [], "rejected": [], "exception_ids": []}
+    for allow in sorted({(r.get("payload") or {}).get("allow") for r in accept}):
+        r = audio_request.accept_show(item_id, allow)
+        out["rejected"] += r["rejected"]
+        out["exception_ids"].append(r["exception_id"])
+        out["result"] = r["result"]
+    return out
 
 
 def approve_many(ids: list[int]) -> dict:

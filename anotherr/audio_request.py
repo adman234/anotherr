@@ -8,6 +8,9 @@ also covers episodes imported into that season later.
   allow 'original_only'  the season is accepted without English audio   (silences english_audio_missing)
   allow 'english_only'   the season is accepted without original audio  (silences the warning original_audio_missing)
 
+A show-wide exception (scope 'show', season NULL, series only) does the same for every season, including seasons
+imported later.
+
 An exception never silences the "neither" error (no original and no English track) or default-track issues.
 """
 from __future__ import annotations
@@ -59,15 +62,18 @@ def allows(item_id: int | None, season: int | None, allow: str) -> bool:
     """Is there an exception covering this item + season (NULL season = movie) for that kind of gap?"""
     if not item_id:
         return False
-    return bool(db.q1("SELECT id FROM audio_exceptions WHERE item_id=? AND season IS ? AND allow=?",
-                      (item_id, season, allow)))
+    return bool(db.q1("SELECT id FROM audio_exceptions WHERE item_id=? AND allow=? "
+                      "AND (scope='show' OR (COALESCE(scope,'season')='season' AND season IS ?))",
+                      (item_id, allow, season)))
 
 
 def list_for_item(item_id: int) -> list[dict]:
     return db.q("SELECT * FROM audio_exceptions WHERE item_id=? ORDER BY season, id", (item_id,))
 
 
-def _season_files(item_id: int, season: int | None) -> list[dict]:
+def _season_files(item_id: int, season: int | None, scope: str | None = "season") -> list[dict]:
+    if scope == "show":
+        return db.q("SELECT * FROM files WHERE item_id=? AND missing=0", (item_id,))
     return [f for f in db.q("SELECT * FROM files WHERE item_id=? AND missing=0", (item_id,)) if season_of(f) == season]
 
 
@@ -201,6 +207,86 @@ def on_redownload(file_id: int, codes: list[str]) -> int:
     return n
 
 
+def open_gaps(item_id: int) -> list[str]:
+    """The kinds of gap (original_only | english_only) that currently have an open warning on this item's files."""
+    return sorted({ALLOW_FOR_CODE[r["code"]] for r in db.q(
+        "SELECT DISTINCT i.code FROM issues i JOIN files f ON f.id=i.file_id WHERE f.item_id=? AND f.missing=0 "
+        "AND i.status='open' AND i.severity='warning' AND i.code IN (?, ?)", (item_id, *ALLOW_FOR_CODE))})
+
+
+def accept_show(item_id: int, allow: str | None = None, note: str = "accepted the whole show as is") -> dict:
+    """Accept every season of a series as is: record one show-wide exception, resolve the matching open warnings on
+    all files, and reject the accept_season_audio proposals and the redownloads raised only for that code."""
+    from . import actions
+
+    item = db.q1("SELECT * FROM items WHERE id=?", (item_id,))
+    if not item:
+        raise LookupError("item not found")
+    if item.get("kind") != "series":
+        raise ValueError("only a series can be accepted show-wide; accept a movie as it is instead")
+    if allow is None:
+        gaps = open_gaps(item_id)
+        if not gaps:
+            raise ValueError("this show has no open english_audio_missing / original_audio_missing warning")
+        allow = gaps[0]
+    if allow not in CODES_FOR_ALLOW:
+        raise ValueError("allow must be original_only | english_only")
+    code, now = CODES_FOR_ALLOW[allow], time.time()
+    ex = db.q1("SELECT id FROM audio_exceptions WHERE item_id=? AND allow=? AND scope='show'", (item_id, allow))
+    if ex:
+        eid = ex["id"]
+    else:
+        eid = db.x("INSERT INTO audio_exceptions(item_id, season, scope, allow, created_at, note) VALUES (?,NULL,'show',?,?,?)",
+                   (item_id, allow, now, note))
+    files = _season_files(item_id, None, "show")
+    resolved = 0
+    for f in files:
+        resolved += db.n("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open' "
+                         "AND severity='warning' AND code=?", (now, f["id"], code))
+        refresh_file_status(f["id"])
+    why = "Rejected: accepted the whole show as is"
+    rejected = []
+    for a in db.q("SELECT a.id, a.kind, a.codes, a.payload FROM actions a JOIN files f ON f.id=a.file_id "
+                  "WHERE f.item_id=? AND a.status='proposed' AND a.kind IN (?, 'redownload')", (item_id, KIND)):
+        if a["kind"] == KIND:
+            hit = (db.unj(a["payload"], {}) or {}).get("allow") == allow
+        else:
+            codes = set(db.unj(a["codes"], []) or [])
+            hit = bool(codes) and codes <= {code}  # a redownload that also has other codes (truncated...) stays
+        if hit and db.n("UPDATE actions SET status='rejected', result=?, updated_at=? WHERE id=? AND status='proposed'",
+                        (why, now, a["id"])):
+            rejected.append(a["id"])
+    for f in files:
+        actions.reconcile(f["id"])
+    miss = "English" if allow == "original_only" else "original-language"
+    msg = f"Accepted all of {item['title']} without {miss} audio; resolved {resolved} issue(s)"
+    db.log(msg)
+    return {"ok": True, "result": msg, "exception_id": eid, "allow": allow, "resolved": resolved, "rejected": rejected}
+
+
+def _evidence_langs(f: dict) -> set[str]:
+    ev = db.unj(f.get("audio_evidence"), None) or {}
+    return {t.get("effective") for t in ev.get("tracks") or [] if t.get("effective") and not t.get("commentary")}
+
+
+def list_all() -> list[dict]:
+    """Every exception with its item and how many files it covers. `fixed` = covered files whose last scan found
+    both the original-language and an English audio track (a later download may have solved the gap)."""
+    out = []
+    for e in db.q("SELECT e.*, i.title, i.kind, i.quality_profile, i.audio_request, i.audio_request_override, "
+                  "i.original_language FROM audio_exceptions e JOIN items i ON i.id=e.item_id "
+                  "ORDER BY i.title COLLATE NOCASE, e.season, e.id"):
+        e["scope"] = e.get("scope") or "season"
+        e["audio_request_effective"] = effective(e)[0] or "either"
+        files = _season_files(e["item_id"], e["season"], e["scope"])
+        orig = (e.pop("original_language") or "").lower()
+        e.pop("audio_request_override", None)
+        e["files"] = len(files)
+        e["fixed"] = sum(1 for f in files if (lambda L: "eng" in L and (not orig or orig in L))(_evidence_langs(f)))
+        out.append(e)
+    return out
+
+
 def remove(exception_id: int) -> dict | None:
     """Delete an exception and queue a standard rescan of that season's files (the warnings come back if still true)."""
     from . import scheduler
@@ -209,6 +295,6 @@ def remove(exception_id: int) -> dict | None:
     if not e:
         return None
     db.x("DELETE FROM audio_exceptions WHERE id=?", (exception_id,))
-    ids = [f["id"] for f in _season_files(e["item_id"], e["season"])]
+    ids = [f["id"] for f in _season_files(e["item_id"], e["season"], e.get("scope"))]
     queued = scheduler.enqueue(ids, "standard", "recheck") if ids else 0
     return {"ok": True, "removed": exception_id, "queued": queued}

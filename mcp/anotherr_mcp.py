@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import logging
 
@@ -32,7 +33,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 8  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 9  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -199,8 +200,18 @@ def set_audio_request(item_id: int, request: str = "") -> str:
 
 
 @mcp.tool()
-def list_audio_exceptions(item_id: int) -> str:
-    """Seasons (or the movie) accepted as is without the requested audio language, and the requested language."""
+def list_audio_exceptions(item_id: int | None = None) -> str:
+    """Accepted-as-is audio exceptions. With item_id: that item's seasons (or movie, or whole show) accepted without
+    the requested audio language, plus the requested language. Without item_id: every exception across the library,
+    one line each (id, title, scope, allow, date)."""
+    if item_id is None:
+        rows = _get("/api/audio_exceptions")
+        if not rows:
+            return "No exceptions."
+        return "\n".join(
+            f"exception {r['id']}: {r['title']} - {_scope_text(r)} allow={r['allow']} "
+            f"{time.strftime('%Y-%m-%d', time.localtime(r['created_at'] or 0))} "
+            f"({r.get('fixed', 0)}/{r.get('files', 0)} files now have original + English audio)" for r in rows)
     it = _get(f"/api/items/{item_id}")
     rows = _get(f"/api/items/{item_id}/audio_exceptions")
     head = (f"{it['title']}: requested audio = {it['audio_request_effective']} (from {it['audio_request_source']}; "
@@ -208,8 +219,13 @@ def list_audio_exceptions(item_id: int) -> str:
     if not rows:
         return head + "\nNo exceptions."
     return head + "\n" + "\n".join(
-        f"exception {r['id']}: {'season ' + str(r['season']) if r['season'] is not None else 'movie'} "
-        f"allow={r['allow']} {r.get('note') or ''}".rstrip() for r in rows)
+        f"exception {r['id']}: {_scope_text(r)} allow={r['allow']} {r.get('note') or ''}".rstrip() for r in rows)
+
+
+def _scope_text(r: dict) -> str:
+    if r.get("scope") == "show":
+        return "whole show"
+    return f"season {r['season']}" if r.get("season") is not None else "movie"
 
 
 @mcp.tool()
@@ -378,7 +394,9 @@ def list_actions(status: str = "proposed") -> str:
 def choose_action(choice_key: str, pick: str) -> str:
     """Resolve a CHOICE shown by list_actions: alternative fixes for the same files (for example accept_season_audio
     versus redownload). pick is the kind to run (e.g. accept_season_audio or redownload); the other alternatives are
-    rejected. Only when the user has agreed."""
+    rejected. For a series, pick accept_show_audio accepts EVERY season of the show as is (now and for seasons
+    imported later; it stops flagging the missing language for the whole show) and rejects all its accept and
+    code-only redownload proposals. Only when the user has agreed."""
     return _j(_send("POST", "/api/actions/choose", {"choice_key": choice_key, "pick": pick}))
 
 

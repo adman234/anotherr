@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE TABLE IF NOT EXISTS audio_exceptions (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    season INTEGER,                    -- NULL for movies
+    season INTEGER,                    -- NULL for movies and for scope 'show'
+    scope TEXT DEFAULT 'season',       -- season (one season, or the movie) | show (every season, now and later)
     allow TEXT NOT NULL,               -- original_only (English missing is fine) | english_only (original missing is fine)
     created_at REAL,
     note TEXT DEFAULT ''
@@ -151,6 +152,7 @@ _ADDED_COLUMNS = [
     ("items", "quality_profile", "TEXT DEFAULT ''"),  # Sonarr/Radarr quality profile name
     ("items", "audio_request", "TEXT DEFAULT ''"),  # '' (either) | original | english, mapped from the profile name
     ("items", "audio_request_override", "TEXT DEFAULT ''"),  # manual request; '' = follow the profile
+    ("audio_exceptions", "scope", "TEXT DEFAULT 'season'"),  # season | show; older rows are season exceptions
     ("actions", "payload", "TEXT"),  # batch actions (retag_audio): files, tracks, preview, per-file results
 ]
 

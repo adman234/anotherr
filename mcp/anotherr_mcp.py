@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 7  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 8  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -352,9 +352,34 @@ def list_actions(status: str = "proposed") -> str:
     rows = _get("/api/actions", status=status)
     if not rows:
         return "No actions."
-    return "\n".join(f"action {a['id']} [{a['status']}] {a['kind']} - {a['title']} {a['label'] or ''}"
+    lines, seen = [], set()
+    for a in rows:
+        k = a.get("choice_key")
+        if k:
+            if k in seen:
+                continue
+            seen.add(k)
+            alts = [b for b in rows if b.get("choice_key") == k]
+            kinds: dict[str, list[int]] = {}
+            for b in alts:
+                kinds.setdefault(b["kind"], []).append(b["id"])
+            lines.append(f"CHOICE {k} - {a['title']}" + (f" (season {a['season']})" if a.get("season") is not None else "")
+                         + f", {len(alts)} actions, pick one with choose_action: "
+                         + "; ".join(f"{kd} = action(s) {', '.join(map(str, ids))}" for kd, ids in kinds.items())
+                         + f" | {a['reason']}")
+            continue
+        lines.append(f"action {a['id']} [{a['status']}] {a['kind']} - {a['title']} {a['label'] or ''}"
                      + (f" (season {a['season']})" if a.get("season") is not None else "") + f": {a['reason']}"
-                     + (f" -> {a['result']}" if a.get("result") else "") for a in rows)
+                     + (f" -> {a['result']}" if a.get("result") else ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def choose_action(choice_key: str, pick: str) -> str:
+    """Resolve a CHOICE shown by list_actions: alternative fixes for the same files (for example accept_season_audio
+    versus redownload). pick is the kind to run (e.g. accept_season_audio or redownload); the other alternatives are
+    rejected. Only when the user has agreed."""
+    return _j(_send("POST", "/api/actions/choose", {"choice_key": choice_key, "pick": pick}))
 
 
 def _ops_text(f: dict) -> str:

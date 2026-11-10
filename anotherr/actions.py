@@ -271,6 +271,83 @@ def reject(action_id: int):
 GROUPABLE = ("resub", "redownload", "whisper_subtitle")  # one approval per series + season + identical reason (UI/MCP)
 
 
+# ---- alternative proposals: several actions that fix the same files in different ways are one "choice"
+
+def _lang_choice_key(a: dict) -> str | None:
+    """accept_season_audio and the redownloads raised only for the codes it covers (english_audio_missing /
+    original_audio_missing) share an item + season (NULL season = movie)."""
+    from . import audio_request
+
+    covered = set(audio_request.ALLOW_FOR_CODE)
+    if a.get("kind") == audio_request.KIND:
+        p = a.get("payload") or {}
+        if not p.get("item_id"):
+            return None
+        season = p.get("season")
+    elif a.get("kind") == "redownload":
+        codes = set(a.get("codes") or [])
+        if not codes or not codes <= covered or not a.get("item_id"):
+            return None
+        season = a.get("season")
+        p = {"item_id": a["item_id"]}
+    else:
+        return None
+    return f"lang|{p['item_id']}|{'movie' if season is None else season}"
+
+
+CHOICE_RULES = (_lang_choice_key,)  # add further alternative pairings here
+CHOICE_LABELS = {"accept_season_audio": "Accept season audio as is", "redownload": "Redownload"}
+
+
+def choice_key(a: dict) -> str | None:
+    """Stable key shared by proposals that are alternatives for the same files. `a` is an /api/actions row
+    (codes and payload decoded, item_id and season present). None when the action is not part of a choice."""
+    for rule in CHOICE_RULES:
+        k = rule(a)
+        if k:
+            return k
+    return None
+
+
+def attach_choice_keys(rows: list[dict]) -> None:
+    """Set row['choice_key'] on proposed rows, only where at least two different kinds compete."""
+    keys: dict[str, set[str]] = {}
+    for r in rows:
+        k = choice_key(r) if r.get("status") == "proposed" else None
+        r["choice_key"] = k
+        if k:
+            keys.setdefault(k, set()).add(r["kind"])
+    for r in rows:
+        if r["choice_key"] and len(keys[r["choice_key"]]) < 2:
+            r["choice_key"] = None
+
+
+def choose(rows: list[dict], key: str, pick: str) -> dict | None:
+    """Approve every proposed action of kind `pick` in choice `key` and reject the alternatives. `rows` are the
+    proposed /api/actions rows with choice keys attached. None if the choice no longer exists."""
+    group = [r for r in rows if r.get("choice_key") == key]
+    if not group:
+        return None
+    if pick not in {r["kind"] for r in group}:
+        raise ValueError("pick must be one of: " + ", ".join(sorted({r["kind"] for r in group})))
+    label = CHOICE_LABELS.get(pick, pick)
+    rejected = []
+    for r in group:
+        if r["kind"] != pick and db.n("UPDATE actions SET status='rejected', result=?, updated_at=? "
+                                      "WHERE id=? AND status='proposed'",
+                                      (f"Rejected: chose {label} instead", time.time(), r["id"])):
+            rejected.append(r["id"])
+    ids = [r["id"] for r in group if r["kind"] == pick]
+    if pick in GROUPABLE:
+        out = approve_many(ids)
+        approved = ids if out.get("queued") else []
+        res = {"ok": out["ok"], "queued": out["queued"]}
+    else:
+        res = {"ok": True, "results": {i: execute(i) for i in ids}}
+        approved = [i for i in ids if res["results"][i].get("ok")]
+    return {**res, "pick": pick, "approved": approved, "rejected": rejected}
+
+
 def approve_many(ids: list[int]) -> dict:
     """Approve a group of proposals: they're marked 'queued' at once and run one after another in the background
     (a Bazarr search or Whisper transcription can take minutes per episode). Track-edit batches keep their own."""

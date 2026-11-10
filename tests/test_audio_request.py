@@ -417,3 +417,78 @@ def test_manual_proposal_and_api_endpoints():
         api.audio_exception_delete(rows[0]["id"])
     with pytest.raises(api.HTTPException):
         api.item_audio_exceptions(99999)
+
+
+# ---------------------------------------------------------------- choices (alternative proposals)
+
+def _rows():
+    return api.actions_list("proposed")
+
+
+def test_choice_key_pairs_accept_with_its_redownloads_per_season():
+    iid, files = _show("english")
+    for key in ((1, 1), (1, 2), (2, 1)):
+        _scan(files[key], TRACKS["O"])
+    rows = _rows()
+    by = lambda kind, fid=None: [r for r in rows if r["kind"] == kind and (fid is None or r["file_id"] == fid)]
+    k1 = {r["choice_key"] for r in by("redownload") if r["file_id"] in (files[(1, 1)], files[(1, 2)])}
+    assert k1 == {f"lang|{iid}|1"}
+    acc1 = next(r for r in by("accept_season_audio") if r["payload"]["season"] == 1)
+    assert acc1["choice_key"] == f"lang|{iid}|1"
+    assert by("redownload", files[(2, 1)])[0]["choice_key"] == f"lang|{iid}|2"  # other season, other key
+
+
+def test_choice_key_ignores_unrelated_redownload_codes_and_lone_proposals():
+    iid, files = _show("english")
+    _scan(files[(1, 1)], TRACKS["O"])
+    fid = files[(1, 2)]
+    db.x("INSERT INTO issues(file_id, category, code, severity, message, details, status, created_at, updated_at) "
+         "VALUES (?, 'video', 'truncated', 'error', 'x', '{}', 'open', ?, ?)", (fid, time.time(), time.time()))
+    actions.reconcile(fid)
+    actions.propose_for_file(fid)
+    rows = _rows()
+    trunc = next(r for r in rows if r["file_id"] == fid and r["kind"] == "redownload")
+    assert trunc["codes"] == ["truncated"] and trunc["choice_key"] is None
+    assert actions.choice_key({"kind": "redownload", "codes": ["truncated"], "item_id": iid, "season": 1}) is None
+    # a redownload without a competing accept proposal is not a choice
+    db.x("UPDATE actions SET status='rejected' WHERE kind='accept_season_audio'")
+    assert all(r["choice_key"] is None for r in _rows())
+
+
+def test_choose_accept_stores_exception_and_rejects_redownloads():
+    iid, files = _show("english")
+    for key in ((1, 1), (1, 2)):
+        _scan(files[key], TRACKS["O"])
+    key = f"lang|{iid}|1"
+    out = api.actions_choose({"choice_key": key, "pick": "accept_season_audio"})
+    assert out["ok"] and len(out["approved"]) == 1 and len(out["rejected"]) == 2
+    assert [(e["item_id"], e["season"], e["allow"]) for e in db.q("SELECT * FROM audio_exceptions")] == [(iid, 1, "original_only")]
+    rej = db.q("SELECT result FROM actions WHERE kind='redownload' AND status='rejected'")
+    assert len(rej) == 2 and all(r["result"] == "Rejected: chose Accept season audio as is instead" for r in rej)
+    with pytest.raises(api.HTTPException) as e:
+        api.actions_choose({"choice_key": key, "pick": "accept_season_audio"})
+    assert e.value.status_code == 409
+
+
+def test_choose_redownload_queues_them_and_rejects_the_accept(monkeypatch):
+    monkeypatch.setattr(actions, "_run_queued", lambda ids: None)
+    iid, files = _show("english")
+    for key in ((1, 1), (1, 2), (2, 1)):
+        _scan(files[key], TRACKS["O"])
+    key = f"lang|{iid}|1"
+    with pytest.raises(api.HTTPException) as e:
+        api.actions_choose({"choice_key": key, "pick": "resub"})
+    assert e.value.status_code == 400
+    out = api.actions_choose({"choice_key": key, "pick": "redownload"})
+    assert out["ok"] and out["queued"] == 2 and len(out["approved"]) == 2 and len(out["rejected"]) == 1
+    queued = db.q("SELECT file_id FROM actions WHERE kind='redownload' AND status='queued'")
+    assert {r["file_id"] for r in queued} == {files[(1, 1)], files[(1, 2)]}
+    acc = db.q1("SELECT status, result FROM actions WHERE kind='accept_season_audio' AND id=?", (out["rejected"][0],))
+    assert acc == {"status": "rejected", "result": "Rejected: chose Redownload instead"}
+    assert db.q1("SELECT COUNT(*) n FROM audio_exceptions")["n"] == 0
+
+
+def test_choose_on_a_stale_choice_is_409():
+    with pytest.raises(api.HTTPException) as e:
+        api.actions_choose({"choice_key": "lang|1|1", "pick": "redownload"})
+    assert e.value.status_code == 409

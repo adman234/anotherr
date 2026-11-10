@@ -394,7 +394,7 @@ def file_detail(file_id: int):
     return f
 
 
-MCP_BRIDGE_VERSION = 7  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 8  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -796,8 +796,7 @@ def review_verdict(review_id: int, body: dict = Body(...)):
 ACTION_SQL = """SELECT a.*, i.title, f.label, f.item_id, f.episodes FROM actions a JOIN files f ON f.id=a.file_id JOIN items i ON i.id=f.item_id"""
 
 
-@app.get("/api/actions", dependencies=[Depends(auth)])
-def actions_list(status: str = "proposed", limit: int = 200):
+def _action_rows(status: str, limit: int) -> list[dict]:
     sql, args = ACTION_SQL, []
     if status:
         vals = status.split(",")
@@ -810,7 +809,26 @@ def actions_list(status: str = "proposed", limit: int = 200):
         eps = db.unj(r.pop("episodes", None), []) or []
         seasons = [e.get("season") for e in eps if e.get("season") is not None]
         r["season"] = min(seasons) if seasons else None
+    actions.attach_choice_keys(rows)
     return rows
+
+
+@app.get("/api/actions", dependencies=[Depends(auth)])
+def actions_list(status: str = "proposed", limit: int = 200):
+    return _action_rows(status, limit)
+
+
+@app.post("/api/actions/choose", dependencies=[Depends(auth)])
+def actions_choose(body: dict = Body(...)):
+    """{"choice_key": "...", "pick": "<kind>"}: approve the proposals of that kind in a choice (alternative fixes for
+    the same files) and reject the others."""
+    try:
+        out = actions.choose(_action_rows("proposed", 1000), str(body.get("choice_key") or ""), str(body.get("pick") or ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if out is None:
+        raise HTTPException(409, "this choice no longer exists (the proposals were handled or withdrawn)")
+    return out
 
 
 @app.post("/api/actions/bulk", dependencies=[Depends(auth)])

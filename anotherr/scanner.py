@@ -928,12 +928,19 @@ def check_subtitles(ctx: Ctx):
                         continue
                     end = p["start"] + p["dur"] if p["dur"] > 0 else (pk[i + 1]["start"] if i + 1 < len(pk) else p["start"] + 3)
                     cues.append((p["start"], min(end, p["start"] + 10), ""))
-        # density only counts cues inside the sampled windows (packets are read with padding)
-        counted = len(cues) if s["external"] else sum(
-            1 for c in cues if any(c[1] > ws and c[0] < ws + wd for ws, wd in windows))
-        kind = analysis.classify_track(counted, span, s["title"], s["forced"], min_rate)
-        analysed.append({"track": s, "cues": cues, "kind": kind, "per_min": round(counted / max(span / 60, 1), 1),
-                         "name": s["title"] or s["codec"]})
+        if s["external"]:
+            counted, source = len(cues), "file"
+            kind = analysis.classify_track(counted, span, s["title"], s["forced"], min_rate)
+            per_min = round(counted / max(span / 60, 1), 1)
+        else:
+            # Window density only counts cues inside the sampled windows (packets are read with padding). It
+            # under-counts badly on MKV, so mkvmerge's NUMBER_OF_FRAMES tag wins when present (see classify_embedded).
+            in_win = sum(1 for c in cues if any(c[1] > ws and c[0] < ws + wd for ws, wd in windows))
+            kind, source, counted, per_min = analysis.classify_embedded(
+                s.get("frames"), dur, s["title"], s["forced"], min_rate, in_win, win_s,
+                sum(len(v) for v in packets.values()))
+        analysed.append({"track": s, "cues": cues, "kind": kind, "per_min": per_min, "count": counted,
+                         "source": source, "name": s["title"] or s["codec"]})
 
     full = [a for a in analysed if a["kind"] == "full"]
     ctx.result["subtitle_tracks"] = [
@@ -941,11 +948,16 @@ def check_subtitles(ctx: Ctx):
          "external": a["track"]["external"], "default": a["track"]["default"], "forced": a["track"]["forced"],
          "s_index": a["track"].get("s_index"), "hearing_impaired": bool(a["track"].get("hearing_impaired")),
          "text": bool(a["track"].get("text")), "path": a["track"].get("path") if a["track"]["external"] else None,
-         "kind": a["kind"], "cues": len(a["cues"]), "per_min": a["per_min"]}
+         "kind": a["kind"], "cues": a["count"], "per_min": a["per_min"], "density_source": a["source"]}
         for a in analysed]
     if needs and not mine:
         ctx.issue("subtitles", "subs_missing", "error",
                   f"No {langs.name(sub_lang)} subtitles (embedded or external) for {langs.name(exp)} audio.")
+    elif needs and not full and any(a["kind"] == "unknown" for a in analysed):
+        # The window read returned nothing and there are no tags: density can't be judged, so don't claim signs-only.
+        ctx.issue("subtitles", "subs_density_unknown", "info",
+                  f"{langs.name(sub_lang)} embedded subtitle density could not be measured (no track statistics "
+                  "and the sampled read returned no cues); not flagged as signs-only.")
     elif needs and not full:
         ctx.issue("subtitles", "subs_signs_only", "error",
                   f"{langs.name(sub_lang)} subtitles are signs/songs only - no full dialogue track.")

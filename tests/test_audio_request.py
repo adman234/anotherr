@@ -492,3 +492,94 @@ def test_choose_on_a_stale_choice_is_409():
     with pytest.raises(api.HTTPException) as e:
         api.actions_choose({"choice_key": "lang|1|1", "pick": "redownload"})
     assert e.value.status_code == 409
+
+
+# ---------------------------------------------------------------- show-wide exceptions
+
+def _add_show_exception(iid, allow="original_only"):
+    db.x("INSERT INTO audio_exceptions(item_id, season, scope, allow, created_at) VALUES (?,NULL,'show',?,?)",
+         (iid, allow, time.time()))
+
+
+def test_show_exception_suppresses_every_season_and_later_imports():
+    iid, files = _show("english")
+    for key in files:
+        assert "english_audio_missing" in _scan(files[key], TRACKS["O"], store=False)
+    _add_show_exception(iid)
+    for key in files:
+        assert "english_audio_missing" not in _scan(files[key], TRACKS["O"], store=False)
+    late = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, label, first_seen, status) "
+                "VALUES (?, 99, '/tv/S/s3.mkv', ?, 'S03E01', ?, 'unscanned')",
+                (iid, json.dumps([{"id": 9, "season": 3, "episode": 1}]), time.time()))
+    assert _scan(late, TRACKS["O"]) == {}
+    assert not audio_request.allows(iid, 1, "english_only")  # only the matching kind of gap
+
+
+def test_accepting_the_show_withdraws_all_accept_proposals_and_code_only_redownloads():
+    iid, files = _show("english")
+    trunc = files[(2, 2)]
+    for key in files:
+        if files[key] != trunc:
+            _scan(files[key], TRACKS["O"])
+    db.x("INSERT INTO issues(file_id, category, code, severity, message, details, status, created_at, updated_at) "
+         "VALUES (?, 'video', 'truncated', 'error', 'x', '{}', 'open', ?, ?)", (trunc, time.time(), time.time()))
+    actions.reconcile(trunc)
+    actions.propose_for_file(trunc)
+    assert len(_proposed("accept_season_audio")) == 2
+    out = api.actions_choose({"choice_key": f"lang|{iid}|1", "pick": "accept_show_audio"})
+    assert out["ok"] and out["approved"] == []
+    assert [(e["scope"], e["season"], e["allow"]) for e in db.q("SELECT * FROM audio_exceptions")] == [("show", None, "original_only")]
+    assert _proposed("accept_season_audio") == []
+    assert all(_open(f) == ({"truncated"} if f == trunc else set()) for f in files.values())
+    rej = db.q("SELECT file_id, result FROM actions WHERE kind IN ('redownload','accept_season_audio') AND status='rejected'")
+    assert rej and all(r["result"] == "Rejected: accepted the whole show as is" for r in rej)
+    left = _proposed("redownload")
+    assert [(r["file_id"], db.unj(r["codes"])) for r in left] == [(trunc, ["truncated"])]
+
+
+def test_movies_cannot_get_a_show_exception():
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind, original_language) VALUES ('radarr', 5, 'Film', 'movie', 'jpn')")
+    with pytest.raises(api.HTTPException) as e:
+        api.item_accept_show_audio(iid, {"allow": "original_only"})
+    assert e.value.status_code == 400
+    assert db.q("SELECT * FROM audio_exceptions") == []
+
+
+def test_show_endpoint_needs_an_open_gap_or_explicit_allow():
+    iid, files = _show("english")
+    with pytest.raises(api.HTTPException) as e:
+        api.item_accept_show_audio(iid, {})
+    assert e.value.status_code == 400
+    _scan(files[(1, 1)], TRACKS["O"])
+    assert api.item(iid)["open_audio_gaps"] == ["original_only"]
+    assert api.item_accept_show_audio(iid, {})["ok"]
+    assert api.item_accept_show_audio(iid, {"allow": "original_only"})["exception_id"]  # idempotent: no second row
+    assert db.q1("SELECT COUNT(*) n FROM audio_exceptions")["n"] == 1
+
+
+def test_list_all_exceptions_and_removing_a_show_exception_rescans_every_file():
+    iid, files = _show("english")
+    _scan(files[(1, 1)], TRACKS["O"])
+    actions.execute(_proposed("accept_season_audio")[0]["id"])  # season 1 exception
+    _add_show_exception(iid)
+    db.x("UPDATE files SET audio_evidence=? WHERE id=?", (json.dumps({"tracks": [
+        {"effective": "jpn"}, {"effective": "eng"}]}), files[(1, 1)]))
+    rows = api.audio_exceptions_all()
+    assert [(r["title"], r["kind"], r["scope"], r["season"], r["files"], r["fixed"]) for r in rows] == [
+        ("Show", "series", "show", None, 4, 1), ("Show", "series", "season", 1, 2, 1)]
+    assert rows[1]["audio_request"] == "english" and rows[1]["allow"] == "original_only"
+    show = rows[0]
+    out = api.audio_exception_delete(show["id"])
+    assert out["queued"] == 4
+    assert {r["file_id"] for r in db.q("SELECT file_id FROM queue")} == set(files.values())
+    assert "english_audio_missing" in _scan(files[(2, 1)], TRACKS["O"])  # season 2 is flagged again
+
+
+def test_existing_exception_rows_without_scope_read_as_season():
+    db.x("DROP TABLE audio_exceptions")
+    db.x("CREATE TABLE audio_exceptions (id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, season INTEGER, "
+         "allow TEXT NOT NULL, created_at REAL, note TEXT DEFAULT '')")
+    db.x("INSERT INTO audio_exceptions(item_id, season, allow, created_at) VALUES (1, 2, 'original_only', 0)")
+    db.init()
+    assert db.q1("SELECT scope FROM audio_exceptions")["scope"] == "season"
+    assert audio_request.allows(1, 2, "original_only") and not audio_request.allows(1, 3, "original_only")

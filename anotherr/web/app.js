@@ -350,7 +350,7 @@ async function actionsPage() {
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
-    ${groupActions(rows).map((a) => a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
+    ${groupActions(rows).map((a) => a.choice ? choiceRow(a) : a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
       <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : a.kind === "accept_season_audio" ? acceptTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
       <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
@@ -365,8 +365,13 @@ const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
 const GROUP_MAX = { whisper_subtitle: 5 };  // Bazarr's Whisper route: at most 5 episodes per approval
 const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
 function groupActions(rows) {
-  const out = [], groups = {};
+  const out = [], groups = {}, choices = {};
   for (const a of rows) {
+    if (a.status === "proposed" && a.choice_key) {  // alternative fixes for the same files: one row, pick one
+      if (!choices[a.choice_key]) { choices[a.choice_key] = { choice: true, key: a.choice_key, title: a.title, season: a.season, rows: [] }; out.push(choices[a.choice_key]); }
+      choices[a.choice_key].rows.push(a);
+      continue;
+    }
     if (a.status !== "proposed" || !GROUPABLE.includes(a.kind) || a.season == null) { out.push(a); continue; }
     const base = [a.kind, a.item_id, a.season, a.reason].join("|"), cap = GROUP_MAX[a.kind];
     let k = base;
@@ -384,6 +389,35 @@ function groupRow(g) {
     <td class="small">${esc(g.reason)}</td><td></td>
     <td><button class="sm primary" onclick="approveGroup([${ids}], '${g.kind}')">Approve ${n}</button>
       <button class="sm" onclick="act(()=>api('/api/actions/bulk',{method:'POST',body:{op:'reject',ids:[${ids}]}}),r=>'Rejected '+r.rejected)">Reject ${n}</button></td></tr>`;
+}
+// alternatives for the same files (accept the season as is, or redownload): one row with a button per alternative
+const ISSUE_TEXT = { english_audio_missing: "No English audio, and it was requested", original_audio_missing: "No original-language audio, and it was requested" };
+function choiceRow(c) {
+  const accept = c.rows.filter((a) => a.kind === "accept_season_audio"), redl = c.rows.filter((a) => a.kind === "redownload");
+  const files = new Map();
+  for (const a of c.rows) {
+    if (a.kind === "accept_season_audio") for (const f of (a.payload && a.payload.files) || []) files.set(f.file_id, f.label || "file " + f.file_id);
+    else files.set(a.file_id, epLabel(a));
+  }
+  const n = files.size, ids = c.rows.map((a) => a.id);
+  const sorted = [...files.entries()].sort((x, y) => String(x[1]).localeCompare(String(y[1])));
+  const codes = new Set(redl.flatMap((a) => a.codes || [])), pl = (accept[0] && accept[0].payload) || {};
+  if (pl.code) codes.add(pl.code);
+  const issue = [...codes].map((k) => ISSUE_TEXT[k] || k).join("; ");
+  const where = c.season == null ? "" : ` Season ${c.season}`;
+  return `<tr><td><span class="st s-proposed">proposed</span> <span class="pill">${n} files</span></td><td>Choose a fix</td>
+    <td>${esc(c.title)}${where}<div class="small">${sorted.map(([id, l]) => `<a href="#/file/${id}">${esc(l)}</a>`).join(", ")}</div></td>
+    <td class="small">${issue}</td><td></td>
+    <td>${accept.length ? `<button class="sm primary" onclick="choosePick('${c.key}', 'accept_season_audio')">${c.season == null ? "Accept as is" : `Accept Season ${c.season} as is`}</button>` : ""}
+      ${redl.length ? `<button class="sm" onclick="choosePick('${c.key}', 'redownload', ${redl.length})">Redownload ${redl.length}</button>` : ""}
+      <button class="sm" onclick="act(()=>api('/api/actions/bulk',{method:'POST',body:{op:'reject',ids:[${ids}]}}),r=>'Dismissed '+r.rejected)">Dismiss</button>
+      <div class="small muted">Pick one; the other is withdrawn.</div></td></tr>`;
+}
+async function choosePick(key, pick, n) {
+  if (pick === "redownload" && !confirm(`Blocklist and redownload these ${n} files?`)) return;
+  if (pick === "accept_season_audio" && !confirm("Accept this whole season (or movie) as it is? The missing-audio warnings are resolved and later imports into the season are not flagged. You can remove the exception on the show page.")) return;
+  await act(() => api("/api/actions/choose", { method: "POST", body: { choice_key: key, pick } }),
+    (r) => (pick === "redownload" ? `Queued ${r.queued} redownload(s)` : "Accepted as is"));
 }
 async function approveGroup(ids, kind) {
   if (kind === "redownload" && !confirm(`Blocklist and redownload these ${ids.length} files?`)) return;

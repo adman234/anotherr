@@ -62,6 +62,32 @@ def classify_track(cue_count: int, duration_s: float, title: str, forced: bool, 
     return "full" if per_min >= min_per_min else "signs"
 
 
+_FULL_TITLE = re.compile(r"\b(sdh|cc|full|dialog\w*)\b")
+
+
+def classify_embedded(frames: int | None, file_s: float, title: str, forced: bool, min_per_min: float,
+                      window_cues: int, window_s: float, window_packets: int) -> tuple[str, str, int, float]:
+    """(kind, source, count, per_min) for an EMBEDDED subtitle track: full | signs | empty | unknown.
+
+    Order: forced flag / title words -> signs; mkvmerge NUMBER_OF_FRAMES over the FILE duration (so a short
+    forced-only track stays sparse; source "tags"); SDH/CC/full/dialog title -> full; otherwise the sampled-window
+    count (source "window"), which is trusted only when the window read returned subtitle packets at all
+    (`window_packets` is the total over every track); a read that found none failed -> unknown.
+    """
+    t = (title or "").lower()
+    if forced or any(w in t for w in ("sign", "song", "forced", "s&s")):
+        return "signs", "window", window_cues, round(window_cues / max(window_s / 60.0, 1.0), 1)
+    if frames is not None:
+        per_min = frames / max(file_s / 60.0, 1.0)
+        return ("full" if per_min >= min_per_min else "signs"), "tags", frames, round(per_min, 1)
+    wper = round(window_cues / max(window_s / 60.0, 1.0), 1)
+    if _FULL_TITLE.search(t):
+        return "full", "window", window_cues, wper
+    if window_packets == 0:
+        return "unknown", "window", window_cues, wper
+    return classify_track(window_cues, window_s, title, forced, min_per_min), "window", window_cues, wper
+
+
 def _bins(intervals, t0: float, n: int) -> np.ndarray:
     arr = np.zeros(n, dtype=np.float32)
     for s, e in intervals:

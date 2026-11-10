@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from anotherr import actions, analysis, db, scanner, stt
+from anotherr import actions, analysis, db, media, scanner, stt
 from test_scan import CUES, TEXTS, _small_profiles, _srt, fake_whisper  # noqa: F401
 
 pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
@@ -149,3 +149,111 @@ def test_turned_off_checks_skip_their_steps_and_timings_add_up(d, fake_whisper):
     t = TestClient(api.app).get("/api/stats/timings").json()
     assert t["scans"] >= 1 and t["steps"] and all(s["control"] for s in t["steps"])
     assert abs(sum(s["share"] for s in t["steps"]) - 100) < 1
+
+
+# ---- embedded subtitle density: mkvmerge statistics tags beat the (unreliable) window read
+
+def _classify(frames=None, title="", forced=False, file_s=600.0, wcues=0, wpk=5):
+    return analysis.classify_embedded(frames, file_s, title, forced, 3.0, wcues, 60.0, wpk)
+
+
+def test_classify_embedded_rules():
+    assert _classify(frames=544, file_s=2641)[:2] == ("full", "tags")            # SG-1 "EN": 12/min
+    assert _classify(frames=7, file_s=2641, forced=True)[0] == "signs"           # forced flag always signs
+    assert _classify(frames=544, title="Forced")[0] == "signs"
+    k, src, n, pm = _classify(frames=7, file_s=2641)                              # short forced-only track stays sparse
+    assert (k, src, n) == ("signs", "tags", 7) and pm == 0.2
+    assert _classify(frames=236, file_s=637)[0] == "full"                         # SpongeBob: 22/min
+    assert _classify(frames=2, title="SDH")[0] == "signs"                         # tags clearly under threshold win
+    assert _classify(title="SDH", wcues=0)[:2] == ("full", "window")              # title hint without tags
+    assert _classify(title="English (CC)")[0] == "full"
+    assert _classify(title="accessible")[0] != "full"                             # whole words only
+    assert _classify(wcues=0, wpk=0)[0] == "unknown"                              # window read failed everywhere
+    assert _classify(wcues=1, wpk=0)[0] == "unknown"
+    assert _classify(wcues=0, wpk=9)[0] == "empty"                                # other tracks read fine, this one is empty
+    assert _classify(wcues=1, wpk=9)[0] == "signs"
+    assert _classify(wcues=50, wpk=50)[0] == "full"
+
+
+def test_summarize_keeps_statistics_tags():
+    probe = {"format": {"duration": "2641.0"}, "streams": [
+        {"index": 0, "codec_type": "subtitle", "codec_name": "subrip", "disposition": {},
+         "tags": {"language": "eng", "NUMBER_OF_FRAMES": "544", "DURATION": "00:44:01.000000000"}},
+        {"index": 1, "codec_type": "subtitle", "codec_name": "subrip", "disposition": {"forced": 1},
+         "tags": {"language": "eng", "NUMBER_OF_FRAMES-eng": "7", "DURATION-eng": "00:30:00.0"}},
+        {"index": 2, "codec_type": "subtitle", "codec_name": "subrip", "disposition": {}, "tags": {"language": "eng"}}]}
+    a, b, c = media.summarize(probe)["subs"]
+    assert (a["frames"], a["tag_duration"]) == (544, 2641.0)
+    assert (b["frames"], b["tag_duration"]) == (7, 1800.0)
+    assert c["frames"] is None and c["tag_duration"] == 0
+
+
+@pytest.fixture
+def tagged(monkeypatch):
+    """Inject mkvmerge-style NUMBER_OF_FRAMES tags (ffmpeg's muxer never writes them): {s_index: frames}."""
+    tags = {}
+    real = media.ffprobe
+
+    def fake(path, *a, **kw):
+        probe = real(path, *a, **kw)
+        n = -1
+        for s in probe.get("streams", []):
+            if s.get("codec_type") == "subtitle":
+                n += 1
+                if n in tags:
+                    s.setdefault("tags", {})["NUMBER_OF_FRAMES"] = str(tags[n])
+        return probe
+
+    monkeypatch.setattr(media, "ffprobe", fake)
+    return tags
+
+
+def _tracks(fid):
+    r = db.q1("SELECT result FROM scans WHERE file_id=? ORDER BY id DESC", (fid,))
+    return db.unj(r["result"])["subtitle_tracks"]
+
+
+def test_tags_full_means_no_signs_only(d, fake_whisper, tagged, monkeypatch):
+    path = make_video(d, "tagfull", [(440, "eng")], [(CUES[:3], ["x"] * 3, "eng", "EN")])
+    tagged[0] = 130  # 90 s file: 87/min; the 3 cues in the file would have read as signs by the window route
+    fid, codes = scan(path, anime=1)
+    assert "subs_signs_only" not in codes and "subs_density_unknown" not in codes
+    t = _tracks(fid)[0]
+    assert (t["kind"], t["density_source"], t["cues"]) == ("full", "tags", 130)
+
+
+def test_forced_flag_is_signs_even_with_many_frames(d, fake_whisper, tagged):
+    path = make_video(d, "tagforced", [(440, "eng")], [(CUES, TEXTS, "eng", "English")])
+    # flag the only track forced via a re-mux
+    forced = os.path.join(d, "tagforced2.mkv")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", path, "-map", "0", "-c", "copy", "-disposition:s:0", "forced", forced],
+                   check=True)
+    tagged[0] = 500
+    fid, codes = scan(forced, anime=1)
+    assert "subs_signs_only" in codes
+    assert _tracks(fid)[0]["kind"] == "signs"
+
+
+def test_sparse_tags_raise_signs_only(d, fake_whisper, tagged):
+    path = make_video(d, "tagsparse", [(440, "eng")], [(CUES, TEXTS, "eng", "English")])
+    tagged[0] = 2  # 1.3/min over the 90 s file, although the window read sees plenty of cues
+    fid, codes = scan(path, anime=1)
+    assert "subs_signs_only" in codes
+    t = _tracks(fid)[0]
+    assert (t["kind"], t["density_source"], t["cues"]) == ("signs", "tags", 2)
+
+
+def test_window_read_failure_is_unknown_not_signs(d, fake_whisper, monkeypatch):
+    path = make_video(d, "winfail", [(440, "eng")], [(CUES, TEXTS, "eng", "English"), (CUES[:2], ["s"] * 2, "eng", "Forced")])
+    monkeypatch.setattr(media, "sub_packets", lambda *a, **kw: {})
+    fid, codes = scan(path, anime=1)
+    assert "subs_signs_only" not in codes and "subs_missing" not in codes
+    assert "subs_density_unknown" in codes
+    assert [t["kind"] for t in _tracks(fid)] == ["unknown", "signs"]
+
+
+def test_sdh_title_without_tags_is_full(d, fake_whisper, monkeypatch):
+    path = make_video(d, "sdh", [(440, "eng")], [(CUES[:2], ["x"] * 2, "eng", "SDH")])
+    fid, codes = scan(path, anime=1)
+    assert "subs_signs_only" not in codes
+    assert _tracks(fid)[0]["kind"] == "full"

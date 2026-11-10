@@ -155,6 +155,27 @@ def _stream_duration(s: dict) -> float:
     return 0.0
 
 
+def _tag_duration(s: dict) -> float:
+    """The stream's own DURATION statistics tag in seconds (mkvmerge), 0 when absent."""
+    for k, v in (s.get("tags") or {}).items():
+        if k.upper().startswith("DURATION"):
+            m = re.match(r"(\d+):(\d+):([\d.]+)", str(v))
+            if m:
+                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    return 0.0
+
+
+def _tag_frames(s: dict) -> int | None:
+    """NUMBER_OF_FRAMES (or NUMBER_OF_FRAMES-eng ...) statistics tag: the track's packet count; None when absent."""
+    for k, v in (s.get("tags") or {}).items():
+        if k.upper().startswith("NUMBER_OF_FRAMES"):
+            try:
+                return int(str(v).strip())
+            except ValueError:
+                continue
+    return None
+
+
 def _stream_end(s: dict, duration: float) -> float | None:
     """Where the stream stops, in seconds (start_time + duration); None when its length is unknown."""
     if not duration:
@@ -202,7 +223,8 @@ def summarize(probe: dict) -> dict:
             audio.append(base)
         elif t == "subtitle":
             base.update(s_index=len(subs), hearing_impaired=bool(disp.get("hearing_impaired")),
-                        text=base["codec"] in TEXT_SUB_CODECS, external=False)
+                        text=base["codec"] in TEXT_SUB_CODECS, external=False,
+                        frames=_tag_frames(s), tag_duration=_tag_duration(s))
             subs.append(base)
     return {
         "duration": _f(fmt.get("duration")),

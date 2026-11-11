@@ -122,3 +122,18 @@ def test_english_default_audio_bulk_picks_only_plain_english_targets():
     add({"dual": False, "files": [{"audio": {"to_lang": "jpn"}}]})
     add({"dual": False, "files": [{"audio": {"to_lang": "eng"}}, {"audio": {"to_lang": "jpn"}}]})
     assert actions.english_default_audio_ids() == [eng]
+
+
+def test_actions_tabs_filter_before_the_row_limit():
+    from anotherr import api
+
+    iid = db.x("INSERT INTO items(source, arr_id, kind, title) VALUES ('radarr', 2, 'movie', 'Y')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, first_seen, status) "
+               "VALUES (?, 2, '/m/y.mkv', '[]', 0, 'ok')", (iid,))
+    for dual in (False, True):  # older plain proposals, then newer dual ones that would fill a small limit
+        for _ in range(5):
+            db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
+                 "VALUES (?, 'set_default_audio', '', '[]', 'proposed', 0, ?, 0, 0)", (fid, db.j({"dual": dual})))
+    plain = api.actions_list("proposed", limit=5, dual="exclude")
+    assert len(plain) == 5 and not any(r["payload"].get("dual") for r in plain)
+    assert len(api.actions_list("proposed", limit=5, dual="only")) == 5

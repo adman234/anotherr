@@ -845,12 +845,13 @@ def _action_rows(status: str, limit: int) -> list[dict]:
 
 
 @app.get("/api/actions", dependencies=[Depends(auth)])
-def actions_list(status: str = "proposed", limit: int = 200, dual: str = ""):
-    """dual=only: the Dual actions tab; dual=exclude: the main Actions tab."""
-    rows = _action_rows(status, limit)
-    if dual in ("only", "exclude"):
-        rows = [r for r in rows if actions.is_dual(r) == (dual == "only")]
-    return rows
+def actions_list(status: str = "proposed", limit: int = 1000, dual: str = ""):
+    """dual=only: the Dual actions tab; dual=exclude: the main Actions tab. The tab filter runs before the limit,
+    otherwise a tab only sees its share of the newest `limit` proposals."""
+    if dual not in ("only", "exclude"):
+        return _action_rows(status, limit)
+    rows = [r for r in _action_rows(status, 100000) if actions.is_dual(r) == (dual == "only")]
+    return rows[:limit]
 
 
 @app.post("/api/actions/choose", dependencies=[Depends(auth)])

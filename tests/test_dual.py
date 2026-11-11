@@ -137,3 +137,31 @@ def test_actions_tabs_filter_before_the_row_limit():
     plain = api.actions_list("proposed", limit=5, dual="exclude")
     assert len(plain) == 5 and not any(r["payload"].get("dual") for r in plain)
     assert len(api.actions_list("proposed", limit=5, dual="only")) == 5
+
+
+def test_badges_count_what_the_tabs_list(monkeypatch):
+    """Each sidebar badge must equal the rows its tab lists, also when some rows belong to a file that left the library."""
+    from anotherr import api, health
+
+    monkeypatch.setattr(health, "memory", lambda: {})
+
+    iid = db.x("INSERT INTO items(source, arr_id, kind, title) VALUES ('radarr', 3, 'movie', 'Z')")
+    for n, missing in ((3, 0), (4, 1)):
+        fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, first_seen, status, missing) "
+                   "VALUES (?, ?, ?, '[]', 0, 'ok', ?)", (iid, n, f"/m/z{n}.mkv", missing))
+        for sev in ("error", "dual"):
+            db.x("INSERT INTO issues(file_id, category, code, severity, message, details, status, created_at, updated_at) "
+                 "VALUES (?, 'x', 'subs_missing', ?, '', '{}', 'open', 0, 0)", (fid, sev))
+        db.x("INSERT INTO reviews(file_id, kind, question, timestamps, context, status, created_at, updated_at) "
+             "VALUES (?, 'title_card', '', '[]', '{}', 'pending', 0, 0)", (fid,))
+        db.x("INSERT INTO queue(file_id, profile, source, created_at) VALUES (?, 'quick', 'manual', 0)", (fid,))
+        for dual in (False, True):
+            db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
+                 "VALUES (?, 'set_default_audio', '', '[]', 'proposed', 0, ?, 0, 0)", (fid, db.j({"dual": dual})))
+    s = api.status()
+    assert s["open_issues"] == api.issues(page_no=1, dual="exclude")["total"]
+    assert s["open_dual_issues"] == api.issues(page_no=1, dual="only")["total"]
+    assert s["pending_reviews"] == len(api.reviews(limit=500))
+    assert s["queue"] == len(api.queue_list())
+    assert s["proposed_actions"] == len(api.actions_list(dual="exclude"))
+    assert s["proposed_dual_actions"] == len(api.actions_list(dual="only"))

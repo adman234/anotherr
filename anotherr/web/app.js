@@ -561,7 +561,7 @@ async function queue() {
   const [rows, s] = await Promise.all([api("/api/queue"), api("/api/status")]);
   const reasons = s.scheduler.pause_reasons || [];
   const waiting = rows.length && !s.current.file_id && !s.forcing_queue && reasons.length;
-  $("#app").innerHTML = `<h2>Queue <span class="muted">(${rows.length})</span></h2>
+  $("#app").innerHTML = `<h2>Queue <span class="muted">(${s.queue})</span></h2>
     ${waiting ? `<div class="card" style="border-color:var(--warning);margin-bottom:12px">Queue is waiting: <b>${esc(reasons.join(", "))}</b>. Use <b>Process queue now</b> to run it anyway.</div>` : ""}
     ${s.forcing_queue ? `<div class="card" style="border-color:var(--accent);margin-bottom:12px">Processing the queue now, ignoring pauses. ${s.current.file_id ? `Scanning <b>${esc(s.current.title)} ${esc(s.current.label || "")}</b> · ${esc(s.current.step)}` : ""}</div>` : ""}
     <div class="toolbar">

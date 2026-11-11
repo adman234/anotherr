@@ -203,7 +203,7 @@ def scan_timings(days: float = 7, profile: str = ""):
 def status():
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM files WHERE missing=0 GROUP BY status")}
     cfg = settings.get()
-    proposed = db.q("SELECT kind, codes, file_id FROM actions WHERE status='proposed'")
+    proposed = db.q("SELECT kind, codes, file_id, payload FROM actions WHERE status='proposed'")
     n_dual = sum(actions.is_dual({**r, "codes": db.unj(r["codes"], [])}) for r in proposed)
     return {
         "version": __version__,

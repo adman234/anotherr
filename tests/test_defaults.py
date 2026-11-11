@@ -375,3 +375,43 @@ def test_whisper_without_a_subtitle_on_disk_fails(monkeypatch):
     db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'subs_missing', 'warning', 'open', ?)",
          (fid, time.time()))
     assert actions._sub_fix(fid, db.scalar("SELECT item_id FROM files WHERE id=?", (fid,)), ["subs_missing"])[0] in ("skip", "resub")
+
+
+def _dual(tracks, subs, codes, pref):
+    return defaults.plan_file(tracks, subs, codes, pref, "eng", fallback="eng")["dual"]
+
+
+def test_dual_tab_english_vs_original_audio_swap():
+    audio = {"default_audio_not_preferred"}
+    # English plays but the show is Japanese, both tracks exist: a dual-audio choice
+    assert _dual([A(0, "eng", default=True), A(1, "jpn")], [], audio, "jpn")
+    # original plays but English was wanted (override): same pair, other direction
+    assert _dual([A(0, "jpn", default=True), A(1, "eng")], [], audio, "eng") is False  # english original: never dual
+    # English show with a foreign default: plain fix
+    assert not _dual([A(0, "ger", default=True), A(1, "eng")], [], audio, "eng")
+    # original + something else, no English: plain fix, not a dual choice
+    assert not _dual([A(0, "ger", default=True), A(1, "jpn")], [], audio, "jpn")
+    # English + something else for a Japanese show: falls back to English, not a dual choice
+    assert not _dual([A(0, "ger", default=True), A(1, "eng")], [], audio, "jpn")
+
+
+def test_dual_tab_subtitles_follow_the_audio_pair():
+    signs = {"default_subs_signs"}
+    subs = [S(0, kind="signs", default=True, forced=True), S(1)]
+    assert _dual([A(0, "jpn", default=True), A(1, "eng")], subs, signs, "jpn")
+    assert not _dual([A(0, "jpn", default=True)], subs, signs, "jpn")  # no English dub in the file
+    assert not _dual([A(0, "eng", default=True)], subs, signs, "eng")  # English original
+
+
+def test_unidentified_default_audio_holds():
+    cur = A(0, "", default=True)
+    p = defaults.plan_file([cur, A(1, "eng")], [], {"default_audio_not_preferred"}, "jpn", "eng")
+    assert not p["ops"] and any("couldn't be identified" in n for n in p["notes"])
+
+
+def test_is_dual_reads_the_plan_flag():
+    from anotherr import actions
+
+    assert actions.is_dual({"kind": "set_default_audio", "payload": {"dual": True}})
+    assert not actions.is_dual({"kind": "set_default_subtitle", "payload": {"dual": False}})
+    assert not actions.is_dual({"kind": "set_default_audio", "payload": None})

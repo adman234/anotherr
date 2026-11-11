@@ -1,6 +1,7 @@
 """ffmpeg / ffprobe helpers."""
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
@@ -13,7 +14,7 @@ import time
 
 import numpy as np
 
-from . import langs
+from . import gpu, langs
 
 FFMPEG = os.environ.get("ANOTHERR_FFMPEG", "ffmpeg")
 FFPROBE = os.environ.get("ANOTHERR_FFPROBE", "ffprobe")
@@ -360,7 +361,8 @@ def decode_segment(path: str, start: float, dur: float, threads: int = 2, has_vi
             cmd += ["-map", f"0:a:{a}"]
     cmd += ["-sn", "-dn", "-f", "null", "-", "-progress", "pipe:1", "-nostats"]
     try:
-        p = run(cmd, timeout=max(300, dur * 20))
+        with (gpu.use() if use_hw else contextlib.nullcontext()):
+            p = run(cmd, timeout=max(300, dur * 20))
     except subprocess.TimeoutExpired:
         return {"start": start, "dur": dur, "decoded": 0.0, "errors": ["decode timed out"], "error_count": 1,
                 "timeout": True, "black": [], "freeze": [], "idet": None, "gpu": use_hw}
@@ -501,7 +503,8 @@ def full_decode(path: str, threads: int = 2, timeout: float = 4 * 3600, hw: str 
         cmd += ["-hwaccel", "cuda"]
     cmd += ["-i", path, "-map", "0:v:0?", "-map", "0:a?", "-f", "null", "-"]
     try:
-        p = run(cmd, timeout=timeout)
+        with (gpu.use() if use_hw else contextlib.nullcontext()):
+            p = run(cmd, timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"errors": ["full decode timed out"], "error_count": 1}
     errors, hw_lines = _split_errors(p.stderr)

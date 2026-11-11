@@ -46,6 +46,8 @@ DEFAULTS: dict = {
         "ffmpeg_threads": 0,     # 0 = let ffmpeg decide
         "child_memory_limit_mb": 3072,  # kill an ffmpeg/ffprobe that grows past this (0 = no limit)
         "max_audio_tracks": 4,
+        "gpu_slots": 2,            # GPU jobs (NVDEC decodes, Whisper calls) at once; each decode uses ~250 MB VRAM
+        "gpu_duty_percent": 100,   # rest after each GPU job so anotherr uses the GPU about this % of the time
         # a subtitle mismatch is rechecked at this many places through the file and kept only if most fail (0 = off)
         "subtitle_mismatch_windows": 3,
         # rescans of an unchanged file reuse the last scan's decode/audio/language/transcript results and rerun

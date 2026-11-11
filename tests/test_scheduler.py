@@ -41,7 +41,7 @@ def array(monkeypatch):
                          (iid, n, f"/tv/S/{disk}.mkv", disk, time.time()))
     scanned = []
 
-    def fake_scan(fid, profile=None, source="", seed=None, slot="", why=""):
+    def fake_scan(fid, profile=None, source="", seed=None, slot="", why="", full=False):
         scanned.append((slot, db.q1("SELECT disk FROM files WHERE id=?", (fid,))["disk"], why))
         db.x("UPDATE files SET last_scan_at=? WHERE id=?", (time.time(), fid))
         db.x("DELETE FROM queue WHERE file_id=?", (fid,))

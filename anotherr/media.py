@@ -222,6 +222,9 @@ def summarize(probe: dict) -> dict:
                         visual_impaired=bool(disp.get("visual_impaired")))
             audio.append(base)
         elif t == "subtitle":
+            if not base["lang"]:
+                # untagged track: some releases only name the language in the title ("English.Hearing.impaired")
+                base["lang"] = langs.from_title(base["title"])
             base.update(s_index=len(subs), hearing_impaired=bool(disp.get("hearing_impaired")),
                         text=base["codec"] in TEXT_SUB_CODECS, external=False,
                         frames=_tag_frames(s), tag_duration=_tag_duration(s))

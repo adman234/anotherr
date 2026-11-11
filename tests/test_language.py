@@ -78,3 +78,14 @@ def test_sibling_mislabel_downgrades_tag_only_error():
     codes = {i["code"]: i for i in c.issues}
     assert "original_audio_missing" not in codes
     assert codes["language_unconfirmed"]["details"]["sibling"]["label"] == "S09E01"
+
+
+def test_untagged_subtitle_language_from_title():
+    from anotherr import langs, media
+
+    assert langs.from_title("English-- ==== 300mbunited.me | rpnet.biz ====") == "eng"
+    assert langs.from_title("English.Hearing.impaired--site") == "eng"
+    assert langs.from_title("The Voyage - YIFY") == ""  # ordinary words are not language codes
+    info = media.summarize({"streams": [{"codec_type": "subtitle", "codec_name": "subrip", "index": 2,
+                                         "tags": {"title": "English.Foreign.parts.only"}}]})
+    assert info["subs"][0]["lang"] == "eng"

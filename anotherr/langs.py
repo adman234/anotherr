@@ -1,6 +1,8 @@
 """Language normalisation between Sonarr/Radarr names, ISO 639-1 (Whisper) and ISO 639-2 (stream tags)."""
 from __future__ import annotations
 
+import re
+
 # canonical 639-2 code, English name, 639-1 code, aliases
 _TABLE = [
     ("eng", "English", "en", ["english"]),
@@ -79,6 +81,16 @@ def norm(value: str | None) -> str:
     if base in _LOOKUP:
         return _LOOKUP[base]
     return v if len(v) == 3 and v.isalpha() else ""
+
+
+_BY_NAME = {n.lower(): c for c, n in NAMES.items()}
+
+
+def from_title(title: str | None) -> str:
+    """The language a track title starts with ('English.Hearing.impaired', 'English-- site.com'), for streams that
+    carry no language tag. Only a full language name counts, never a short code, so ordinary words don't match."""
+    m = re.match(r"\W*([A-Za-z]+)", title or "")
+    return _BY_NAME.get(m.group(1).lower(), "") if m else ""
 
 
 def name(code: str | None) -> str:

@@ -594,6 +594,7 @@ const HELP = {
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
   "scan.child_memory_limit_mb": "Kill an ffmpeg/ffprobe process that uses more than this much memory (MB, Linux only; 0 = no limit). The scan step is reported as an error instead of the container being OOM-killed.",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
+  "scan.subtitle_mismatch_windows": "Before reporting that subtitles don't match the audio, recheck this many places spread through the file (away from intros and credits). The mismatch is kept only if that many places could be judged and most of them fail. 0 = trust the scan windows alone.",
   "scan.quick_rescan": "Rescanning an unchanged file reuses the last scan's decoding, audio, language and transcript results and only reruns the checks, plus any slow step an open issue is about. A redownloaded or remuxed file always gets a full scan. Turn off to make every scan a full scan.",
   "scan.quick_rescan_max_days": "Do a full scan anyway once the reused results are this many days old (0 = never).",
   "subgen.url": "Your subgen container, e.g. http://192.168.1.10:9006. Empty = off. Anotherr sends it one file at a time and never has more than one job in flight.",

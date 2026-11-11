@@ -289,3 +289,43 @@ def test_positioned_only_dialogue_is_not_dropped():
     assert analysis.pick_dialogue([], short) == []
     karaoke = [analysis.clean_cue(1.0, 3.0, "Default", r"{\k20}la la la la la la la la", allow_pos=True)]
     assert karaoke == [None]
+
+
+def _recheck(monkeypatch, wrong_before: float, need: int = 3):
+    """Fake 1000 s file whose transcript only disagrees with the subtitles before `wrong_before` seconds."""
+    import types
+    import numpy as np
+    from anotherr import scanner as sc
+    cues = [(t, t + 2, f"line {t} dragon castle princess soldiers journey") for t in range(0, 1000, 3)]
+
+    def extract(path, idxs, s, d):
+        return {idxs[0]: np.array([s], dtype=np.float32)}
+
+    def transcribe(audio, language):
+        s = float(audio[0])
+        if s < wrong_before:
+            return [(0, 2, "weather report rain valleys northern winds temperatures expected tomorrow morning")]
+        return [(c[0] - s, c[1] - s, c[2]) for c in cues if s <= c[0] < s + 45]
+
+    monkeypatch.setattr(media, "extract_audio_multi", extract)
+    monkeypatch.setattr(stt.WHISPER, "transcribe", transcribe)
+    ctx = types.SimpleNamespace(info={"duration": 1000.0}, pcfg={"seconds": 45}, path="x", result={},
+                                step=lambda *_: None, cached=lambda kind, key, fn, track=None: fn())
+    a = {"name": "English", "cues": cues, "sync": {"verdict": "ok"}}
+    return sc._confirm_mismatch(ctx, a, 1, 1, "eng", need)
+
+
+def test_mismatch_recheck_overrules_a_single_bad_window(monkeypatch):
+    # only the opening is wrong (a rating card): every recheck place is past 10% of the file
+    conf = _recheck(monkeypatch, wrong_before=60)
+    assert conf["verdict"] == "ok" and conf["judged"] == 3 and conf["failed"] == 0, conf
+
+
+def test_mismatch_recheck_keeps_a_real_mismatch(monkeypatch):
+    conf = _recheck(monkeypatch, wrong_before=10_000)
+    assert conf["verdict"] == "mismatch" and conf["failed"] == 3, conf
+
+
+def test_mismatch_recheck_needs_most_places_to_fail(monkeypatch):
+    conf = _recheck(monkeypatch, wrong_before=500, need=4)  # places at 150/350 fail, 550/750 match
+    assert (conf["judged"], conf["failed"], conf["verdict"]) == (4, 2, "ok"), conf

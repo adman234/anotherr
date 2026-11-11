@@ -98,7 +98,7 @@ def refresh_item(item_id: int) -> dict:
         return {}
     groups: dict[tuple, list[dict]] = {}
     for f in db.q("SELECT * FROM files WHERE item_id=? AND missing=0", (item_id,)):
-        for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open' AND severity='warning' AND code IN (?, ?)",
+        for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open' AND severity IN ('warning','dual') AND code IN (?, ?)",
                       (f["id"], *ALLOW_FOR_CODE)):
             groups.setdefault((season_of(f), ALLOW_FOR_CODE[r["code"]]), []).append(f)
     existing = {}
@@ -137,7 +137,7 @@ def propose_for_file(file_id: int, allow: str | None = None) -> int | None:
     if not f:
         raise ValueError("file not found")
     if allow is None:
-        codes = {r["code"] for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open' AND severity='warning'",
+        codes = {r["code"] for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open' AND severity IN ('warning','dual')",
                                          (file_id,))}
         hits = [ALLOW_FOR_CODE[c] for c in ALLOW_FOR_CODE if c in codes]
         if not hits:
@@ -179,7 +179,7 @@ def accept(action_id: int) -> dict:
     resolved, files = 0, _season_files(item_id, season)
     for f in files:
         resolved += db.n("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open' "
-                         "AND severity='warning' AND code=?", (now, f["id"], code))
+                         "AND severity IN ('warning','dual') AND code=?", (now, f["id"], code))
         refresh_file_status(f["id"])
     for f in files:
         actions.reconcile(f["id"])  # redownloads raised only for this code lose their trigger
@@ -211,7 +211,7 @@ def open_gaps(item_id: int) -> list[str]:
     """The kinds of gap (original_only | english_only) that currently have an open warning on this item's files."""
     return sorted({ALLOW_FOR_CODE[r["code"]] for r in db.q(
         "SELECT DISTINCT i.code FROM issues i JOIN files f ON f.id=i.file_id WHERE f.item_id=? AND f.missing=0 "
-        "AND i.status='open' AND i.severity='warning' AND i.code IN (?, ?)", (item_id, *ALLOW_FOR_CODE))})
+        "AND i.status='open' AND i.severity IN ('warning','dual') AND i.code IN (?, ?)", (item_id, *ALLOW_FOR_CODE))})
 
 
 def accept_show(item_id: int, allow: str | None = None, note: str = "accepted the whole show as is") -> dict:
@@ -242,7 +242,7 @@ def accept_show(item_id: int, allow: str | None = None, note: str = "accepted th
     resolved = 0
     for f in files:
         resolved += db.n("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open' "
-                         "AND severity='warning' AND code=?", (now, f["id"], code))
+                         "AND severity IN ('warning','dual') AND code=?", (now, f["id"], code))
         refresh_file_status(f["id"])
     why = "Rejected: accepted the whole show as is"
     rejected = []

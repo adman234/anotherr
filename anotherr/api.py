@@ -203,6 +203,8 @@ def scan_timings(days: float = 7, profile: str = ""):
 def status():
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM files WHERE missing=0 GROUP BY status")}
     cfg = settings.get()
+    proposed = db.q("SELECT kind, codes, file_id FROM actions WHERE status='proposed'")
+    n_dual = sum(actions.is_dual({**r, "codes": db.unj(r["codes"], [])}) for r in proposed)
     return {
         "version": __version__,
         "build": os.environ.get("ANOTHERR_BUILD", "dev"),
@@ -224,9 +226,11 @@ def status():
         "memory": health.memory(),
         "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
-        "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open'"),
+        "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open' AND severity!='dual'"),
+        "open_dual_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open' AND severity='dual'"),
         "pending_reviews": db.scalar("SELECT COUNT(*) FROM reviews WHERE status='pending'"),
-        "proposed_actions": db.scalar("SELECT COUNT(*) FROM actions WHERE status='proposed'"),
+        "proposed_actions": len(proposed) - n_dual,
+        "proposed_dual_actions": n_dual,
         "subgen_configured": subgen.configured(),
         "automation": {"enabled": cfg["automation"]["enabled"], "active_now": actions.automation_active(cfg),
                        "today": actions.actions_today(), "max_per_day": cfg["automation"]["max_actions_per_day"]},
@@ -240,7 +244,7 @@ def coverage():
     def grp(expr: str):
         return db.q(f"""SELECT {expr} AS name, COUNT(*) total,
             SUM(f.last_scan_at IS NOT NULL) scanned, SUM(f.status='ok') ok, SUM(f.status IN ('info','warning')) warn,
-            SUM(f.status IN ('error','critical','failed')) bad
+            SUM(f.status='dual') dual, SUM(f.status IN ('error','critical','failed')) bad
             FROM files f JOIN items i ON i.id=f.item_id WHERE f.missing=0 GROUP BY 1 ORDER BY 1""")
     return {
         "libraries": grp("CASE WHEN i.is_anime=1 THEN 'Anime (' || i.source || ')' WHEN i.source='sonarr' THEN 'TV' ELSE 'Movies' END"),
@@ -280,7 +284,7 @@ def items(search: str = "", source: str = "", anime: int | None = None, status: 
     elif status == "unscanned":
         having = "HAVING scanned < files"
     base = f"""SELECT i.*, COUNT(f.id) files, SUM(f.last_scan_at IS NOT NULL) scanned,
-        SUM(f.status IN ('error','critical','failed')) bad, SUM(f.status IN ('warning')) warn
+        SUM(f.status IN ('error','critical','failed')) bad, SUM(f.status IN ('warning')) warn, SUM(f.status='dual') dual
         FROM items i LEFT JOIN files f ON f.item_id=i.id AND f.missing=0 WHERE {' AND '.join(where)}
         GROUP BY i.id {having}"""
     return page(base, args, page_no, min(per_page, 500), "title COLLATE NOCASE")
@@ -568,9 +572,12 @@ ISSUE_SQL = """SELECT x.*, i.title, f.label, f.disk, f.episodes AS file_episodes
 
 @app.get("/api/issues", dependencies=[Depends(auth)])
 def issues(status: str = "open", severity: str = "", code: str = "", category: str = "", search: str = "",
-           page_no: int = Query(1, alias="page"), per_page: int = 100, group: bool = False):
-    """group=true folds issues of the same code for the same series + season into one row (paged by group)."""
+           page_no: int = Query(1, alias="page"), per_page: int = 100, group: bool = False, dual: str = ""):
+    """group=true folds issues of the same code for the same series + season into one row (paged by group).
+    dual=only keeps the blue dual-audio issues (the Dual audio tab); dual=exclude drops them (the Issues tab)."""
     sql, args = ISSUE_SQL, []
+    dual_sql = {"only": " AND x.severity='dual'", "exclude": " AND x.severity!='dual'"}.get(dual, "")
+    sql += dual_sql
     for col, val in (("x.status", status), ("x.severity", severity), ("x.code", code), ("x.category", category)):
         if val:
             vals = val.split(",")
@@ -579,7 +586,7 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
     if search:
         sql += " AND (i.title LIKE ? OR x.message LIKE ?)"
         args += [f"%{search}%"] * 2
-    order = "CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END, id DESC"
+    order = "CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 WHEN 'dual' THEN 3 ELSE 4 END, id DESC"
     if group:
         res = _grouped_issues(db.q(f"{sql} ORDER BY {order}", args), page_no, min(per_page, 500))
     else:
@@ -593,12 +600,13 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
             hit = {fixes[(f, r["code"])] for f in files if (f, r["code"]) in fixes}
             r["fix_actions"] = sorted(hit)
             r["fix_missing"] = [f for f in files if (f, r["code"]) not in fixes]
-    res["codes"] = db.q("SELECT x.code, x.severity, COUNT(*) n FROM issues x JOIN files f ON f.id=x.file_id "
-                        "WHERE x.status='open' AND f.missing=0 GROUP BY x.code, x.severity ORDER BY n DESC")
+    res["codes"] = db.q(f"SELECT x.code, x.severity, COUNT(*) n FROM issues x JOIN files f ON f.id=x.file_id "
+                        f"WHERE x.status='open' AND f.missing=0{dual_sql} GROUP BY x.code, x.severity ORDER BY n DESC")
     return res
 
 
 TRACK_FIX_CODES = {"default_audio_not_preferred": ("set_default_audio",),
+                   "default_subs_foreign": ("set_default_audio", "set_default_subtitle"),
                    "default_subs_signs": ("set_default_audio", "set_default_subtitle"),  # combined proposals
                    "audio_untagged": ("retag_audio",), "audio_mislabeled": ("retag_audio",)}
 
@@ -612,7 +620,7 @@ def _proposed_track_fixes() -> dict[tuple[int, str], int]:
             for code, kinds in TRACK_FIX_CODES.items():
                 if a["kind"] not in kinds:
                     continue
-                if code == "default_subs_signs" and not e.get("sub"):
+                if code in ("default_subs_signs", "default_subs_foreign") and not e.get("sub"):
                     continue
                 if code == "default_audio_not_preferred" and not e.get("audio"):
                     continue
@@ -834,8 +842,12 @@ def _action_rows(status: str, limit: int) -> list[dict]:
 
 
 @app.get("/api/actions", dependencies=[Depends(auth)])
-def actions_list(status: str = "proposed", limit: int = 200):
-    return _action_rows(status, limit)
+def actions_list(status: str = "proposed", limit: int = 200, dual: str = ""):
+    """dual=only: the Dual actions tab; dual=exclude: the main Actions tab."""
+    rows = _action_rows(status, limit)
+    if dual in ("only", "exclude"):
+        rows = [r for r in rows if actions.is_dual(r) == (dual == "only")]
+    return rows
 
 
 @app.post("/api/actions/choose", dependencies=[Depends(auth)])

@@ -253,6 +253,7 @@ def run_pipeline(ctx: Ctx):
         check_audio(ctx)
         check_language(ctx)
     check_subtitles(ctx)
+    check_dual_audio(ctx)
     check_multi_episode(ctx)
     queue_reviews(ctx, rng)
     consolidate(ctx)
@@ -765,29 +766,54 @@ def check_language(ctx: Ctx):
                       f"same kind of tag and is confirmed {langs.name(exp)} - probably mislabeled too. Not raised as "
                       "missing until speech confirms it.", sibling=sib)
         elif english:
-            # English only. Fine unless the original language was requested; a season exception can accept that.
+            # English only: a dual-audio gap (blue). An unidentified track could be the original, so that case is
+            # dual_track_unlabeled instead; a season exception can accept the gap.
             e_only = True
-            if request == "original" and not audio_request.allows(ctx.item.get("id"), season, "english_only"):
-                ctx.issue("language", "original_audio_missing", "warning",
-                          f"No {langs.name(exp)} audio ({what} language), and it was requested. "
-                          f"Found: {', '.join(found) or 'unknown'}.", expected=exp, found=found, request=request)
+            if not unsure and not audio_request.allows(ctx.item.get("id"), season, "english_only"):
+                asked = request == "original"
+                ctx.issue("language", "original_audio_missing", "dual",
+                          f"Only English audio: no {langs.name(exp)} audio ({what} language)"
+                          f"{', and it was requested' if asked else ''}. Found: {', '.join(found) or 'unknown'}.",
+                          expected=exp, found=found, request=request, requested=asked)
         else:
             ctx.issue("language", "original_audio_missing", "error",
                       f"No {langs.name(exp)} audio ({what} language). Found: {', '.join(found) or 'unknown'}.",
                       expected=exp, found=found)
         ctx.orig_track = next((t["a_index"] for t in tracks if t["default"]), tracks[0]["a_index"])
         ctx.result["orig_track_confirmed"] = False  # a stand-in, not a confirmed original-language track
-    if (orig or overridden_orig) and request == "english" and not exp_is_english and not english             and all(t["effective"] for t in tracks):
-        # original audio but no English track, and English was requested; a season exception can accept that
+    if (orig or overridden_orig) and not exp_is_english and not english and all(t["effective"] for t in tracks):
+        # original audio only: a dual-audio gap (blue); a season exception can accept that
         if not audio_request.allows(ctx.item.get("id"), season, "original_only"):
+            asked = request == "english"
             found = sorted({langs.name(t["effective"]) for t in tracks if t["effective"]})
-            ctx.issue("language", "english_audio_missing", "warning",
-                      f"No English audio, and it was requested. Found: {', '.join(found) or 'unknown'}.",
-                      found=found, request=request)
+            ctx.issue("language", "english_audio_missing", "dual",
+                      f"Only {langs.name(exp)} audio: no English dub{', and English was requested' if asked else ''}. "
+                      f"Found: {', '.join(found) or 'unknown'}.", found=found, request=request, requested=asked)
+
     # players fall back to the first audio track when nothing is flagged default
     any_flag = any(a["default"] for a in ctx.info["audio"])
     default = next((t for t in tracks if t["default"]), None) if any_flag else ctx.tracks.get(0)
-    if orig and default and not lang_match(default["effective"], exp):
+    ctx.result["default_audio_lang"] = (default or {}).get("effective", "")
+    ctx.result["has_orig_audio"] = bool(orig)
+    # An English dub as the default is fine when the original is also there, unless the original (or an override
+    # language) was asked for. Only a default in neither language is always wrong.
+    eng_default_ok = (bool(default) and lang_match(default["effective"], "eng") and request != "original"
+                      and not ctx.item.get("language_override"))
+    if any_flag:
+        dstream = next((a for a in ctx.info["audio"] if a["default"]), None)
+    else:
+        dstream = ctx.info["audio"][0] if ctx.info["audio"] else None
+    if dstream and dstream.get("commentary") and tracks:
+        from . import defaults
+
+        view = _track_view(ctx)
+        pref = exp if orig else "eng" if english else ""
+        tgt = defaults.pick_audio(view, pref) if pref else None
+        ctx.issue("language", "default_audio_not_preferred", "warning",
+                  f"Default audio track {dstream['a_index'] + 1} is a commentary track."
+                  + (f" Fix available: make track {tgt['a_index'] + 1} ({langs.name(pref)}) the default." if tgt else ""),
+                  fix_available=bool(tgt), target_track=tgt["a_index"] + 1 if tgt else None, commentary=True)
+    elif orig and default and not lang_match(default["effective"], exp) and not eng_default_ok:
         from . import defaults
 
         view = _track_view(ctx)
@@ -809,6 +835,57 @@ def check_language(ctx: Ctx):
     if ctx.item.get("is_anime") and ctx.cfg["anime"]["prefer_dual_audio"] and not lang_match(exp, dub):
         # dual audio is now expressed by the request (english); no_dub is retired
         ctx.result["dual_audio"] = bool(orig) and any(lang_match(t["effective"], dub) for t in tracks)
+    if exp_is_english:
+        return
+    # ---- dual-audio checks (blue): an unidentified track, or a dub from a different cut
+    if len(tracks) >= 2 and any(not t["effective"] for t in tracks) and any(t["effective"] for t in tracks):
+        # (all tracks unidentified is language_unconfirmed instead)
+        unk = [t["a_index"] + 1 for t in tracks if not t["effective"]]
+        ctx.issue("language", "dual_track_unlabeled", "dual",
+                  f"Audio track {', '.join(f'#{i}' for i in unk)} has no language tag and its speech could not be "
+                  f"identified, so it could be the {langs.name(exp)} original or the English dub. Not counted as "
+                  "missing until it is confirmed.", tracks=unk)
+    if orig and english:
+        ends = {a.get("a_index", i): a.get("end") for i, a in enumerate(ctx.info["audio"])}
+        o, e = ends.get(orig[0]["a_index"]), ends.get(english[0]["a_index"])
+        dur = ctx.info.get("duration") or 0
+        if o and e and abs(o - e) > max(60, 0.03 * dur):
+            ctx.issue("language", "dual_track_length_mismatch", "dual",
+                      f"The {langs.name(exp)} track ({o / 60:.1f} min) and the English track ({e / 60:.1f} min) differ "
+                      f"by {abs(o - e) / 60:.1f} min - the dub probably comes from a different cut and may drift out "
+                      "of sync.", orig_track=orig[0]["a_index"] + 1, english_track=english[0]["a_index"] + 1,
+                      orig_end=round(o, 1), english_end=round(e, 1))
+
+
+def check_dual_audio(ctx: Ctx):
+    """Subtitle side of dual audio: a foreign default subtitle (yellow), and an English dub playing by default with
+    no forced/signs English track for the foreign-language bits (blue)."""
+    sub_lang = langs.norm(ctx.cfg["languages"]["subtitle_language"]) or "eng"
+    exp = ctx.expected or ""
+    subs = ctx.info.get("subs") or []
+    foreign = [s for s in subs if not s.get("external") and s.get("default") and langs.norm(s.get("lang"))
+               and not lang_match(s["lang"], sub_lang) and not (exp and lang_match(s["lang"], exp))]
+    if foreign:
+        f = foreign[0]
+        ctx.issue("subtitles", "default_subs_foreign", "warning",
+                  f"The default subtitle track s{f['s_index'] + 1} is {langs.name(f['lang'])}, which is neither "
+                  f"{langs.name(sub_lang)} nor the original language. Fix available: clear or move the default.",
+                  fix_available=True, track=f["s_index"] + 1, lang=f["lang"])
+    if not exp or lang_match(exp, "eng") or not lang_match(sub_lang, "eng"):
+        return
+    if not ctx.result.get("has_orig_audio") or not lang_match(ctx.result.get("default_audio_lang") or "", "eng"):
+        return
+    signs = {t.get("s_index") for t in ctx.result.get("subtitle_tracks") or [] if t.get("kind") == "signs"}
+    for s in subs:
+        if not lang_match(s.get("lang"), "eng"):
+            continue
+        label = analysis.sidecar_label(s["title"], ctx.path) if s.get("external") else (s.get("title") or "")
+        if (s.get("forced") or (s.get("s_index") is not None and s["s_index"] in signs)
+                or analysis.signs_by_label(label, s.get("forced"))):
+            return
+    ctx.issue("subtitles", "dual_no_forced_subs", "dual",
+              f"The English dub plays by default, but there is no forced or signs English subtitle track, so on-screen "
+              f"text and any untranslated {langs.name(exp)} lines will show without subtitles.")
 
 
 # ====================================================================== subtitles
@@ -1290,7 +1367,10 @@ def _audio_evidence(ctx: Ctx) -> str | None:
     if not audio or not ctx.tracks:
         return None
     return db.j({"scan_started": ctx.live.get("started_at") or time.time(), "container": ctx.info.get("format", ""),
-                 "tracks": _track_view(ctx), "subs": ctx.result.get("subtitle_tracks") or []})
+                 "tracks": _track_view(ctx), "subs": ctx.result.get("subtitle_tracks") or [],
+                 "subs_all": [{"s_index": s.get("s_index"), "lang": s.get("lang", ""), "default": bool(s.get("default")),
+                               "forced": bool(s.get("forced"))}
+                              for s in (ctx.info.get("subs") or []) if not s.get("external")]})
 
 
 def _track_view(ctx: Ctx) -> list[dict]:

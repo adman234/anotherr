@@ -1,6 +1,6 @@
 :root {
   --bg: #15171c; --panel: #1e2128; --panel2: #262a33; --line: #323743; --text: #e3e6ec; --dim: #9098a8;
-  --accent: #f0a73a; --accent2: #3aa0f0; --ok: #3fb96b; --info: #5b9bd5; --warning: #e8b440; --error: #e5603e;
+  --accent: #f0a73a; --accent2: #3aa0f0; --ok: #3fb96b; --info: #5b9bd5; --warning: #e8b440; --dual: #3b5bdb; --error: #e5603e;
   --critical: #d23a6a;
 }
 * { box-sizing: border-box; }
@@ -33,6 +33,7 @@ th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line
 th { background: var(--panel2); color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; }
 tr:hover td { background: #222630; }
 .sev, .st { display: inline-block; border-radius: 4px; padding: 1px 7px; font-size: 11px; font-weight: 700; text-transform: uppercase; color: #111; background: var(--dim); }
+.s-dual { background: var(--dual); color: #fff; } #nav b.dual:not(:empty) { background: var(--dual); color: #fff; }
 .s-ok { background: var(--ok); } .s-info { background: var(--info); } .s-warning { background: var(--warning); }
 .s-error { background: var(--error); } .s-critical, .s-failed { background: var(--critical); color: #fff; }
 .s-unscanned { background: #555c6a; color: #ddd; }

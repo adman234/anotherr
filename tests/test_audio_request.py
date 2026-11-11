@@ -46,16 +46,17 @@ O, E, N = ("jpn", True), ("eng", False), ("ger", False)  # original, English, ne
 
 # ---------------------------------------------------------------- the rules table (original language = Japanese)
 
-CASES = {  # (request, tracks) -> expected audio-language issue codes
-    ("", "O+E"): set(), ("", "O"): set(), ("", "E"): set(), ("", "neither"): {"original_audio_missing"},
-    ("original", "O+E"): set(), ("original", "O"): set(), ("original", "E"): {"original_audio_missing"},
+CASES = {  # (request, tracks) -> expected audio-language issue codes. A single-language file is always a dual gap
+    ("", "O+E"): set(), ("", "O"): {"english_audio_missing"}, ("", "E"): {"original_audio_missing"},
+    ("", "neither"): {"original_audio_missing"},
+    ("original", "O+E"): set(), ("original", "O"): {"english_audio_missing"}, ("original", "E"): {"original_audio_missing"},
     ("original", "neither"): {"original_audio_missing"},
-    ("english", "O+E"): set(), ("english", "O"): {"english_audio_missing"}, ("english", "E"): set(),
+    ("english", "O+E"): set(), ("english", "O"): {"english_audio_missing"}, ("english", "E"): {"original_audio_missing"},
     ("english", "neither"): {"original_audio_missing"},
 }
 TRACKS = {"O+E": [O, ("eng", False)], "O": [O], "E": [("eng", True)], "neither": [("ger", True)]}
-SEVERITY = {("original", "E"): "warning", ("english", "O"): "warning", ("", "neither"): "error",
-            ("original", "neither"): "error", ("english", "neither"): "error"}
+SEVERITY = {k: "error" if k[1] == "neither" else "dual" for k in CASES}
+REQUESTED = {("original", "E"), ("english", "O")}  # the gap goes against the request: those may be redownloaded
 
 
 @pytest.mark.parametrize("request_,tracks", sorted(CASES))
@@ -65,6 +66,8 @@ def test_rules_table_cell(request_, tracks):
     assert got == CASES[(request_, tracks)]
     for c in got:
         assert codes[c]["severity"] == SEVERITY[(request_, tracks)]
+        if codes[c]["severity"] == "dual":
+            assert codes[c]["details"]["requested"] is ((request_, tracks) in REQUESTED)
 
 
 def test_english_original_show_is_never_missing_english():
@@ -101,11 +104,18 @@ def test_no_dub_is_retired():
 
 # ---------------------------------------------------------------- default track
 
-def test_default_track_must_be_original_when_it_exists():
+def test_english_default_is_fine_unless_the_original_was_requested():
+    for req in ("", "english"):
+        assert "default_audio_not_preferred" not in _check(_item(req), [("eng", True), ("jpn", False)]), req
+    codes = _check(_item("original"), [("eng", True), ("jpn", False)])
+    assert codes["default_audio_not_preferred"]["details"]["target_track"] == 2
+
+
+def test_default_in_neither_language_is_yellow():
     for req in ("", "original", "english"):
-        codes = _check(_item(req), [("eng", True), ("jpn", False)])
-        assert "default_audio_not_preferred" in codes, req
-        assert codes["default_audio_not_preferred"]["details"]["target_track"] == 2
+        codes = _check(_item(req), [("ger", True), ("jpn", False), ("eng", False)])
+        d = codes["default_audio_not_preferred"]
+        assert d["severity"] == "warning" and d["details"]["target_track"] == 2, req
 
 
 def test_english_is_default_when_there_is_no_original():
@@ -157,9 +167,10 @@ def test_override_beats_profile():
 
 
 def test_override_changes_the_verdict():
-    assert "english_audio_missing" not in _check(_item("original"), TRACKS["O"])
-    assert "english_audio_missing" in _check(_item("original", "english"), TRACKS["O"])
-    assert "english_audio_missing" not in _check(_item("english", "either"), TRACKS["O"])
+    req = lambda item: _check(item, TRACKS["O"])["english_audio_missing"]["details"]["requested"]  # noqa: E731
+    assert not req(_item("original"))
+    assert req(_item("original", "english"))
+    assert not req(_item("english", "either"))
 
 
 # ---------------------------------------------------------------- sync stores the profile + request
@@ -287,7 +298,7 @@ def test_exception_never_suppresses_the_neither_error_or_default_track_issues():
         _add_exception(iid, 1, allow)
     codes = _scan(files[(1, 1)], [("ger", True)], store=False)
     assert codes["original_audio_missing"]["severity"] == "error"
-    codes = _scan(files[(1, 1)], [("eng", True), ("jpn", False)], store=False)  # original exists but is not the default
+    codes = _scan(files[(1, 1)], [("ger", True), ("jpn", False)], store=False)  # default is neither language
     assert "default_audio_not_preferred" in codes
     codes = _scan(files[(1, 1)], [("ger", True), ("eng", False)], store=False)  # no original: English should be default
     assert "default_audio_not_preferred" in codes

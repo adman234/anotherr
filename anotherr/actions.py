@@ -385,6 +385,57 @@ def approve_many(ids: list[int]) -> dict:
     return {"ok": bool(claimed), "queued": len(claimed), "skipped": len(ids) - len(claimed)}
 
 
+def english_retag_ids(min_conf: float | None = None) -> list[int]:
+    """Proposed retag_audio batches where every file is being tagged English (untagged or wrong tag) with confidence
+    above `min_conf` (default settings retag.bulk_min_confidence) and nothing flagged for review or mismatch."""
+    from . import settings
+
+    if min_conf is None:
+        min_conf = float(settings.get()["retag"].get("bulk_min_confidence", 0.95))
+    out = []
+    for a in db.q("SELECT id, payload FROM actions WHERE kind='retag_audio' AND status='proposed'"):
+        files = (db.unj(a["payload"], {}) or {}).get("files") or []
+        if files and all(f.get("new") == "eng" and (f.get("conf") or 0) > min_conf and not f.get("review")
+                         and not f.get("mismatch") for f in files):
+            out.append(a["id"])
+    return out
+
+
+def subs_out_of_sync_ids() -> list[int]:
+    """Proposed resub actions raised for out-of-sync subtitles (not the 'nothing useful' ones)."""
+    out = []
+    for a in db.q("SELECT id, codes, reason FROM actions WHERE kind='resub' AND status='proposed'"):
+        if "subs_out_of_sync" in (db.unj(a["codes"], []) or []) and "nothing useful" not in (a["reason"] or ""):
+            out.append(a["id"])
+    return out
+
+
+def approve_english_retags(min_conf: float | None = None) -> dict:
+    """Queue every qualifying English retag; they run one after another in the background."""
+    import threading
+
+    from . import settings, trackedit
+
+    if not settings.get()["retag"].get("enabled"):
+        return {"ok": False, "error": "track editing is turned off in Settings -> Retag audio", "queued": 0}
+    claimed = [i for i in english_retag_ids(min_conf) if db.n(
+        "UPDATE actions SET status='running', result='queued', updated_at=? WHERE id=? AND status='proposed'",
+        (time.time(), i))]
+
+    def go():
+        for i in claimed:
+            try:
+                trackedit.run(i)
+            except Exception as e:  # noqa: BLE001
+                db.x("UPDATE actions SET status='failed', result=?, updated_at=? WHERE id=? AND status='running'",
+                     (f"crashed: {e}", time.time(), i))
+        db.log(f"Bulk English retag: {len(claimed)} action(s) processed")
+
+    if claimed:
+        threading.Thread(target=go, name="anotherr-bulk-retag", daemon=True).start()
+    return {"ok": True, "queued": len(claimed)}
+
+
 def _run_queued(ids: list[int]) -> None:
     ok = failed = 0
     for i in ids:

@@ -12,7 +12,7 @@ MAX_OFFSET = 12.0
 
 _SIGN_STYLE = re.compile(r"sign|song|op\b|ed\b|opening|ending|title|karaoke|kfx|lyric|insert|note|typeset|ts\b", re.I)
 _TAGS = re.compile(r"\{[^}]*\}")
-_POS = re.compile(r"\\(pos|move|org|clip|k|kf|ko|K)\b|\\p[1-9]")
+_POS = re.compile(r"\\(pos|move|org|clip|kf|ko|k|K)(?![a-zA-Z])|\\p[1-9]")
 
 
 @dataclass
@@ -30,7 +30,7 @@ def dialogue_cues(subs_text: str) -> tuple[list[Cue], int]:
         sf = pysubs2.SSAFile.from_string(subs_text)
     except Exception:
         return [], 0
-    cues, total = [], 0
+    cues, loose, total = [], [], 0
     for ev in sf.events:
         if ev.is_comment:
             continue
@@ -38,31 +38,75 @@ def dialogue_cues(subs_text: str) -> tuple[list[Cue], int]:
         c = clean_cue(ev.start / 1000.0, ev.end / 1000.0, ev.style or "", ev.text or "")
         if c:
             cues.append(c)
+        c2 = clean_cue(ev.start / 1000.0, ev.end / 1000.0, ev.style or "", ev.text or "", allow_pos=True)
+        if c2:
+            loose.append(c2)
+    cues = pick_dialogue(cues, loose)
     return cues, total
 
 
-def clean_cue(start: float, end: float, style: str, text: str) -> Cue | None:
-    """A dialogue cue, or None for signs/typesetting/karaoke and junk."""
+_POS_ONLY = re.compile(r"\\(pos|move)\b")
+_POS_STRICT = re.compile(r"\\(org|clip|kf|ko|k|K)(?![a-zA-Z])|\\p[1-9]")
+
+
+def clean_cue(start: float, end: float, style: str, text: str, allow_pos: bool = False) -> Cue | None:
+    """A dialogue cue, or None for signs/typesetting/karaoke and junk.
+
+    `allow_pos` keeps cues that are only positioned (\\pos/\\move), see `pick_dialogue`."""
     if end - start < 0.2 or end - start > 15:
         return None
-    if _SIGN_STYLE.search(style or "") or _POS.search(text or ""):
+    if _SIGN_STYLE.search(style or ""):
+        return None
+    if allow_pos:
+        if _POS_STRICT.search(text or ""):
+            return None
+    elif _POS.search(text or ""):
         return None
     text = _TAGS.sub("", text or "").replace("\\N", " ").replace("\\n", " ").replace("<i>", "").replace("</i>", "").strip()
     return Cue(start, end, text) if text else None
 
 
+def pick_dialogue(strict: list, loose: list) -> list:
+    """Cues with \\pos/\\move rejected (`strict`) vs allowed (`loose`). Tools that convert SRT to ASS stamp \\pos on
+    every dialogue line, which made a full track look empty; real signs are short. When nearly everything was
+    rejected only for positioning and the lines read like sentences (median >= 15 chars), use `loose`."""
+    if len(loose) >= 5 and len(strict) < 0.2 * len(loose):
+        lens = sorted(len(c[2] if isinstance(c, tuple) else c.text) for c in loose)
+        if lens[len(lens) // 2] >= 15:
+            return loose
+    return strict
+
+
+_SIGNS_WORDS = ("sign", "song", "forced", "s&s")
+_FULL_TITLE = re.compile(r"\b(sdh|cc|full|dialog\w*)\b")
+
+
+def signs_by_label(label: str, forced: bool) -> bool:
+    """True when the track's title or flag says signs/songs/forced. A title that says full/dialog/SDH beats the
+    forced flag (release groups often set it on the full track), but never beats sign/song words."""
+    t = (label or "").lower()
+    if any(w in t for w in _SIGNS_WORDS):
+        return True
+    return bool(forced) and not _FULL_TITLE.search(t)
+
+
+def sidecar_label(name: str, video_path: str) -> str:
+    """The part of a sidecar's file name that is not the video's name ('... Work Song ....en.srt' -> '.en.srt'), so
+    words in the episode title ('Same Old Song and Dance') are not read as 'song'."""
+    import os
+    stem = os.path.splitext(os.path.basename(video_path or ""))[0]
+    n = name or ""
+    return n[len(stem):] if stem and n.lower().startswith(stem.lower()) else n
+
+
 def classify_track(cue_count: int, duration_s: float, title: str, forced: bool, min_per_min: float) -> str:
     """full | signs | empty"""
-    t = (title or "").lower()
-    if forced or any(w in t for w in ("sign", "song", "forced", "s&s")):
+    if signs_by_label(title, forced):
         return "signs"
     if cue_count == 0:
         return "empty"
     per_min = cue_count / max(duration_s / 60.0, 1.0)
     return "full" if per_min >= min_per_min else "signs"
-
-
-_FULL_TITLE = re.compile(r"\b(sdh|cc|full|dialog\w*)\b")
 
 
 def classify_embedded(frames: int | None, file_s: float, title: str, forced: bool, min_per_min: float,
@@ -75,7 +119,7 @@ def classify_embedded(frames: int | None, file_s: float, title: str, forced: boo
     (`window_packets` is the total over every track); a read that found none failed -> unknown.
     """
     t = (title or "").lower()
-    if forced or any(w in t for w in ("sign", "song", "forced", "s&s")):
+    if signs_by_label(title, forced):
         return "signs", "window", window_cues, round(window_cues / max(window_s / 60.0, 1.0), 1)
     if frames is not None:
         per_min = frames / max(file_s / 60.0, 1.0)

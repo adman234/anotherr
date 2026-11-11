@@ -86,3 +86,24 @@ def test_one_automatic_action_per_series_per_day(monkeypatch):
         actions._propose(fid, "resub", "x", ["subs_missing"])
     actions.maybe_auto()
     assert len(calls) == 1
+
+
+def test_bulk_english_retag_and_out_of_sync_selection():
+    fid = _file()
+    now = time.time()
+
+    def retag(files):
+        db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) "
+             "VALUES (?, 'retag_audio', 'proposed', ?, ?, ?)", (fid, json.dumps({"files": files}), now, now))
+
+    retag([{"file_id": fid, "new": "eng", "conf": 0.99}])                      # qualifies
+    retag([{"file_id": fid, "new": "eng", "conf": 0.9}])                       # below 0.95
+    retag([{"file_id": fid, "new": "jpn", "conf": 0.99}])                      # not English
+    retag([{"file_id": fid, "new": "eng", "conf": 0.99, "review": True}])      # flagged
+    assert len(actions.english_retag_ids()) == 1
+    assert len(actions.english_retag_ids(0.85)) == 2
+    db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "
+         "VALUES (?, 'resub', 'proposed', '[\"subs_out_of_sync\"]', 'x', ?, ?)", (fid, now, now))
+    db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "
+         "VALUES (?, 'resub', 'proposed', '[\"subs_missing\"]', 'x', ?, ?)", (fid, now, now))
+    assert len(actions.subs_out_of_sync_ids()) == 1

@@ -145,7 +145,7 @@ def test_truncated_file(video, fake_whisper, tmp_path):
     assert codes & {"truncated", "decode_errors_severe", "stream_duration_mismatch", "unreadable"}, codes
 
 
-def test_review_queued_for_multi_episode(video, fake_whisper):
+def test_no_title_card_review_for_multi_episode(video, fake_whisper):
     _small_profiles()
     fid = _add(video)
     db.x("UPDATE files SET episodes=? WHERE id=?",
@@ -153,9 +153,7 @@ def test_review_queued_for_multi_episode(video, fake_whisper):
           ' {"id": 12, "season": 1, "episode": 2, "title": "B", "runtime": 1}]', fid))
     res = scanner.scan_file(fid, "standard")
     assert res["status"] == "done", res.get("error")
-    rv = db.q("SELECT kind, timestamps FROM reviews WHERE file_id=?", (fid,))
-    assert rv and rv[0]["kind"] == "title_cards"
-    assert len(db.unj(rv[0]["timestamps"])) >= 4
+    assert not db.q("SELECT 1 FROM reviews WHERE file_id=? AND kind='title_cards'", (fid,))
 
 
 def test_automation_runs_when_enabled(video, fake_whisper, monkeypatch):

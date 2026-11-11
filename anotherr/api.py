@@ -865,6 +865,22 @@ def actions_bulk(body: dict = Body(...)):
     raise HTTPException(400, "op must be approve | reject")
 
 
+@app.get("/api/actions/bulk-preview", dependencies=[Depends(auth)])
+def actions_bulk_preview():
+    return {"english_retags": len(actions.english_retag_ids()), "out_of_sync_resubs": len(actions.subs_out_of_sync_ids()),
+            "min_confidence": settings.get()["retag"].get("bulk_min_confidence", 0.95)}
+
+
+@app.post("/api/actions/bulk-english-retag", dependencies=[Depends(auth)])
+def actions_bulk_english():
+    return actions.approve_english_retags()
+
+
+@app.post("/api/actions/bulk-out-of-sync", dependencies=[Depends(auth)])
+def actions_bulk_out_of_sync():
+    return actions.approve_many(actions.subs_out_of_sync_ids())
+
+
 @app.post("/api/actions", dependencies=[Depends(auth)])
 def action_create(body: dict = Body(...)):
     """Manual proposal: kind resub | redownload | whisper_subtitle, optionally for one issue (issue_id)."""

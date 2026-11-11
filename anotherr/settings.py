@@ -46,6 +46,8 @@ DEFAULTS: dict = {
         "ffmpeg_threads": 0,     # 0 = let ffmpeg decide
         "child_memory_limit_mb": 3072,  # kill an ffmpeg/ffprobe that grows past this (0 = no limit)
         "max_audio_tracks": 4,
+        # a subtitle mismatch is rechecked at this many places through the file and kept only if most fail (0 = off)
+        "subtitle_mismatch_windows": 3,
         # rescans of an unchanged file reuse the last scan's decode/audio/language/transcript results and rerun
         # only the cheap verdicts (plus any slow step an open issue depends on); off = every scan is a full scan
         "quick_rescan": True,

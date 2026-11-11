@@ -818,6 +818,65 @@ def _track_audio(ctx: Ctx, ai: int, si: int):
     return ctx.audio[(ai, si)]
 
 
+SUB_CONFIRM_MARGIN = 15.0  # seconds of subtitle text either side of a window (absorbs small offsets)
+
+
+def _confirm_mismatch(ctx: Ctx, a: dict, text_ai: int | None, sync_ai: int | None, sub_lang: str,
+                      need: int) -> dict:
+    """Recheck a subtitle 'mismatch' at `need` places spread through the file (10%-90%, away from
+    intros, rating cards and credits). The scan windows alone are often a single 45 s sample, so the
+    mismatch is kept only when at least `need` places could be judged and most of them fail too.
+
+    Text is compared when the subtitle-language audio exists and the track is text; otherwise timing."""
+    dur, secs = float(ctx.info.get("duration") or 0), float(ctx.pcfg["seconds"])
+    shift = a["sync"]["offset"] if a["sync"].get("verdict") == "offset" else 0.0
+    n_cand = need * 2
+    cands = [dur * (0.1 + 0.8 * (i + 0.5) / n_cand) for i in range(n_cand)]
+    cands = [s for s in cands[::2] + cands[1::2] if s + secs <= dur]  # first `need` tries spread out
+    places = []
+    for start in cands:
+        if sum(1 for p in places if p["verdict"] != "unknown") >= need:
+            break
+        key = _seg_key([(start, secs)])
+        place = {"start": round(start, 1), "verdict": "unknown"}
+        places.append(place)
+
+        def audio(ai, start=start):
+            ctx.step(f"subtitle mismatch recheck {len(places)}")
+            got = media.extract_audio_multi(ctx.path, [ai], start, secs).get(ai)
+            return got if got is not None else np.zeros(0, dtype=np.float32)
+
+        try:
+            if text_ai is not None:
+                said = ctx.cached("transcribe", f"{text_ai}:{key}:{sub_lang}",
+                                  lambda: stt.WHISPER.transcribe(audio(text_ai), langs.iso1(sub_lang)))
+                lo, hi = start - SUB_CONFIRM_MARGIN, start + secs + SUB_CONFIRM_MARGIN
+                subs = " ".join(c[2] for c in a["cues"] if c[1] - shift > lo and c[0] - shift < hi)
+                ov = analysis.text_overlap(" ".join(x[2] for x in said), subs)
+                place["recall"] = ov["recall"]
+                if ov["recall"] is not None:
+                    place["verdict"] = analysis.track_verdict("ok", ov["recall"])
+            elif sync_ai is not None:
+                speech = ctx.cached("transcribe", f"vad:{sync_ai}:{key}",
+                                    lambda: [(start + x, start + y) for x, y in stt.speech_intervals(audio(sync_ai))])
+                r = analysis.sync_offset([tuple(x) for x in speech], [(c[0], c[1]) for c in a["cues"]], start, secs)
+                if r:
+                    place["verdict"] = analysis.aggregate_sync([r])["verdict"]
+        except Exception as e:  # noqa: BLE001
+            ctx.result.setdefault("warnings", []).append(f"subtitle mismatch recheck failed: {e}")
+            break
+    judged = [p for p in places if p["verdict"] != "unknown"]
+    bad = sum(1 for p in judged if p["verdict"] == "mismatch")
+    if len(judged) < need:
+        verdict = "unknown"
+    elif bad * 2 > len(judged):
+        verdict = "mismatch"
+    else:
+        verdict = "offset" if a["sync"].get("verdict") == "offset" else "ok"
+    return {"track": a["name"], "need": need, "judged": len(judged), "failed": bad, "verdict": verdict,
+            "places": places}
+
+
 def _measure_track(ctx: Ctx, a: dict, segs: list[int]) -> dict:
     """Speech detection, level and per-window language ID of one track (the slow part of the audio check)."""
     ai = a["a_index"]
@@ -1359,6 +1418,18 @@ def check_subtitles(ctx: Ctx):
             a["text"] = ov
         else:
             a["verdict"] = sync["verdict"]
+    need = int(ctx.cfg["scan"].get("subtitle_mismatch_windows", 3) or 0)
+    confirms = []
+    for a in per_track:
+        if a["verdict"] != "mismatch" or need <= 0:
+            continue
+        use_text = bool(native) and a["track"]["text"] and not is_dub and _check_on(ctx, "subtitle_content")
+        conf = _confirm_mismatch(ctx, a, native["a_index"] if use_text else None,
+                                 at if at in ctx.tracks else None, sub_lang, need)
+        a["verdict"], a["confirm"] = conf["verdict"], conf
+        confirms.append(conf)
+    if confirms:
+        ctx.result["subtitle_mismatch_recheck"] = confirms
     if checks:
         ctx.result["subtitle_content"] = checks
     ctx.result["subtitle_sync"] = [dict(a["sync"], track=a["name"], external=a["track"]["external"],
@@ -1370,6 +1441,9 @@ def check_subtitles(ctx: Ctx):
     off = [a for a in known if a["verdict"] == "offset"]
 
     def why(a):
+        c = a.get("confirm")
+        if c:
+            return f"wrong at {c['failed']} of {c['judged']} places checked"
         if a.get("text") and a["text"].get("recall") is not None and a["text"]["recall"] < 0.2:
             return "text doesn't match the dialogue" + (f" even after shifting {a['text']['shift']:+.1f}s"
                                                       if a["text"]["shift"] else "")

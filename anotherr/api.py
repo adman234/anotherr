@@ -146,6 +146,7 @@ STEP_CONTROLS = [
     ("reading image subtitle timing", "Scan profile: subtitles"),
     ("subtitle sync", "scan.checks.subtitle_sync"),
     ("transcribing for subtitle content check", "scan.checks.subtitle_content"),
+    ("subtitle mismatch recheck", "scan.subtitle_mismatch_windows"),
     ("finding segment break", "automatic: suspected multi-episode files"),
     ("reading title cards", "review.ocr_title_cards"),
     ("saving review frames", "review.title_cards"),
@@ -709,9 +710,10 @@ EVIDENCE_KEYS = {
     "multi_episode": ["runtime_estimate", "runtime_ratio", "segment_starts", "segment_breaks", "episodes_mapped"],
     "language": ["audio_tracks", "expected_language", "original_audio_note"],
     "audio": ["audio_tracks"],
-    "subtitles": ["subtitle_tracks", "subtitle_sync", "subtitle_content", "sync_audio_track", "sync_skipped",
-                  "transcript_sample", "audio_tracks"],
-    "identity": ["title_cards_ocr", "runtime_estimate", "subtitle_sync", "subtitle_content", "audio_tracks"],
+    "subtitles": ["subtitle_tracks", "subtitle_sync", "subtitle_content", "subtitle_mismatch_recheck",
+                  "sync_audio_track", "sync_skipped", "transcript_sample", "audio_tracks"],
+    "identity": ["title_cards_ocr", "runtime_estimate", "subtitle_sync", "subtitle_content",
+                 "subtitle_mismatch_recheck", "audio_tracks"],
 }
 
 

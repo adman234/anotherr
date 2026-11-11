@@ -17,7 +17,7 @@ REARM_AFTER = 7 * 86400
 
 def propose_for_file(file_id: int) -> list[int]:
     """Create action proposals from a file's open issues (deduplicated)."""
-    issues = db.q("SELECT code FROM issues WHERE file_id=? AND status='open'", (file_id,))
+    issues = db.q("SELECT code, severity, details FROM issues WHERE file_id=? AND status='open'", (file_id,))
     codes = {i["code"] for i in issues}
     created = []
     # don't re-propose a fix that already ran in the last week (avoids resub -> rescan -> resub loops)
@@ -25,7 +25,9 @@ def propose_for_file(file_id: int) -> list[int]:
                                       "AND updated_at > ?", (file_id, time.time() - REARM_AFTER))}
     if "resub" in recent and _rearmed(file_id):
         recent.discard("resub")
-    redl = sorted(codes & set(settings.REDOWNLOAD_CODES))
+    # a blue dual-audio gap only asks for a redownload when that language was requested (older issues have no flag)
+    unasked = {i["code"] for i in issues if i["severity"] == "dual" and db.unj(i["details"], {}).get("requested") is False}
+    redl = sorted((codes - unasked) & set(settings.REDOWNLOAD_CODES))
     resub = sorted(codes & set(settings.RESUB_CODES))
     if redl and "redownload" not in recent:
         created += [_propose(file_id, "redownload", "Issues: " + ", ".join(redl), redl)]
@@ -218,6 +220,19 @@ def _acceptable_language_gaps(file_id: int, codes: set[str]) -> set[str]:
         f"SELECT code FROM issues WHERE file_id=? AND status='open' AND severity IN ('error','critical') "
         f"AND code IN ({','.join('?' * len(lang))})", [file_id, *lang])}
     return lang - errors
+
+
+def is_dual(a: dict) -> bool:
+    """Proposals that belong on the Dual actions tab: season-audio accepts, and redownloads raised only for
+    single-language gaps (the other language is there). A redownload for a file with no usable audio stays main."""
+    from . import audio_request
+
+    if a.get("kind") == audio_request.KIND:
+        return True
+    codes = set(a.get("codes") or [])
+    if a.get("kind") != "redownload" or not codes or not codes <= set(audio_request.ALLOW_FOR_CODE):
+        return False
+    return _acceptable_language_gaps(a["file_id"], codes) == codes
 
 
 def automation_active(cfg: dict | None = None) -> bool:

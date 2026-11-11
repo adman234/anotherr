@@ -42,6 +42,8 @@ async function refreshStatus() {
     $("#n-issues").textContent = s.open_issues || "";
     $("#n-reviews").textContent = s.pending_reviews || "";
     $("#n-actions").textContent = s.proposed_actions || "";
+    $("#n-dual").textContent = s.open_dual_issues || "";
+    $("#n-dualact").textContent = s.proposed_dual_actions || "";
     const cur = s.current && s.current.file_id ? `Scanning <b>${esc(s.current.title)} ${esc(s.current.label || "")}</b> · ${esc(s.current.step)}` : esc(s.scheduler.mode || "idle");
     const pause = s.scheduler.pause_reasons && s.scheduler.pause_reasons.length ? ` · <span style="color:var(--warning)">${esc(s.scheduler.pause_reasons.join(", "))}</span>` : "";
     $("#statusbar").innerHTML = `${cur}${pause}<br>queue ${s.queue} · whisper ${esc(s.whisper.device || (s.whisper.error ? "error" : "not loaded"))} · sync ${s.sync.running ? "running" : ago(s.sync.last)}`;
@@ -51,7 +53,7 @@ async function refreshStatus() {
 setInterval(refreshStatus, 5000);
 
 // ------------------------------------------------------------------ router
-const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, reviews, actions: actionsPage, queue, settings: settingsPage, exceptions: exceptionsPage };
+const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, dual: (a) => issues(a, true), reviews, actions: actionsPage, dualactions: () => actionsPage(true), queue, settings: settingsPage, exceptions: exceptionsPage };
 async function route() {
   // stop images still loading on the page we're leaving, so they don't hold up the next page
   document.querySelectorAll("#app img").forEach((i) => { i.removeAttribute("src"); });
@@ -71,7 +73,7 @@ async function dashboard() {
   const covRow = (r) => {
     const t = r.total || 1;
     return `<tr><td>${esc(r.name)}${c.disk_state[r.name] ? (c.disk_state[r.name].spundown ? ' <span class="muted small">(spun down)</span>' : ' <span class="small" style="color:var(--ok)">(spinning)</span>') : ""}</td><td>${r.total}</td><td>${r.scanned || 0} (${Math.round(100 * (r.scanned || 0) / t)}%)</td>
-      <td style="min-width:160px"><div class="bar"><span style="width:${100 * (r.ok || 0) / t}%;background:var(--ok)"></span><span style="width:${100 * (r.warn || 0) / t}%;background:var(--warning)"></span><span style="width:${100 * (r.bad || 0) / t}%;background:var(--error)"></span></div></td>
+      <td style="min-width:160px"><div class="bar"><span style="width:${100 * (r.ok || 0) / t}%;background:var(--ok)"></span><span style="width:${100 * (r.warn || 0) / t}%;background:var(--warning)"></span><span style="width:${100 * (r.dual || 0) / t}%;background:var(--dual)"></span><span style="width:${100 * (r.bad || 0) / t}%;background:var(--error)"></span></div></td>
       <td>${r.bad || 0}</td><td><button class="sm" onclick="${r.name.startsWith("Anime") || r.name === "TV" || r.name === "Movies" ? `quickScan('library','${r.name.startsWith("Anime") ? "anime" : r.name === "TV" ? "tv" : "movies"}')` : `quickScan('disk','${esc(r.name === "(unknown)" ? "" : r.name)}')`}">Sample 10</button></td></tr>`;
   };
   $("#app").innerHTML = `
@@ -165,7 +167,7 @@ async function library() {
     ${res.rows.map((r) => `<tr><td><input type="checkbox" class="sel" value="${r.id}"></td><td><a href="#/item/${r.id}">${esc(r.title)}</a> <span class="muted">${r.year || ""}</span></td>
       <td>${r.source === "sonarr" ? "TV" : "Movie"}${r.is_anime ? ' <span class="pill">anime</span>' : ""}${r.excluded ? ' <span class="pill">excluded</span>' : ""}</td>
       <td>${esc(r.original_language || "?")}${r.language_override ? ` → <b>${esc(r.language_override)}</b>` : ""}</td>
-      <td>${r.files}</td><td>${r.scanned || 0}</td><td>${r.bad ? sev("error") + " " + r.bad : ""} ${r.warn ? sev("warning") + " " + r.warn : ""}</td></tr>`).join("")}</table>
+      <td>${r.files}</td><td>${r.scanned || 0}</td><td>${r.bad ? sev("error") + " " + r.bad : ""} ${r.warn ? sev("warning") + " " + r.warn : ""} ${r.dual ? sev("dual") + " " + r.dual : ""}</td></tr>`).join("")}</table>
     ${pager(res, "LIB")}`;
   $("#src").value = LIB.source; $("#st").value = LIB.status;
   $("#q").onchange = (e) => { LIB.search = e.target.value; LIB.page = 1; library(); };
@@ -235,7 +237,7 @@ async function filePage(id) {
       ${f.subgen ? `<button ${f.subgen.plan ? `title="${esc(f.subgen.plan.task)} ${esc(f.subgen.plan.language)} - proposed for approval, then sent to subgen one at a time"` : `disabled title="${esc(f.subgen.blocker)}"`} onclick="${genSub(`file_ids:[${f.id}]`)}">Generate subtitle (subgen)</button>` : ""}
       <button ${f.whisper_blocker ? `disabled title="${esc(f.whisper_blocker)}"` : 'title="Ask Bazarr\'s Whisper provider to transcribe + translate this episode"'} onclick="${propose("whisper_subtitle")}">Whisper subtitles</button>
       <button onclick="act(()=>api('/api/actions',{method:'POST',body:{file_id:${f.id},kind:'redownload',reason:'manual'}}),'Proposed')">Propose redownload</button>
-      ${f.issues.some((i) => i.status === "open" && i.severity === "warning" && (i.code === "english_audio_missing" || i.code === "original_audio_missing")) ? `<button title="Accept this whole season (or movie) as it is - the requested audio language is not available" onclick="${propose("accept_season_audio")}">Accept season as is</button>` : ""}
+      ${f.issues.some((i) => i.status === "open" && (i.severity === "warning" || i.severity === "dual") && (i.code === "english_audio_missing" || i.code === "original_audio_missing")) ? `<button title="Accept this whole season (or movie) as it is - the requested audio language is not available" onclick="${propose("accept_season_audio")}">Accept season as is</button>` : ""}
       <button onclick="framePicker(${f.id}, ${st.duration || 0})">View frames</button></div>
     <div class="grid">
       <div class="card"><div class="kv"><div>Path</div><div class="small">${esc(f.arr_path)}</div><div>Read from</div><div class="small">${esc(r.path || f.local_path)}</div>
@@ -276,7 +278,7 @@ function showFrames(fid) {
 }
 
 // ------------------------------------------------------------------ issues
-let ISS = { status: "open", severity: "", code: "", search: "", page: 1, group: true };
+let ISS = { status: "open", severity: "", code: "", search: "", page: 1, group: true, dual: false };
 const SUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"];
 // default-track / retag issues are fixed by a track-edit proposal: link to it, or rescan files scanned before it existed
 const genSub = (body) => `act(()=>api('/api/subgen/request',{method:'POST',body:{${body}}}),r=>r.proposed.length?'Proposed for subgen - approve it in Actions':'Not possible: '+Object.values(r.not_possible).join('; '))`;
@@ -301,12 +303,13 @@ function issueGroupRow(g) {
     <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${GEN_CODES.includes(g.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" title="Propose subgen subtitles for these files (each is checked first)" onclick="${genSub(`issue_ids:${ids}`)}">Generate subtitles (${n})</button> ` : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
       : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
 }
-async function issues() {
-  const p = new URLSearchParams({ ...ISS, per_page: 100 });
+async function issues(_, dual = false) {
+  if (ISS.dual !== dual) Object.assign(ISS, { dual, page: 1, code: "", severity: "" });  // the two tabs share filters
+  const p = new URLSearchParams({ ...ISS, dual: dual ? "only" : "exclude", per_page: 100 });
   const res = await api("/api/issues?" + p);
-  $("#app").innerHTML = `<h2>Issues</h2>
+  $("#app").innerHTML = `<h2>${dual ? "Dual audio" : "Issues"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Foreign-language titles that should carry both the original audio and an English dub. ${sev("dual")} means one of them is missing, unidentified or from a different cut. A wrong default track stays a yellow warning on the Issues tab.</div>` : ""}
     <div class="toolbar"><select id="is"><option value="open">Open</option><option value="ignored">Ignored</option><option value="resolved">Resolved</option></select>
-      <select id="isev"><option value="">Any severity</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="info">Info</option></select>
+      <select id="isev"><option value="">Any severity</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="dual">Dual audio</option><option value="info">Info</option></select>
       <select id="icode"><option value="">Any type</option>${res.codes.map((c) => `<option value="${esc(c.code)}">${esc(c.code)} (${c.n})</option>`).join("")}</select>
       <input id="iq" placeholder="Search" value="${esc(ISS.search)}"><label class="small"><input type="checkbox" id="igroup" ${ISS.group ? "checked" : ""}> Group by show + season</label>
       <span class="muted">${ISS.group ? `${res.issues} issues in ${res.total} rows` : res.total}</span>
@@ -315,9 +318,9 @@ async function issues() {
     ${res.rows.map((i) => i.group ? issueGroupRow(i) : `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
       <td>${i.status === "open" ? `${trackFixButtons(i, [i]) ? trackFixButtons(i, [i]) + " " : ""}${GEN_CODES.includes(i.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" onclick="${genSub(`issue_ids:[${i.id}]`)}">Generate subtitle</button> ` : ""}${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> ` : ""}<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
   $("#is").value = ISS.status; $("#isev").value = ISS.severity; $("#icode").value = ISS.code;
-  $("#igroup").onchange = (e) => { ISS.group = e.target.checked; ISS.page = 1; issues(); };
+  $("#igroup").onchange = (e) => { ISS.group = e.target.checked; ISS.page = 1; issues(null, ISS.dual); };
   for (const [id, k] of [["is", "status"], ["isev", "severity"], ["icode", "code"], ["iq", "search"]])
-    $("#" + id).onchange = (e) => { ISS[k] = e.target.value; ISS.page = 1; issues(); };
+    $("#" + id).onchange = (e) => { ISS[k] = e.target.value; ISS.page = 1; issues(null, ISS.dual); };
 }
 
 // ------------------------------------------------------------------ reviews
@@ -343,11 +346,11 @@ async function verdict(id, v, redl = false) {
 
 // ------------------------------------------------------------------ actions
 let ACT = { status: "proposed" };
-async function actionsPage() {
-  const rows = await api("/api/actions?status=" + ACT.status);
+async function actionsPage(dual = false) {
+  const rows = await api(`/api/actions?status=${ACT.status}&dual=${dual ? "only" : "exclude"}`);
   const s = window.STATUS || (await api("/api/status"));
   const sg = s.subgen_configured ? await api("/api/subgen/status") : null;
-  $("#app").innerHTML = `<h2>Actions</h2>${sg ? subgenCard(sg) : ""}
+  $("#app").innerHTML = `<h2>${dual ? "Dual actions" : "Actions"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Fixes for single-language audio: accept the season as it is, or redownload where that language was requested.</div>` : sg ? subgenCard(sg) : ""}
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<span class="small muted">${actFileCount(rows)} files in ${groupActions(rows).length} rows</span>` : ""}
@@ -359,8 +362,8 @@ async function actionsPage() {
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
         ${a.kind === "subgen_transcribe" ? subgenButtons(a) : ""}
         ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original track languages and default flags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
-  if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith("#/actions")) actionsPage(); }, 3000);
-  $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(); };
+  if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith(dual ? "#/dualactions" : "#/actions")) actionsPage(dual); }, 3000);
+  $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(dual); };
   window._actRows = rows;
 }
 async function bulkEnglish() {
@@ -414,7 +417,7 @@ function groupRow(g) {
       <button class="sm" onclick="act(()=>api('/api/actions/bulk',{method:'POST',body:{op:'reject',ids:[${ids}]}}),r=>'Rejected '+r.rejected)">Reject ${n}</button></td></tr>`;
 }
 // alternatives for the same files (accept the season as is, or redownload): one row with a button per alternative
-const ISSUE_TEXT = { english_audio_missing: "No English audio, and it was requested", original_audio_missing: "No original-language audio, and it was requested" };
+const ISSUE_TEXT = { english_audio_missing: "Only original audio, no English dub", original_audio_missing: "Only English audio, no original-language track" };
 function choiceRow(c) {
   const accept = c.rows.filter((a) => a.kind === "accept_season_audio"), redl = c.rows.filter((a) => a.kind === "redownload");
   const files = new Map();

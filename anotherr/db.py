@@ -15,7 +15,8 @@ DB_PATH = os.environ.get("ANOTHERR_DB", os.path.join(CONFIG_DIR, "anotherr.db"))
 _local = threading.local()
 _write_lock = threading.RLock()
 
-SEVERITIES = ["info", "warning", "error", "critical"]
+# "dual" (blue) is a dual-audio gap: above info so it shows, below warning so a yellow problem wins
+SEVERITIES = ["info", "dual", "warning", "error", "critical"]
 SEV_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 
 SCHEMA = """
@@ -167,6 +168,16 @@ def init() -> None:
         # title-card reviews were retired: length checks and OCR replace them (movie reviews stay)
         c.execute("UPDATE reviews SET status='dismissed', notes='retired: title-card reviews replaced by automatic "
                   "length and OCR checks' WHERE kind='title_cards' AND status='pending'")
+        # single-language audio gaps became the blue "dual" severity; move existing ones and their files over
+        moved = [r[0] for r in c.execute(
+            "SELECT DISTINCT file_id FROM issues WHERE status='open' AND severity='warning' "
+            "AND code IN ('original_audio_missing','english_audio_missing')")]
+        if moved:
+            c.execute("UPDATE issues SET severity='dual' WHERE status='open' AND severity='warning' "
+                      "AND code IN ('original_audio_missing','english_audio_missing')")
+            for fid in moved:
+                sev = [r[0] for r in c.execute("SELECT severity FROM issues WHERE file_id=? AND status='open'", (fid,))]
+                c.execute("UPDATE files SET status=? WHERE id=?", (worst(sev) or "ok", fid))
 
 
 def q(sql: str, args: tuple | list = ()) -> list[dict]:

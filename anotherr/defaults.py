@@ -31,6 +31,9 @@ def _same(a, b) -> bool:
     return lang_match(a or "", b or "")
 
 
+FIX_CODES = {"default_audio_not_preferred", "default_subs_signs", "default_subs_foreign"}
+
+
 def current_default_audio(tracks: list[dict]) -> dict | None:
     """The track players start with: the flagged default, or the first track when none is flagged."""
     if not tracks:
@@ -51,7 +54,7 @@ def pick_full_sub(subs: list[dict], sub_lang: str) -> dict | None:
 
 
 def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, sub_lang: str,
-              fallback: str = "") -> dict:
+              fallback: str = "", subs_all: list[dict] | None = None) -> dict:
     """What a file needs. Returns {"ops": [...], "audio": {...}|None, "sub": {...}|None, "notes": [...]}.
     fallback: the language that should play when the file has no track in the preferred one (English)."""
     out = {"ops": [], "audio": None, "sub": None, "notes": []}
@@ -59,7 +62,8 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
     final_lang = (cur or {}).get("effective")
     if fallback and pref and not any(_same(t.get("effective"), pref) for t in tracks):
         pref = fallback
-    if "default_audio_not_preferred" in codes and pref and cur and not _same(cur.get("effective"), pref):
+    if "default_audio_not_preferred" in codes and pref and cur and (cur.get("commentary")
+                                                                  or not _same(cur.get("effective"), pref)):
         tgt = pick_audio(tracks, pref)
         if tgt:
             out["ops"].append({"type": "a", "index": tgt["a_index"], "default": True, "expect_lang": tgt.get("tag") or ""})
@@ -83,6 +87,20 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
                 out["notes"].append("cannot change: the full subtitle track is an external file")
             elif not tgt:
                 out["notes"].append(f"no full embedded {langs.name(sub_lang)} subtitle track")
+    if "default_subs_foreign" in codes and not out["sub"]:
+        foreign = next((s for s in subs_all or [] if s.get("default") and s.get("lang")
+                        and not _same(s["lang"], sub_lang) and not _same(s["lang"], pref)), None)
+        tgt = None if _same(final_lang, sub_lang) else pick_full_sub(subs, sub_lang)
+        if foreign and tgt:
+            out["ops"].append({"type": "s", "index": tgt["s_index"], "default": True})
+            out["sub"] = {"to": tgt["s_index"], "title": tgt.get("title") or tgt.get("codec"),
+                          "image": not tgt.get("text"), "sdh": bool(tgt.get("hearing_impaired")),
+                          "from": foreign["s_index"], "from_lang": foreign["lang"]}
+        elif foreign:
+            # the audio is already in your language (or there is no full track to move to): just drop the flag
+            out["ops"].append({"type": "s", "index": foreign["s_index"], "default": False})
+            out["sub"] = {"to": None, "clear": foreign["s_index"], "from": foreign["s_index"],
+                          "from_lang": foreign["lang"], "title": "", "image": False, "sdh": False}
     return out
 
 
@@ -104,7 +122,9 @@ def _signature(plan: dict) -> str:
     parts = []
     if plan["audio"]:
         parts.append(f"audio {langs.name(plan['audio']['to_lang'])} <- {langs.name(plan['audio']['from_lang'])}")
-    if plan["sub"]:
+    if plan["sub"] and plan["sub"].get("clear") is not None:
+        parts.append(f"subtitle clear {langs.name(plan['sub']['from_lang'])}")
+    elif plan["sub"]:
         parts.append("subtitle full" + (" (image)" if plan["sub"]["image"] else ""))
     return " + ".join(parts)
 
@@ -118,11 +138,17 @@ def _reason(item: dict, season, plans: list[dict]) -> str:
         froms = sorted({p["plan"]["audio"]["from"] + 1 for p in plans})
         bits.append(f"make audio track {'/'.join(map(str, tos))} ({langs.name(p0['audio']['to_lang'])}) the default on "
                     f"{n} file(s). Was {langs.name(p0['audio']['from_lang'])} (track {'/'.join(map(str, froms))})")
-    if p0["sub"]:
+    if p0["sub"] and p0["sub"].get("clear") is not None:
+        idx = sorted({p["plan"]["sub"]["clear"] + 1 for p in plans})
+        bits.append(f"{'and ' if bits else ''}clear the default flag on the {langs.name(p0['sub']['from_lang'])} "
+                    f"subtitle track s{'/s'.join(map(str, idx))}{'' if bits else f' on {n} file(s)'}")
+    elif p0["sub"]:
+        was = (f"the {langs.name(p0['sub']['from_lang'])} track" if p0["sub"].get("from_lang")
+               else "the signs-only track")
         tos = sorted({p["plan"]["sub"]["to"] + 1 for p in plans})
         extra = " - image-based, needs burn-in on some clients" if p0["sub"]["image"] else ""
         bits.append(f"{'and ' if bits else ''}make the full subtitle track s{'/s'.join(map(str, tos))} the default"
-                    f"{'' if bits else f' on {n} file(s)'}, instead of the signs-only track{extra}")
+                    f"{'' if bits else f' on {n} file(s)'}, instead of {was}{extra}")
     return f"{where}: " + "; ".join(bits) + ". Other defaults of the same type are cleared; forced flags are kept."
 
 
@@ -145,17 +171,19 @@ def refresh_item(item_id: int) -> dict:
     holds = trackedit.edit_holds()
     for f in db.q("SELECT * FROM files WHERE item_id=? AND missing=0", (item_id,)):
         codes = {r["code"] for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open'", (f["id"],))}
-        if not codes & {"default_audio_not_preferred", "default_subs_signs"} or codes & BLOCKING or f["id"] in busy:
+        if not codes & FIX_CODES or codes & BLOCKING or f["id"] in busy:
             continue
         ev = retag._evidence(f) or {}
         if trackedit.held(holds, f["id"], ev.get("scan_started")):
             continue  # an edit already ran (or is running) since this evidence was gathered
-        plan = plan_file(ev.get("tracks") or [], ev.get("subs") or [], codes, pref, sub_lang, fallback="eng")
+        plan = plan_file(ev.get("tracks") or [], ev.get("subs") or [], codes, pref, sub_lang, fallback="eng",
+                         subs_all=ev.get("subs_all"))
         if not plan["ops"]:
             continue
         kind = AUDIO if plan["audio"] else SUBS
         key = (kind, retag._season(f), _signature(plan))
-        groups.setdefault(key, []).append({"file": f, "plan": plan, "scan_started": ev.get("scan_started")})
+        groups.setdefault(key, []).append({"file": f, "plan": plan, "scan_started": ev.get("scan_started"),
+                                           "codes": codes})
     existing = {}
     for a in db.q("SELECT * FROM actions WHERE kind IN (?, ?) AND status='proposed'", (AUDIO, SUBS)):
         p = db.unj(a["payload"], {}) or {}
@@ -177,7 +205,8 @@ def refresh_item(item_id: int) -> dict:
         payload = {"item_id": item_id, "key": list(key), "family": "defaults", "season": season, "files": files,
                    "series_language": pref}
         reason = _reason(item, season, grp)
-        codes = ["default_audio_not_preferred"] if kind == AUDIO else ["default_subs_signs"]
+        sub_codes = sorted({c for g in grp for c in g["codes"] & {"default_subs_signs", "default_subs_foreign"}})
+        codes = ["default_audio_not_preferred"] if kind == AUDIO else sub_codes or ["default_subs_signs"]
         a = existing.pop(tuple(key), None)
         if a:
             db.x("UPDATE actions SET reason=?, payload=?, file_id=?, updated_at=? WHERE id=?",
@@ -198,7 +227,7 @@ def refresh_item(item_id: int) -> dict:
 def refresh_all() -> int:
     ids = {r["item_id"] for r in db.q(
         "SELECT DISTINCT f.item_id FROM issues x JOIN files f ON f.id=x.file_id WHERE x.status='open' AND f.missing=0 "
-        "AND x.code IN ('default_audio_not_preferred','default_subs_signs')")}
+        "AND x.code IN ('default_audio_not_preferred','default_subs_signs','default_subs_foreign')")}
     ids |= {(db.unj(a["payload"], {}) or {}).get("item_id") for a in db.q(
         "SELECT payload FROM actions WHERE kind IN (?, ?) AND status='proposed'", (AUDIO, SUBS))}
     for i in ids - {None}:

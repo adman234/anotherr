@@ -47,11 +47,12 @@ def test_neither_original_nor_english_still_errors():
     assert codes["original_audio_missing"]["severity"] == "error"
 
 
-def test_english_only_release_is_fine_unless_original_was_requested():
+def test_english_only_release_is_a_blue_dual_gap():
     tracks = [{"tag": "eng", "wins": [("eng", .98)] * 3, "default": True}]
-    assert _ctx("jpn", tracks)[0] == {}  # unmapped = either
-    codes, _ = _ctx("jpn", tracks)
-    assert "original_audio_missing" not in codes
+    codes, _ = _ctx("jpn", tracks)  # unmapped = either: still a dual-audio gap, but not a requested one
+    assert set(codes) == {"original_audio_missing"}
+    assert codes["original_audio_missing"]["severity"] == "dual"
+    assert codes["original_audio_missing"]["details"]["requested"] is False
 
 
 def test_sibling_mislabel_downgrades_tag_only_error():

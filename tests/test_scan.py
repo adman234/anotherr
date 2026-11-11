@@ -114,13 +114,16 @@ def test_override_and_missing_language(video, fake_whisper):
     fid = _add(video, original="kor", anime=0)
     res = scanner.scan_file(fid, "standard")
     codes = {i["code"] for i in res["issues"]}
-    assert "original_audio_missing" not in codes  # English + Japanese present, nothing requested: either
-    # original-language audio requested: the file only has Japanese + English, so Korean is missing (a warning)
+    # no Korean track: a blue dual-audio gap, but nothing was requested so no redownload is proposed
+    gap = [i for i in res["issues"] if i["code"] == "original_audio_missing"]
+    assert [i["severity"] for i in gap] == ["dual"]
+    assert "redownload" not in {a["kind"] for a in db.q("SELECT kind FROM actions WHERE file_id=?", (fid,))}
+    # original-language audio requested: the same gap is now a requested one, so a redownload is proposed
     db.x("UPDATE items SET audio_request_override='original'")
     res = scanner.scan_file(fid, "standard")
     codes = {i["code"] for i in res["issues"]}
     assert "original_audio_missing" in codes
-    assert {i["severity"] for i in res["issues"] if i["code"] == "original_audio_missing"} == {"warning"}
+    assert {i["severity"] for i in res["issues"] if i["code"] == "original_audio_missing"} == {"dual"}
     acts = db.q("SELECT kind, status FROM actions WHERE file_id=? ORDER BY kind", (fid,))
     # no Korean track, so English should be the default: the jpn track is the default here, hence a flag change too
     assert acts == [{"kind": "accept_season_audio", "status": "proposed"},

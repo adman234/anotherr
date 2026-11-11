@@ -355,7 +355,7 @@ async function actionsPage(dual = false) {
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<span class="small muted">${actFileCount(rows)} files in ${groupActions(rows).length} rows</span>` : ""}
-    ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="bulkEnglish()">Approve English retags</button><button onclick="bulkEnglishDefault()">Approve default English audio</button><button onclick="bulkSync()">Approve out-of-sync resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
+    ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="bulkEnglish()">Approve English retags</button><button onclick="bulkEnglishDefault()">Approve default English audio</button><button onclick="bulkForeignDefaults()">Clear foreign defaults</button><button onclick="bulkSync()">Approve out-of-sync resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${groupActions(rows).map((a) => a.choice ? choiceRow(a) : a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
       <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : a.kind === "accept_season_audio" ? acceptTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
@@ -378,6 +378,12 @@ async function bulkEnglishDefault() {
   if (!p.english_default_audio) return toast("No default-audio proposals that pick English");
   if (!confirm(`Make the English track the default audio on ${p.english_default_audio} proposal(s)? Dual-audio choices are on the Dual actions tab and are not included.`)) return;
   await act(() => api("/api/actions/bulk-english-default-audio", { method: "POST" }), "Queued");
+}
+async function bulkForeignDefaults() {
+  const p = await api("/api/actions/bulk-preview");
+  if (!p.foreign_defaults) return toast("No proposals that take the default off a foreign track");
+  if (!confirm(`Approve ${p.foreign_defaults} proposal(s) that take the default flag off an audio or subtitle track that is neither English nor the original language? Dual-audio choices are on the Dual actions tab and are not included.`)) return;
+  await act(() => api("/api/actions/bulk-foreign-defaults", { method: "POST" }), "Queued");
 }
 async function bulkSync() {
   const p = await api("/api/actions/bulk-preview");

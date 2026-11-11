@@ -112,14 +112,19 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
 
 def is_dual_choice(tracks: list[dict], audio: dict | None, orig: str) -> bool:
     """Whether a default-track change is a dual-audio choice (the Dual actions tab).
-    Audio: only a swap between English and the original language (when the original isn't English).
-    English or original vs anything else is a plain fix. Subtitles: dual when the file has both English
-    and original-language audio, since the right subtitle depends on which of the two plays."""
+    Only when the original isn't English. Audio: a swap between English and the original language, or any
+    change on a file that has both an English and an original-language track (a foreign default on such a
+    file still leaves the English-or-original choice to make). A file with no English track, or no
+    original-language one, is a plain fix. Subtitles: dual when the file has both English and
+    original-language audio, since the right subtitle depends on which of the two plays."""
     if not orig or _same(orig, "eng"):
         return False
     if audio:
         pair = (audio.get("from_lang") or "", audio.get("to_lang") or "")
-        return any(_same(a, "eng") and _same(b, orig) for a, b in (pair, pair[::-1]))
+        if any(_same(a, "eng") and _same(b, orig) for a, b in (pair, pair[::-1])):
+            return True
+        tagged = lambda lang: any(_same(t.get("effective"), lang) for t in tracks)
+        return tagged("eng") and tagged(orig)
     has = lambda lang: any(_same(t.get("effective"), lang) and t.get("confident") for t in tracks)
     return has("eng") and has(orig)
 

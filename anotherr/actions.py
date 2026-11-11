@@ -445,6 +445,28 @@ def english_default_audio_ids() -> list[int]:
     return out
 
 
+def foreign_default_ids() -> list[int]:
+    """Proposed default-track batches on the main tab (not dual-audio choices) where every file's change takes the
+    default away from a track that is neither English nor the original language: a foreign default audio track,
+    or a foreign default subtitle track."""
+    from . import defaults
+
+    def foreign(lang, orig) -> bool:
+        return bool(lang) and not defaults._same(lang, "eng") and not (orig and defaults._same(lang, orig))
+
+    out = []
+    for a in db.q("SELECT id, kind, payload FROM actions WHERE kind IN ('set_default_audio','set_default_subtitle') "
+                  "AND status='proposed'"):
+        p = db.unj(a["payload"], {}) or {}
+        files, orig = p.get("files") or [], p.get("series_language") or ""
+        if p.get("dual") or not files:
+            continue
+        key = "audio" if a["kind"] == "set_default_audio" else "sub"
+        if all(foreign((f.get(key) or {}).get("from_lang"), orig) for f in files):
+            out.append(a["id"])
+    return out
+
+
 def _approve_track_edits(ids: list[int], label: str) -> dict:
     """Queue track-edit proposals; they run one after another in the background."""
     import threading
@@ -479,6 +501,11 @@ def approve_english_retags(min_conf: float | None = None) -> dict:
 def approve_english_default_audio() -> dict:
     """Queue every non-dual proposal that makes the English track the default audio."""
     return _approve_track_edits(english_default_audio_ids(), "Bulk English default audio")
+
+
+def approve_foreign_defaults() -> dict:
+    """Queue every non-dual proposal that takes the default off a foreign (not English, not original) track."""
+    return _approve_track_edits(foreign_default_ids(), "Bulk foreign default clear")
 
 
 def _run_queued(ids: list[int]) -> None:

@@ -393,6 +393,28 @@ def test_dual_tab_english_vs_original_audio_swap():
     assert not _dual([A(0, "ger", default=True), A(1, "jpn")], [], audio, "jpn")
     # English + something else for a Japanese show: falls back to English, not a dual choice
     assert not _dual([A(0, "ger", default=True), A(1, "eng")], [], audio, "jpn")
+    # foreign default on a file with both English and the original: still the English-or-original choice
+    assert _dual([A(0, "por", default=True), A(1, "eng"), A(2, "jpn")], [], audio, "jpn")
+
+
+def test_foreign_default_bulk_skips_dual_and_non_foreign():
+    from anotherr import actions
+
+    iid = db.x("INSERT INTO items(source, arr_id, kind, title) VALUES ('radarr', 7, 'movie', 'X')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, first_seen, status) "
+               "VALUES (?, 7, '/m/x.mkv', '[]', 0, 'ok')", (iid,))
+
+    def add(kind, payload):
+        return db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
+                    "VALUES (?, ?, '', '[]', 'proposed', 0, ?, 0, 0)", (fid, kind, db.j(payload)))
+
+    a = add("set_default_audio", {"series_language": "jpn", "files": [{"audio": {"to_lang": "jpn", "from_lang": "por"}}]})
+    add("set_default_audio", {"series_language": "jpn", "dual": True,
+                              "files": [{"audio": {"to_lang": "jpn", "from_lang": "por"}}]})
+    add("set_default_audio", {"series_language": "jpn", "files": [{"audio": {"to_lang": "jpn", "from_lang": "eng"}}]})
+    s = add("set_default_subtitle", {"series_language": "eng", "files": [{"sub": {"clear": 1, "from_lang": "fre"}}]})
+    add("set_default_subtitle", {"series_language": "jpn", "files": [{"sub": {"to": 1, "from": 0}}]})  # signs-only
+    assert actions.foreign_default_ids() == [a, s]
 
 
 def test_dual_tab_subtitles_follow_the_audio_pair():

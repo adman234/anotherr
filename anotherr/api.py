@@ -204,7 +204,9 @@ def scan_timings(days: float = 7, profile: str = ""):
 def status():
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM files WHERE missing=0 GROUP BY status")}
     cfg = settings.get()
-    proposed = db.q("SELECT kind, codes, file_id, payload FROM actions WHERE status='proposed'")
+    # every badge counts exactly the rows its tab lists (same joins and filters as the list queries)
+    proposed = db.q("SELECT a.kind, a.codes, a.file_id, a.payload FROM actions a JOIN files f ON f.id=a.file_id "
+                    "JOIN items i ON i.id=f.item_id WHERE a.status='proposed'")
     n_dual = sum(actions.is_dual({**r, "codes": db.unj(r["codes"], [])}) for r in proposed)
     return {
         "version": __version__,
@@ -227,9 +229,9 @@ def status():
         "memory": health.memory(),
         "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
-        "open_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open' AND severity!='dual'"),
-        "open_dual_issues": db.scalar("SELECT COUNT(*) FROM issues WHERE status='open' AND severity='dual'"),
-        "pending_reviews": db.scalar("SELECT COUNT(*) FROM reviews WHERE status='pending'"),
+        "open_issues": db.scalar(f"SELECT COUNT(*) FROM ({ISSUE_SQL} AND x.status='open' AND x.severity!='dual')"),
+        "open_dual_issues": db.scalar(f"SELECT COUNT(*) FROM ({ISSUE_SQL} AND x.status='open' AND x.severity='dual')"),
+        "pending_reviews": db.scalar(f"SELECT COUNT(*) FROM ({REVIEW_SQL} AND r.status='pending')"),
         "proposed_actions": len(proposed) - n_dual,
         "proposed_dual_actions": n_dual,
         "subgen_configured": subgen.configured(),
@@ -419,7 +421,7 @@ def file_detail(file_id: int):
     return f
 
 
-MCP_BRIDGE_VERSION = 9  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 10  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -525,9 +527,11 @@ def scan_stop():
 
 
 @app.get("/api/queue", dependencies=[Depends(auth)])
-def queue_list(limit: int = 200):
+def queue_list(limit: int = 0):
+    """Same rows scheduler.queue_count() counts (files still in the library). limit 0 = all."""
     return db.q("""SELECT q.*, i.title, f.label FROM queue q JOIN files f ON f.id=q.file_id JOIN items i ON i.id=f.item_id
-        ORDER BY CASE q.source WHEN 'manual' THEN 0 WHEN 'import' THEN 1 ELSE 2 END, q.created_at LIMIT ?""", (limit,))
+        WHERE f.missing=0 ORDER BY CASE q.source WHEN 'manual' THEN 0 WHEN 'import' THEN 1 ELSE 2 END, q.created_at
+        LIMIT ?""", (limit if limit > 0 else -1,))
 
 
 @app.delete("/api/queue", dependencies=[Depends(auth)])
@@ -833,7 +837,7 @@ def _action_rows(status: str, limit: int) -> list[dict]:
         vals = status.split(",")
         sql += f" WHERE a.status IN ({','.join('?' * len(vals))})"
         args += vals
-    rows = db.q(sql + " ORDER BY a.id DESC LIMIT ?", args + [min(limit, 1000)])
+    rows = db.q(sql + " ORDER BY a.id DESC LIMIT ?", args + [limit if limit > 0 else -1])
     for r in rows:
         r["codes"] = db.unj(r["codes"], [])
         r["payload"] = db.unj(r.get("payload"), None)
@@ -845,13 +849,13 @@ def _action_rows(status: str, limit: int) -> list[dict]:
 
 
 @app.get("/api/actions", dependencies=[Depends(auth)])
-def actions_list(status: str = "proposed", limit: int = 1000, dual: str = ""):
-    """dual=only: the Dual actions tab; dual=exclude: the main Actions tab. The tab filter runs before the limit,
-    otherwise a tab only sees its share of the newest `limit` proposals."""
+def actions_list(status: str = "proposed", limit: int = 0, dual: str = ""):
+    """dual=only: the Dual actions tab; dual=exclude: the main Actions tab. limit 0 = all, so the tabs list every
+    row their badge counts. The tab filter runs before any limit."""
     if dual not in ("only", "exclude"):
         return _action_rows(status, limit)
-    rows = [r for r in _action_rows(status, 100000) if actions.is_dual(r) == (dual == "only")]
-    return rows[:limit]
+    rows = [r for r in _action_rows(status, 0) if actions.is_dual(r) == (dual == "only")]
+    return rows[:limit] if limit > 0 else rows
 
 
 @app.post("/api/actions/choose", dependencies=[Depends(auth)])
@@ -859,7 +863,7 @@ def actions_choose(body: dict = Body(...)):
     """{"choice_key": "...", "pick": "<kind>"}: approve the proposals of that kind in a choice (alternative fixes for
     the same files) and reject the others."""
     try:
-        out = actions.choose(_action_rows("proposed", 1000), str(body.get("choice_key") or ""), str(body.get("pick") or ""))
+        out = actions.choose(_action_rows("proposed", 0), str(body.get("choice_key") or ""), str(body.get("pick") or ""))
     except ValueError as e:
         raise HTTPException(400, str(e))
     if out is None:

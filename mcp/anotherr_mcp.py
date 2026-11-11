@@ -33,7 +33,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 9  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 10  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -365,7 +365,7 @@ def submit_review(review_id: int, verdict: str, notes: str = "", request_redownl
 def list_actions(status: str = "proposed") -> str:
     """Proposed/finished fix-up actions. status: proposed|done|failed|rejected|withdrawn (comma-separated ok).
     Proposals are withdrawn automatically when the issues behind them are resolved."""
-    rows = _get("/api/actions", status=status)
+    rows = _get("/api/actions", status=status, limit=300)  # keep the reply small; the web tab lists all
     if not rows:
         return "No actions."
     lines, seen = [], set()

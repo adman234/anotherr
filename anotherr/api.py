@@ -466,7 +466,7 @@ def file_streams(file_id: int):
 
 @app.post("/api/scan", dependencies=[Depends(auth)])
 def scan(body: dict = Body(...)):
-    """scope: file | item | disk | library | random | problems | unscanned"""
+    """scope: file | item | disk | library | random | problems | unscanned. full=true skips quick-rescan reuse."""
     scope = body.get("scope", "file")
     profile = body.get("profile") or settings.get()["scan"]["default_profile"]
     if profile not in settings.get()["scan"]["profiles"]:
@@ -511,8 +511,9 @@ def scan(body: dict = Body(...)):
     if scope == "random" or (count and len(fids) > count):
         random.shuffle(fids)
         fids = fids[: (count or 10)]
-    n = scheduler.enqueue(fids, profile, "manual")
-    db.log(f"Queued {n} file(s) for {profile} scan ({scope})")
+    full = bool(body.get("full"))
+    n = scheduler.enqueue(fids, profile, "manual", full=full)
+    db.log(f"Queued {n} file(s) for {'full ' if full else ''}{profile} scan ({scope})")
     return {"queued": n, "file_ids": fids[:200]}
 
 

@@ -309,7 +309,8 @@ class Worker(threading.Thread):
         fid, prof, source, why, qid, disk = pick
         ctx["taken"].add(disk)
         self.last_disk[slot] = disk
-        self._start(slot, fid, prof, source, why, qid, disk)
+        full = bool(qid and db.scalar("SELECT full FROM queue WHERE id=?", (qid,)))
+        self._start(slot, fid, prof, source, why + (" (full)" if full else ""), qid, disk, full)
         return 1
 
     @staticmethod
@@ -322,10 +323,10 @@ class Worker(threading.Thread):
             return bool(w) and active_window(w) is not None
         return True
 
-    def _start(self, slot, fid, profile, source, why, qid, disk):
+    def _start(self, slot, fid, profile, source, why, qid, disk, full=False):
         def run():
             try:
-                scanner.scan_file(fid, profile, source, slot=slot, why=why)
+                scanner.scan_file(fid, profile, source, slot=slot, why=why, full=full)
             except Exception:  # noqa: BLE001
                 log.exception("scan failed in slot %s", slot)
             finally:
@@ -432,16 +433,17 @@ def start():
         WORKER.start()
 
 
-def enqueue(file_ids: list[int], profile: str, source: str = "manual") -> int:
+def enqueue(file_ids: list[int], profile: str, source: str = "manual", full: bool = False) -> int:
     """Queue files for a scan. Files no longer in the library (missing=1) are skipped: the worker never picks
     them, so their rows would sit in the queue forever and keep it from ever looking empty."""
     now = time.time()
     n = 0
     for fid in file_ids:
-        n += db.n("INSERT INTO queue(file_id, profile, source, created_at) SELECT id, ?, ?, ? FROM files "
+        n += db.n("INSERT INTO queue(file_id, profile, source, created_at, full) SELECT id, ?, ?, ?, ? FROM files "
                   "WHERE id=? AND missing=0 "
-                  "ON CONFLICT(file_id) DO UPDATE SET profile=excluded.profile, source=excluded.source",
-                  (profile, source, now, fid)) and 1
+                  "ON CONFLICT(file_id) DO UPDATE SET profile=excluded.profile, source=excluded.source, "
+                  "full=MAX(COALESCE(queue.full, 0), excluded.full)",
+                  (profile, source, now, int(full), fid)) and 1
     return n
 
 

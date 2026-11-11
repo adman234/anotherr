@@ -154,7 +154,8 @@ _ADDED_COLUMNS = [
     ("items", "audio_request", "TEXT DEFAULT ''"),  # '' (either) | original | english, mapped from the profile name
     ("items", "audio_request_override", "TEXT DEFAULT ''"),  # manual request; '' = follow the profile
     ("audio_exceptions", "scope", "TEXT DEFAULT 'season'"),  # season | show; older rows are season exceptions
-    ("actions", "payload", "TEXT"),  # batch actions (retag_audio): files, tracks, preview, per-file results
+    ("actions", "payload", "TEXT"),
+    ("queue", "full", "INTEGER DEFAULT 0"),  # 1 = full scan, don't reuse the last scan's measurements  # batch actions (retag_audio): files, tracks, preview, per-file results
 ]
 
 

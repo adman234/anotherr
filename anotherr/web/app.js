@@ -210,7 +210,7 @@ async function itemPage(id) {
       <div>Multi-segment show</div><div><input type="checkbox" id="mseg" ${it.multi_segment ? "checked" : ""} onchange="saveItem(${it.id})"> <span class="small muted">e.g. SpongeBob - files usually hold 2 segments</span></div>
       <div>Exclude from scheduled scans</div><div><input type="checkbox" id="excl" ${it.excluded ? "checked" : ""} onchange="saveItem(${it.id})"></div>
       <div>Path</div><div class="small">${esc(it.path)}</div></div>
-      <div class="toolbar" style="margin:10px 0 0">${profileSelect()}<button onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'item',ids:[${it.id}],profile:$('#profile').value}}),r=>'Queued '+r.queued)">Scan all files</button></div></div>
+      <div class="toolbar" style="margin:10px 0 0">${profileSelect()}<button onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'item',ids:[${it.id}],profile:$('#profile').value}}),r=>'Queued '+r.queued)">Scan all files</button><button title="Measure everything again instead of reusing the last scan's results" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'item',ids:[${it.id}],profile:$('#profile').value,full:true}}),r=>'Queued '+r.queued+' for a full rescan')">Full rescan</button></div></div>
     <table><tr><th>File</th><th>Status</th><th>Disk</th><th>Quality</th><th>Group</th><th>Last check</th><th></th></tr>
     ${it.files.map((f) => `<tr><td><a href="#/file/${f.id}">${esc(f.label || f.arr_path.split("/").pop())}</a>${f.episodes.length ? `<div class="small muted">${f.episodes.map((e) => esc(e.title)).join(" / ")}</div>` : ""}</td>
       <td>${sev(f.status)} ${f.open_issues ? f.open_issues : ""}</td><td>${esc(f.disk)}</td><td>${esc(f.quality)}</td><td>${esc(f.release_group)}</td><td class="muted">${ago(f.last_scan_at)} ${esc(f.last_profile || "")}</td>
@@ -233,6 +233,7 @@ async function filePage(id) {
   const sync = (r.subtitle_sync || []).map((v) => `<tr><td>${esc(v.track)}</td><td>${esc(v.verdict)}</td><td>${v.offset ?? ""}s</td><td>${v.score ?? ""} (at 0: ${v.score_at_zero ?? ""})</td><td>${v.windows}</td></tr>`).join("");
   $("#app").innerHTML = `<h2><a href="#/item/${f.item.id}">${esc(f.item.title)}</a> ${esc(f.label || "")} ${sev(f.status)}</h2>
     <div class="toolbar">${profileSelect()}<button onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${f.id}],profile:$('#profile').value}}),'Queued')">Scan now</button>
+    <button title="Measure everything again instead of reusing the last scan's results" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${f.id}],profile:$('#profile').value,full:true}}),'Queued a full rescan')">Full rescan</button>
       <button onclick="${propose("resub")}">Propose resub</button>
       ${f.subgen ? `<button ${f.subgen.plan ? `title="${esc(f.subgen.plan.task)} ${esc(f.subgen.plan.language)} - proposed for approval, then sent to subgen one at a time"` : `disabled title="${esc(f.subgen.blocker)}"`} onclick="${genSub(`file_ids:[${f.id}]`)}">Generate subtitle (subgen)</button>` : ""}
       <button ${f.whisper_blocker ? `disabled title="${esc(f.whisper_blocker)}"` : 'title="Ask Bazarr\'s Whisper provider to transcribe + translate this episode"'} onclick="${propose("whisper_subtitle")}">Whisper subtitles</button>
@@ -581,6 +582,8 @@ const HELP = {
   "scan.ffmpeg_threads": "CPU threads for CPU decoding (0 = automatic).",
   "scan.child_memory_limit_mb": "Kill an ffmpeg/ffprobe process that uses more than this much memory (MB, Linux only; 0 = no limit). The scan step is reported as an error instead of the container being OOM-killed.",
   "scan.max_audio_tracks": "Max audio tracks analysed per file (commentary tracks are skipped).",
+  "scan.quick_rescan": "Rescanning an unchanged file reuses the last scan's decoding, audio, language and transcript results and only reruns the checks, plus any slow step an open issue is about. A redownloaded or remuxed file always gets a full scan. Turn off to make every scan a full scan.",
+  "scan.quick_rescan_max_days": "Do a full scan anyway once the reused results are this many days old (0 = never).",
   "subgen.url": "Your subgen container, e.g. http://192.168.1.10:9006. Empty = off. Anotherr sends it one file at a time and never has more than one job in flight.",
   "subgen.mode": "path = send the file's path (POST /batch); subgen reads the video from your library and writes the .srt next to it, so it needs the media mounted. upload = Anotherr extracts the chosen audio track itself and uploads only that (POST /asr), then writes the .srt; subgen needs no access to your media.",
   "subgen.audio_format": "Upload mode only. flac = lossless, about 40 MB per 45 minutes (default) · opus = about 11 MB, lossy (for slow links) · pcm = raw 16 kHz audio, about 86 MB.",

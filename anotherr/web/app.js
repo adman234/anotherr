@@ -82,21 +82,23 @@ async function dashboard() {
       <div class="card"><div class="muted">Files</div><div class="stat">${files.total || 0}</div><div class="small muted">${scanned} checked · ${files.unscanned || 0} never checked</div></div>
       <div class="card"><div class="muted">Problems</div><div class="stat" style="color:var(--error)">${bad}</div><div class="small muted">${files.warning || 0} warnings · ${s.open_issues} open issues</div></div>
       <div class="card"><div class="muted">Waiting on you</div><div class="stat">${s.pending_reviews + s.proposed_actions}</div><div class="small muted"><a href="#/reviews">${s.pending_reviews} visual reviews</a> · <a href="#/actions">${s.proposed_actions} proposed actions</a></div></div>
-      <div class="card"><div class="muted">Scanner</div><div style="font-weight:600;margin:4px 0">${s.current.file_id ? `${esc(s.current.title)} ${esc(s.current.label || "")}` : esc(s.scheduler.mode)}</div>
+      <div class="card fixed"><div class="muted">Scanner</div><div class="clamp1" style="font-weight:600;margin:4px 0">${s.current.file_id ? `${esc(s.current.title)} ${esc(s.current.label || "")}` : esc(s.scheduler.mode)}</div>
+        <div class="body">
         <div class="small muted">Next: ${esc(s.scheduler.next_run ? s.scheduler.next_run.why : "")}${s.scheduler.windows && !s.scheduler.windows.length ? " · no scan window set (scans anytime)" : ""}</div>
         ${(s.scheduler.streams || []).length ? `<div class="small muted">Plex: ${s.scheduler.streams.map((x) => `${esc(x.title)}${x.disk ? ` (${esc(x.disk)})` : ""}`).join(", ")}${s.scheduler.stream_pause === "same_disk" ? " - skipping only those disks" : ""}</div>` : ""}
         ${(s.scheduler.slots || []).map((x) => `<div class="small"><span class="pill">${esc(x.slot)}</span> ${esc(x.disk || "?")} · ${esc(x.title || "")} ${esc(x.label || "")} <span class="muted">· ${esc(x.why || "")} · ${esc(x.step || "")}</span></div>`).join("")}
+        </div>
         <div class="toolbar" style="margin:8px 0 0">
           <button onclick="act(()=>api('/api/control/pause',{method:'POST',body:{paused:${!s.paused}}}),'${s.paused ? "Resumed" : "Paused"}')">${s.paused ? "Resume" : "Pause"}</button>
-          ${s.current.file_id ? `<button class="danger" onclick="act(()=>api('/api/scan/stop',{method:'POST'}),'Stopping')">Stop scan</button>` : ""}
-          ${s.queue && !s.forcing_queue ? `<button class="primary" onclick="act(()=>api('/api/queue/process',{method:'POST'}),r=>'Processing '+r.queued+' file(s)')">Process queue (${s.queue})</button>` : ""}
+          <button class="danger" ${s.current.file_id ? "" : "disabled"} onclick="act(()=>api('/api/scan/stop',{method:'POST'}),'Stopping')">Stop scan</button>
+          <button class="primary" ${s.queue && !s.forcing_queue ? "" : "disabled"} onclick="act(()=>api('/api/queue/process',{method:'POST'}),r=>'Processing '+r.queued+' file(s)')">Process queue (${s.queue || 0})</button>
           <button onclick="act(()=>api('/api/sync',{method:'POST'}),'Sync started')">Sync now</button>
         </div></div>
-      <div class="card"><div class="muted">Automation</div><div style="font-weight:600;margin:4px 0">${s.automation.enabled ? (s.automation.active_now ? '<span style="color:var(--ok)">Active now</span>' : "Enabled (outside its schedule)") : "Disabled"}</div>
+      <div class="card fixed"><div class="muted">Automation</div><div style="font-weight:600;margin:4px 0">${s.automation.enabled ? (s.automation.active_now ? '<span style="color:var(--ok)">Active now</span>' : "Enabled (outside its schedule)") : "Disabled"}</div>
         <div class="small muted">${s.automation.today}/${s.automation.max_per_day} auto actions today · <a href="#/settings">configure</a></div></div>
-      <div class="card"><div class="muted">Whisper</div><div style="font-weight:600;margin:4px 0">${esc(s.whisper.model)} ${s.whisper.device ? "on " + esc(s.whisper.device) : "(loads on demand)"}</div>
+      <div class="card fixed"><div class="muted">Whisper</div><div style="font-weight:600;margin:4px 0">${esc(s.whisper.model)} ${s.whisper.device ? "on " + esc(s.whisper.device) : "(loads on demand)"}</div>
         <div class="small" style="color:var(--error)">${esc(s.whisper.error || "")}</div><div class="small muted">Video decode: ${s.gpu_decode.mode === "off" ? "CPU (GPU off in settings)" : s.gpu_decode.available === false ? '<span style="color:var(--warning)">CPU (GPU unavailable)</span>' : s.gpu_decode.available ? '<span style="color:var(--ok)">GPU (NVDEC)</span>' : "GPU (not used yet)"}</div><div class="small muted">${s.unraid.detected ? "Unraid detected" : "Unraid not detected"}${s.unraid.parity_running ? " · parity check running" : ""}</div></div>
-      <div class="card"><div class="muted">Memory</div>${memCard(s.memory || {})}<div class="small muted" style="margin-top:4px">Build ${esc(s.build || "dev")}</div></div>
+      <div class="card fixed"><div class="muted">Memory</div>${memCard(s.memory || {})}<div class="small muted" style="margin-top:4px">Build ${esc(s.build || "dev")}</div></div>
     </div>
     <h3>Coverage by library</h3>
     <table><tr><th>Library</th><th>Files</th><th>Checked</th><th>Health</th><th>Bad</th><th></th></tr>${c.libraries.map(covRow).join("") || '<tr><td colspan=6 class="muted">No data yet - sync first.</td></tr>'}</table>
@@ -348,7 +350,8 @@ async function actionsPage() {
   $("#app").innerHTML = `<h2>Actions</h2>${sg ? subgenCard(sg) : ""}
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
-    ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
+    ${ACT.status === "proposed" && rows.length ? `<span class="small muted">${actFileCount(rows)} files in ${groupActions(rows).length} rows</span>` : ""}
+    ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="bulkEnglish()">Approve English retags</button><button onclick="bulkSync()">Approve out-of-sync resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${groupActions(rows).map((a) => a.choice ? choiceRow(a) : a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
       <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : a.kind === "accept_season_audio" ? acceptTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
@@ -360,10 +363,30 @@ async function actionsPage() {
   $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(); };
   window._actRows = rows;
 }
+async function bulkEnglish() {
+  const p = await api("/api/actions/bulk-preview");
+  if (!p.english_retags) return toast("No English retag proposals above " + p.min_confidence + " confidence");
+  if (!confirm(`Approve ${p.english_retags} retag batch(es) that set the audio to English at confidence above ${p.min_confidence}? (Change the threshold in Settings -> Retag audio.)`)) return;
+  await act(() => api("/api/actions/bulk-english-retag", { method: "POST" }), "Queued");
+}
+async function bulkSync() {
+  const p = await api("/api/actions/bulk-preview");
+  if (!p.out_of_sync_resubs) return toast("No out-of-sync resub proposals");
+  if (!confirm(`Approve ${p.out_of_sync_resubs} out-of-sync subtitle resub request(s)?`)) return;
+  await act(() => api("/api/actions/bulk-out-of-sync", { method: "POST" }), "Queued");
+}
 // resub/redownload proposals for the same series + season with the same reason get one Approve
 const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
 const GROUP_MAX = { whisper_subtitle: 5 };  // Bazarr's Whisper route: at most 5 episodes per approval
 const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
+function actFileCount(rows) {
+  const ids = new Set();
+  for (const a of rows) {
+    const fs = a.payload && a.payload.files;
+    if (BATCH_KINDS.includes(a.kind) && fs && fs.length) fs.forEach((f) => ids.add(f.file_id)); else ids.add(a.file_id);
+  }
+  return ids.size;
+}
 function groupActions(rows) {
   const out = [], groups = {}, choices = {};
   for (const a of rows) {
@@ -598,6 +621,7 @@ const HELP = {
   "whisper.idle_unload_minutes": "Unload the model after this long idle so Plex gets the VRAM back.",
   "retag.enabled": "Off by default. When on, approved 'Retag audio language' actions write the detected language into the file's audio track (MKV/WebM in place with mkvpropedit; other formats by a stream copy). Keep /mnt read-only and add a read/write path for just your media folders (same host and container path, e.g. /mnt/user/media/tv); Anotherr writes through those.",
   "retag.allowed_paths": "One folder per line, as seen inside the container (e.g. /mnt/user/media/tv). Files outside these folders are never edited.",
+  "retag.bulk_min_confidence": "Minimum detection confidence (0-1) for the Actions page button that approves every English retag at once. Default 0.95.",
   "retag.break_hardlinks": "Hardlinked files (e.g. a torrent client's seeding copy) are skipped by default. When on, they get a new copy with the tag instead, leaving the seeded file untouched (uses free space equal to the file).",
   "automation.enabled": "Off by default. When on, proposals are executed automatically inside the windows below.",
   "automation.auto_resub": "Automatically ask Bazarr for new subtitles.",

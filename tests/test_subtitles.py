@@ -257,3 +257,35 @@ def test_sdh_title_without_tags_is_full(d, fake_whisper, monkeypatch):
     fid, codes = scan(path, anime=1)
     assert "subs_signs_only" not in codes
     assert _tracks(fid)[0]["kind"] == "full"
+
+
+def test_sidecar_label_ignores_episode_title_words():
+    video = "/tv/Pokemon/Pokemon - S05E34 - Same Old Song and Dance SDTV.mkv"
+    name = "Pokemon - S05E34 - Same Old Song and Dance SDTV.en.srt"
+    label = analysis.sidecar_label(name, video)
+    assert label == ".en.srt"
+    assert analysis.classify_track(140, 1300, label, False, 3.0) == "full"
+    assert analysis.classify_track(140, 1300, name, False, 3.0) == "signs"  # the old behaviour
+    assert analysis.sidecar_label("x.forced.en.srt", "/v/y.mkv") == "x.forced.en.srt"
+
+
+def test_full_title_beats_forced_flag_but_not_sign_words():
+    assert not analysis.signs_by_label("English full", True)
+    assert not analysis.signs_by_label("Full", True)
+    assert analysis.signs_by_label("", True)
+    assert analysis.signs_by_label("Signs & Songs full", False)
+    assert analysis.signs_by_label("English forced", False)
+    assert analysis.classify_embedded(500, 1400, "English full", True, 3.0, 0, 60.0, 5)[0] == "full"
+
+
+def test_positioned_only_dialogue_is_not_dropped():
+    t = r"{\an7}{\pos(38,28)}My very first clothing exchange."
+    assert analysis.clean_cue(1.0, 3.0, "Default", t) is None
+    assert analysis.clean_cue(1.0, 3.0, "Default", t, allow_pos=True) is not None
+    strict = []
+    loose = [analysis.clean_cue(i * 4.0, i * 4.0 + 2, "Default", t, allow_pos=True) for i in range(10)]
+    assert analysis.pick_dialogue(strict, loose) == loose
+    short = [analysis.clean_cue(i * 4.0, i * 4.0 + 2, "Default", r"{\pos(1,2)}Exit", allow_pos=True) for i in range(10)]
+    assert analysis.pick_dialogue([], short) == []
+    karaoke = [analysis.clean_cue(1.0, 3.0, "Default", r"{\k20}la la la la la la la la", allow_pos=True)]
+    assert karaoke == [None]

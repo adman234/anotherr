@@ -105,6 +105,7 @@ DEFAULTS: dict = {
         "enabled": False,            # writing language tags into media files; needs /mnt mounted read/write
         "allowed_paths": [],         # only files under these folders may be edited, e.g. /mnt/user/media/tv
         "break_hardlinks": False,    # hardlinked files (seeding copies): skip (default) or write a new copy
+        "bulk_min_confidence": 0.95, # "Approve all English retags" only takes proposals above this confidence
     },
     "subgen": {
         "url": "",                   # e.g. http://192.168.1.10:9006 - empty = the subgen route is off

@@ -884,7 +884,7 @@ def check_subtitles(ctx: Ctx):
         if needs and not mine:
             ctx.issue("subtitles", "subs_missing", "error",
                       f"No {langs.name(sub_lang)} subtitles (embedded or external) for {langs.name(exp)} audio.")
-        elif needs and all(s["forced"] or "sign" in s["title"].lower() for s in mine):
+        elif needs and all(analysis.signs_by_label(analysis.sidecar_label(s["title"], ctx.path) if s["external"] else s["title"], s["forced"]) for s in mine):
             ctx.issue("subtitles", "subs_maybe_signs_only", "warning",
                       f"{langs.name(sub_lang)} subtitles look like signs/songs only (by track flags).")
         return
@@ -917,11 +917,17 @@ def check_subtitles(ctx: Ctx):
             span = win_s
             pk = packets.get(s["index"], [])
             if s["text"]:
+                loose = []
                 for p in pk:
                     style, text = media.text_from_packet(s["codec"], p["data"])
-                    c = analysis.clean_cue(p["start"], p["start"] + (p["dur"] or 2.0), style, text)
+                    end = p["start"] + (p["dur"] or 2.0)
+                    c = analysis.clean_cue(p["start"], end, style, text)
                     if c:
                         cues.append((c.start, c.end, c.text))
+                    c2 = analysis.clean_cue(p["start"], end, style, text, allow_pos=True)
+                    if c2:
+                        loose.append((c2.start, c2.end, c2.text))
+                cues = analysis.pick_dialogue(cues, loose)
             else:
                 for i, p in enumerate(pk):
                     if p["size"] < 200:  # PGS "clear" display sets are tiny
@@ -930,7 +936,7 @@ def check_subtitles(ctx: Ctx):
                     cues.append((p["start"], min(end, p["start"] + 10), ""))
         if s["external"]:
             counted, source = len(cues), "file"
-            kind = analysis.classify_track(counted, span, s["title"], s["forced"], min_rate)
+            kind = analysis.classify_track(counted, span, analysis.sidecar_label(s["title"], ctx.path), s["forced"], min_rate)
             per_min = round(counted / max(span / 60, 1), 1)
         else:
             # Window density only counts cues inside the sampled windows (packets are read with padding). It
@@ -1165,8 +1171,7 @@ def queue_reviews(ctx: Ctx, rng: random.Random):
                              f"episode(s) and order? Is anything missing or extra?"),
                 "context": {"episodes": eps, "segment_starts": starts}}
             if rcfg.get("ocr_title_cards", True) and ocr.available():
-                auto_title_cards(ctx, review)
-            ctx.reviews.append(review)
+                auto_title_cards(ctx, review)  # can raise wrong_content; no manual review is queued any more
     elif policy != "never":
         ratio = ctx.result.get("runtime_ratio")
         reasons = []

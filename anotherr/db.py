@@ -164,6 +164,9 @@ def init() -> None:
         for table, col, typ in _ADDED_COLUMNS:
             if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        # title-card reviews were retired: length checks and OCR replace them (movie reviews stay)
+        c.execute("UPDATE reviews SET status='dismissed', notes='retired: title-card reviews replaced by automatic "
+                  "length and OCR checks' WHERE kind='title_cards' AND status='pending'")
 
 
 def q(sql: str, args: tuple | list = ()) -> list[dict]:

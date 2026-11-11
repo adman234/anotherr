@@ -46,6 +46,10 @@ DEFAULTS: dict = {
         "ffmpeg_threads": 0,     # 0 = let ffmpeg decide
         "child_memory_limit_mb": 3072,  # kill an ffmpeg/ffprobe that grows past this (0 = no limit)
         "max_audio_tracks": 4,
+        # rescans of an unchanged file reuse the last scan's decode/audio/language/transcript results and rerun
+        # only the cheap verdicts (plus any slow step an open issue depends on); off = every scan is a full scan
+        "quick_rescan": True,
+        "quick_rescan_max_days": 90,  # do a full scan anyway once the reused results are this old (0 = never)
         # optional checks (see Dashboard -> Where scan time goes): turn off the ones that cost more than they find
         "checks": {
             "interlace": True,               # idet sample for interlaced video

@@ -1,6 +1,7 @@
 """The scan pipeline: probe -> integrity -> audio/language -> subtitles -> multi-episode -> reviews."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -60,6 +61,25 @@ class Ctx:
     expected: str = ""
     orig_track: int | None = None
     live: dict = field(default_factory=dict)  # this scan's entry in CURRENT
+    full: bool = False                          # caller asked for a full scan (no reuse)
+    cache: dict = field(default_factory=dict)   # expensive results reused from the previous scan
+    fresh: dict = field(default_factory=dict)   # expensive results of this scan (saved for the next one)
+    force: set = field(default_factory=set)     # kinds to recompute even when cached: decode, transcribe,
+                                                # language (every track) or language:<a_index>
+
+    def forced(self, kind: str, track: int | None = None) -> bool:
+        return kind in self.force or (track is not None and f"{kind}:{track}" in self.force)
+
+    def cached(self, kind: str, key: str, fn, track: int | None = None):
+        """Reuse `kind:key` from the previous scan unless that kind is forced; otherwise run fn().
+        Fresh values go through JSON so both paths hand back the same shapes (lists, not tuples)."""
+        k = f"{kind}:{key}"
+        if k in self.cache and not self.forced(kind, track):
+            v = self.cache[k]
+        else:
+            v = _jsonable(fn())
+        self.fresh[k] = v
+        return v
 
     def issue(self, category: str, code: str, severity: str, message: str, **details):
         self.issues.append({"category": category, "code": code, "severity": severity, "message": message,
@@ -88,6 +108,106 @@ class Ctx:
 
 def _check_on(ctx: "Ctx", name: str) -> bool:
     return ctx.checks.get(name, True) is not False
+
+
+def _jsonable(v):
+    return json.loads(json.dumps(v, default=float))
+
+
+# ====================================================================== quick rescan
+# A rescan of an unchanged file reuses the slow measurements of the previous scan (decoding, reading audio,
+# speech and language detection, subtitle packets, transcripts) and reruns only the verdict logic. A step is
+# measured again when an open issue depends on it. A changed file (redownload, remux) gets a full scan.
+
+CACHE_VERSION = 1
+SIZE_SLACK = 1 << 20  # header-only edits (mkvpropedit retag / default flags) can move the size a little
+DECODE_CODES = {"truncated", "decode_stopped_early", "decode_errors_severe", "decode_errors", "full_decode_errors",
+                "full_decode_minor", "frozen_video", "black_video"}
+LANGUAGE_CODES = {"audio_mislabeled", "language_unconfirmed"}
+TRANSCRIBE_CODES = {"dubtitles", "subs_mismatch", "subs_mismatch_partial", "subs_out_of_sync"}
+
+
+def fingerprint(ctx: Ctx) -> dict:
+    """What has to stay the same for old measurements to still describe the file. Track languages, titles and
+    default/forced flags are left out: editing them rewrites the header only, the audio is the same."""
+    info = ctx.info
+
+    def r(x):
+        return round(float(x or 0), 1)
+
+    return {"v": CACHE_VERSION, "size": int(info.get("size") or 0), "arr_file_id": ctx.file.get("arr_file_id"),
+            "duration": r(info.get("duration")),
+            "video": [[v.get("index"), v.get("codec"), v.get("width"), v.get("height"), r(v.get("duration"))]
+                      for v in info.get("video") or []],
+            "audio": [[a.get("index"), a.get("codec"), a.get("channels"), r(a.get("duration"))]
+                      for a in info.get("audio") or []],
+            "subs": [[s.get("index"), s.get("codec")] for s in info.get("subs") or [] if not s.get("external")]}
+
+
+def same_file(a: dict | None, b: dict) -> bool:
+    if not a:
+        return False
+    rest_a = {k: v for k, v in a.items() if k != "size"}
+    rest_b = {k: v for k, v in b.items() if k != "size"}
+    return rest_a == rest_b and abs(int(a.get("size") or 0) - int(b.get("size") or 0)) <= SIZE_SLACK
+
+
+def forced_kinds(file_id: int) -> set[str]:
+    """Slow steps to measure again because an open issue is about what they measure."""
+    out = set()
+    for r in db.q("SELECT code, details FROM issues WHERE file_id=? AND status='open'", (file_id,)):
+        code = r["code"]
+        if code in DECODE_CODES:
+            out.add("decode")
+        elif code in TRANSCRIBE_CODES:
+            out.add("transcribe")
+        elif code in LANGUAGE_CODES:
+            ai = (db.unj(r["details"], {}) or {}).get("a_index")
+            out.add(f"language:{ai}" if isinstance(ai, int) else "language")
+    return out
+
+
+def prepare_reuse(ctx: Ctx) -> list | None:
+    """Decide quick or full for this scan. Returns the previous scan's segments to reuse, or None (full scan)."""
+    sc = ctx.cfg["scan"]
+    fp = fingerprint(ctx)
+    ctx.result["fingerprint"] = fp
+    want = [int(ctx.pcfg["segments"]), float(ctx.pcfg["seconds"])]
+    why = ""
+    prev = None
+    if ctx.full:
+        why = "full scan requested"
+    elif not sc.get("quick_rescan", True):
+        why = "quick rescans are off in Settings"
+    else:
+        row = db.q1("SELECT id, result FROM scans WHERE file_id=? AND status='done' AND result LIKE '%\"cache\"%' "
+                    "ORDER BY id DESC LIMIT 1", (ctx.file["id"],))
+        prev = db.unj(row["result"], {}) if row else None
+        if not prev or not prev.get("cache"):
+            why, prev = "no earlier scan to reuse", None
+        elif not same_file(prev.get("fingerprint"), fp):
+            why, prev = "the file changed since the last scan", None
+        else:
+            made = float((prev["cache"] or {}).get("made_at") or 0)
+            max_days = float(sc.get("quick_rescan_max_days", 90) or 0)
+            # Compare what the profiles asked for: on a short file the picker fits fewer or shorter
+            # segments than asked, and that must not count as "the last scan sampled less".
+            had_n, had_s = prev.get("sampled") or [0, 0]
+            if max_days and time.time() - made > max_days * 86400:
+                why, prev = f"cached results are older than {max_days:.0f} days", None
+            elif had_n < want[0] or had_s < want[1]:
+                why, prev = f"the {ctx.profile} profile samples more than the last scan did", None
+    if not prev:
+        ctx.result["rescan"] = {"mode": "full", "why": why}
+        ctx.fresh["made_at"] = time.time()
+        ctx.result["sampled"] = want
+        return None
+    ctx.cache = prev["cache"]
+    ctx.fresh["made_at"] = ctx.cache.get("made_at")
+    ctx.result["sampled"] = prev["sampled"]
+    ctx.force = forced_kinds(ctx.file["id"])
+    ctx.result["rescan"] = {"mode": "quick", "from_scan": row["id"], "rerun": sorted(ctx.force)}
+    return [tuple(s) for s in prev["segments"]]
 
 
 # ====================================================================== entry
@@ -173,19 +293,20 @@ def _resync_missing(fid: int, item: dict):
 
 
 def scan_file(file_id: int, profile: str | None = None, source: str = "manual", seed: int | None = None,
-              slot: str = "main", why: str = "") -> dict:
+              slot: str = "main", why: str = "", full: bool = False) -> dict:
     with _active_lock:
         if file_id in _active_files:
             return {"status": "skipped", "error": "already being scanned"}
         _active_files.add(file_id)
     try:
-        return _scan_file(file_id, profile, source, seed, slot, why)
+        return _scan_file(file_id, profile, source, seed, slot, why, full)
     finally:
         with _active_lock:
             _active_files.discard(file_id)
 
 
-def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None, slot: str, why: str) -> dict:
+def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None, slot: str, why: str,
+               full: bool = False) -> dict:
     f = db.q1("SELECT * FROM files WHERE id=?", (file_id,))
     if not f:
         raise ValueError(f"file {file_id} not found")
@@ -200,7 +321,7 @@ def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None,
     live = {"file_id": file_id, "scan_id": scan_id, "title": item["title"], "label": f.get("label", ""),
             "disk": f.get("disk", ""), "why": why, "profile": profile, "started_at": started, "step": "starting"}
     CURRENT[slot] = live
-    ctx = Ctx(file=f, item=item, cfg=cfg, profile=profile, pcfg=pcfg, seed=seed, live=live)
+    ctx = Ctx(file=f, item=item, cfg=cfg, profile=profile, pcfg=pcfg, seed=seed, live=live, full=full)
     status, error = "done", ""
     try:
         run_pipeline(ctx)
@@ -246,7 +367,8 @@ def run_pipeline(ctx: Ctx):
         return
 
     n, secs = int(ctx.pcfg["segments"]), float(ctx.pcfg["seconds"])
-    ctx.segments = media.pick_segments(ctx.info["duration"], n, secs, rng)
+    reuse = prepare_reuse(ctx)
+    ctx.segments = reuse or media.pick_segments(ctx.info["duration"], n, secs, rng)
     ctx.result["segments"] = ctx.segments
     check_decode(ctx)
     if ctx.info["audio"]:
@@ -452,20 +574,34 @@ def check_decode(ctx: Ctx):
     threads = int(ctx.cfg["scan"].get("ffmpeg_threads", 0))
     hw = ctx.cfg["scan"].get("hw_decode", "auto")
     has_video = bool(ctx.info["video"])
-    results = []
+    key = f"{_seg_key(ctx.segments)}|v{int(has_video)}|i{int(_check_on(ctx, 'interlace'))}"
+    m = ctx.cached("decode", key, lambda: _measure_decode(ctx, threads, hw, has_video))
+    results = m["results"]
+    ctx.result["decode"] = results
+    ctx.result["gpu_decode"] = any(r.get("gpu") for r in results)
+    if has_video:
+        _freeze_verdict(ctx, m["freeze"])
+    _decode_verdict(ctx, results, threads, hw, has_video)
+
+
+def _seg_key(segments) -> str:
+    return ",".join(f"{s:.1f}+{d:.0f}" for s, d in segments)
+
+
+def _measure_decode(ctx: Ctx, threads: int, hw: str, has_video: bool) -> dict:
+    """The slow half of the decode check: decode each segment, picture checks, freeze confirmation."""
+    results, freeze = [], []
     for i, (s, d) in enumerate(ctx.segments):
         ctx.step(f"decoding segment {i + 1}/{len(ctx.segments)}")
         results.append(media.decode_segment(ctx.path, s, d, threads, has_video=has_video, hw=hw,
                                             audio_maps=media.live_audio(ctx.info, s)))
-    ctx.result["decode"] = results
-    ctx.result["gpu_decode"] = any(r.get("gpu") for r in results)
     if has_video:
         mid_idx = list(range(1, len(results) - 1)) if len(results) > 2 else []
         for i in mid_idx:
             ctx.step("video checks")
             vc = media.video_checks(ctx.path, results[i]["start"], results[i]["dur"])
             results[i]["black"], results[i]["freeze_candidates"] = vc["black"], vc["freeze_candidates"]
-        check_freeze(ctx, results, mid_idx)
+        freeze = _freeze_evidence(ctx, results, mid_idx)
         if _check_on(ctx, "interlace"):
             ctx.step("interlace check")
             probe_at = results[mid_idx[0]]["start"] if mid_idx else results[0]["start"]
@@ -480,14 +616,18 @@ def check_decode(ctx: Ctx):
             again["retried_from_gpu"] = {"decoded": r["decoded"], "errors": r["errors"][:5]}
             again["black"], again["freeze_candidates"] = r.get("black", []), r.get("freeze_candidates", [])
             results[i] = again
-    ctx.result["decode"] = results
+    return {"results": results, "freeze": freeze}
+
+
+def _decode_verdict(ctx: Ctx, results: list[dict], threads: int, hw: str, has_video: bool):
     total_err = sum(r.get("error_count", 0) for r in results)
     bad_segs = sum(1 for r in results if r.get("error_count", 0) > 5)
     last = len(results) - 1
     for i, r in enumerate(results):
         short = r["decoded"] < r["dur"] * 0.9 - 2
         if short and i == last:
-            confirm = confirm_truncation(ctx, threads, has_video)
+            confirm = ctx.cached("decode", f"truncation:{_seg_key(ctx.segments)}",
+                                 lambda: confirm_truncation(ctx, threads, has_video))
             ctx.result["truncation_check"] = confirm
             if confirm["truncated"]:
                 ctx.issue("integrity", "truncated", "critical",
@@ -525,9 +665,14 @@ def check_decode(ctx: Ctx):
         ctx.issue("video", "interlaced", "info", "Video looks interlaced (not deinterlaced at encode).",
                   tff=tff, bff=bff, progressive=prog)
     if ctx.pcfg.get("full_decode"):
-        ctx.step("full decode")
-        fd = media.full_decode(ctx.path, threads, hw=hw)
-        ctx.result["full_decode"] = {"error_count": fd["error_count"], "errors": fd["errors"][:20]}
+
+        def run_full():
+            ctx.step("full decode")
+            fd = media.full_decode(ctx.path, threads, hw=hw)
+            return {"error_count": fd["error_count"], "errors": fd["errors"][:20]}
+
+        fd = ctx.cached("decode", "full", run_full)
+        ctx.result["full_decode"] = fd
         if fd["error_count"] > 20:
             ctx.issue("integrity", "full_decode_errors", "error", f"Full decode found {fd['error_count']} errors.",
                       sample=fd["errors"][:10])
@@ -555,8 +700,12 @@ EDGE_S = 120  # ignore the first/last 2 minutes for picture checks (logos, credi
 
 def check_freeze(ctx: Ctx, results: list[dict], mid_idx: list[int]):
     """Screen candidates on keyframes, confirm each with a continuous decode, report with evidence."""
+    _freeze_verdict(ctx, _freeze_evidence(ctx, results, mid_idx))
+
+
+def _freeze_evidence(ctx: Ctx, results: list[dict], mid_idx: list[int]) -> list[dict]:
     dur = ctx.info["duration"]
-    evidence, confirmed_segs = [], set()
+    evidence = []
     budget = 3  # continuous decodes per file
     for i in mid_idx:
         for a, b in results[i].get("freeze_candidates", []):
@@ -566,9 +715,12 @@ def check_freeze(ctx: Ctx, results: list[dict], mid_idx: list[int]):
             ctx.step("confirming possible freeze")
             c = media.confirm_freeze(ctx.path, a, min(b - a + 2, 60))
             evidence.append({"segment": i, "candidate": (a, b), **c})
-            if c.get("confirmed"):
-                confirmed_segs.add(i)
+    return evidence
+
+
+def _freeze_verdict(ctx: Ctx, evidence: list[dict]):
     ctx.result["freeze_check"] = evidence
+    confirmed_segs = {e["segment"] for e in evidence if e.get("confirmed")}
     hits = [e for e in evidence if e.get("confirmed")]
     if not hits:
         return
@@ -608,52 +760,106 @@ def check_audio(ctx: Ctx):
 
     tracks = sorted(tracks, key=prio)[: int(ctx.cfg["scan"].get("max_audio_tracks", 4))]
     segs = _audio_segments(ctx)
-    for si in segs:
+    skey = _seg_key([ctx.segments[si] for si in segs])
+    reuse = {}
+    for a in tracks:
+        c = ctx.cache.get(f"track:{a['a_index']}:{skey}")
+        if c and not c["t"].get("error") and not ctx.forced("language", a["a_index"]):
+            reuse[a["a_index"]] = c
+    todo = [a["a_index"] for a in tracks if a["a_index"] not in reuse]
+    for si in segs if todo else []:
         ctx.step(f"reading audio segment {si + 1}")
         s, d = ctx.segments[si]
-        for ai, audio in media.extract_audio_multi(ctx.path, [a["a_index"] for a in tracks], s, d).items():
+        for ai, audio in media.extract_audio_multi(ctx.path, todo, s, d).items():
             ctx.audio[(ai, si)] = audio
     for a in tracks:
         ai = a["a_index"]
-        speech_all, levels = [], []
-        for si in segs:
-            ctx.step(f"speech detection track {ai + 1}")
-            s, d = ctx.segments[si]
-            audio = ctx.audio.get((ai, si), np.zeros(0, dtype=np.float32))
-            levels.append(analysis.rms_db(audio))
-            iv = stt.speech_intervals(audio)
-            ctx.vad[(ai, si)] = [(s + a0, s + b0) for a0, b0 in iv]
-            speech_all.append((audio, iv))
-        speech_s = sum(e - s for _, iv in speech_all for s, e in iv)
-        t = {"a_index": ai, "tag": a["lang"], "title": a["title"], "default": a["default"],
-             "channels": a.get("channels"), "codec": a["codec"], "speech_s": round(speech_s, 1),
-             "window_s": round(sum(ctx.segments[si][1] for si in segs), 1),
-             "level_db": round(max(levels) if levels else -120, 1), "detected": "", "prob": 0.0, "windows": []}
-        if levels and max(levels) < -70:
+        if ai in reuse:
+            t = _restore_track(ctx, a, reuse[ai])
+        else:
+            t = _measure_track(ctx, a, segs)
+        if t.get("silent"):
             ctx.issue("audio", "silent_audio", "error", f"Audio track #{ai + 1} ({langs.name(a['lang'])}) is silent.",
                       a_index=ai)
-        else:
-            # language ID per window (each from a different part of the file), not one pooled clip
-            ctx.step(f"language detection track {ai + 1}")
-            for si, (au, iv) in zip(segs, speech_all):
-                if sum(e - s for s, e in iv) < 4 or len(t["windows"]) >= 5:
-                    continue
-                try:
-                    lang, prob, _ = stt.WHISPER.detect_language(stt.speech_audio(au, iv, 30))
-                except Exception as e:  # noqa: BLE001
-                    t["error"] = str(e)
-                    ctx.result.setdefault("warnings", []).append(f"language detection failed: {e}")
-                    break
-                t["windows"].append({"at": round(ctx.segments[si][0], 1), "lang": langs.norm(lang) or lang,
-                                     "prob": round(prob, 3)})
-            agg = analysis.aggregate_language([(w["lang"], w["prob"]) for w in t["windows"]])
-            t.update(detected=agg["detected"], prob=agg["prob"], agree=agg["agree"], all_agree=agg["all_agree"])
         ctx.tracks[ai] = t
+        # the same dict: language extras that check_language adds later are saved too
+        ctx.fresh[f"track:{ai}:{skey}"] = {"t": t, "vad": [[si, ctx.vad.get((ai, si), [])] for si in segs]}
     ctx.result["audio_tracks"] = list(ctx.tracks.values())
+
+
+TRACK_KEYS = ("speech_s", "window_s", "level_db", "windows", "silent", "extra_tried")
+
+
+def _track_base(a: dict) -> dict:
+    """What the stream header says now (a retag changes these without touching the audio)."""
+    return {"a_index": a["a_index"], "tag": a["lang"], "title": a["title"], "default": a["default"],
+            "channels": a.get("channels"), "codec": a["codec"]}
+
+
+def _restore_track(ctx: Ctx, a: dict, c: dict) -> dict:
+    old = c["t"]
+    t = {**_track_base(a), "detected": "", "prob": 0.0,
+         **{k: (list(old[k]) if k == "windows" else old[k]) for k in TRACK_KEYS if k in old}}
+    for si, ivs in c["vad"]:
+        ctx.vad[(a["a_index"], si)] = [tuple(x) for x in ivs]
+    if not t.get("silent"):
+        agg = analysis.aggregate_language([(w["lang"], w["prob"]) for w in t["windows"]])
+        t.update(detected=agg["detected"], prob=agg["prob"], agree=agg["agree"], all_agree=agg["all_agree"])
+    return t
+
+
+def _track_audio(ctx: Ctx, ai: int, si: int):
+    """Decoded audio of one track in one segment, read now if a reused scan never loaded it."""
+    if (ai, si) not in ctx.audio:
+        s, d = ctx.segments[si]
+        ctx.step(f"reading audio segment {si + 1}")
+        got = media.extract_audio_multi(ctx.path, [ai], s, d).get(ai)
+        ctx.audio[(ai, si)] = got if got is not None else np.zeros(0, dtype=np.float32)
+    return ctx.audio[(ai, si)]
+
+
+def _measure_track(ctx: Ctx, a: dict, segs: list[int]) -> dict:
+    """Speech detection, level and per-window language ID of one track (the slow part of the audio check)."""
+    ai = a["a_index"]
+    speech_all, levels = [], []
+    for si in segs:
+        ctx.step(f"speech detection track {ai + 1}")
+        s, d = ctx.segments[si]
+        audio = ctx.audio.get((ai, si), np.zeros(0, dtype=np.float32))
+        levels.append(analysis.rms_db(audio))
+        iv = stt.speech_intervals(audio)
+        ctx.vad[(ai, si)] = [(s + a0, s + b0) for a0, b0 in iv]
+        speech_all.append((audio, iv))
+    speech_s = sum(e - s for _, iv in speech_all for s, e in iv)
+    t = {**_track_base(a), "speech_s": round(speech_s, 1),
+         "window_s": round(sum(ctx.segments[si][1] for si in segs), 1),
+         "level_db": round(max(levels) if levels else -120, 1), "detected": "", "prob": 0.0, "windows": []}
+    if levels and max(levels) < -70:
+        t["silent"] = True
+    else:
+        # language ID per window (each from a different part of the file), not one pooled clip
+        ctx.step(f"language detection track {ai + 1}")
+        for si, (au, iv) in zip(segs, speech_all):
+            if sum(e - s for s, e in iv) < 4 or len(t["windows"]) >= 5:
+                continue
+            try:
+                lang, prob, _ = stt.WHISPER.detect_language(stt.speech_audio(au, iv, 30))
+            except Exception as e:  # noqa: BLE001
+                t["error"] = str(e)
+                ctx.result.setdefault("warnings", []).append(f"language detection failed: {e}")
+                break
+            t["windows"].append({"at": round(ctx.segments[si][0], 1), "lang": langs.norm(lang) or lang,
+                                 "prob": round(prob, 3)})
+        agg = analysis.aggregate_language([(w["lang"], w["prob"]) for w in t["windows"]])
+        t.update(detected=agg["detected"], prob=agg["prob"], agree=agg["agree"], all_agree=agg["all_agree"])
+    return t
 
 
 def _extra_language_windows(ctx: Ctx, t: dict, positions=(0.15, 0.35, 0.55, 0.75), secs: float = 30.0):
     """More language samples from across the file for a track that has too few."""
+    if t.get("extra_tried"):
+        return  # reused from a scan that already sampled these positions
+    t["extra_tried"] = True
     dur = ctx.info.get("duration") or 0
     for p in positions:
         if len(t["windows"]) >= 5 or dur < 120:
@@ -973,8 +1179,7 @@ def check_subtitles(ctx: Ctx):
     win_s = sum(d for _, d in windows) or dur
     packets = {}
     if any(not s["external"] for s in mine):
-        ctx.step("reading subtitles")
-        packets = media.sub_packets(ctx.path, windows)
+        packets = _sub_packets(ctx, windows)
     analysed = []
     for s in mine[:6]:
         cues, span = [], dur
@@ -1095,13 +1300,17 @@ def check_subtitles(ctx: Ctx):
     transcript = []
     if text_full and native and _check_on(ctx, "subtitle_content") and (not is_dub or (ctx.item.get("is_anime") and ctx.cfg["anime"]["detect_dubtitles"])):
         ai = native["a_index"]
-        segs = sorted([si for si in _audio_segments(ctx) if (ai, si) in ctx.audio],
+        segs = sorted([si for si in _audio_segments(ctx) if (ai, si) in ctx.vad],
                       key=lambda si: -sum(e - s for s, e in ctx.vad.get((ai, si), [])))[:2]
         if segs:
-            ctx.step("transcribing for subtitle content check")
             for si in segs:
+                def run(si=si):
+                    audio = _track_audio(ctx, ai, si)
+                    ctx.step("transcribing for subtitle content check")
+                    return stt.WHISPER.transcribe(audio, langs.iso1(sub_lang))
                 try:
-                    transcript.append((si, stt.WHISPER.transcribe(ctx.audio[(ai, si)], langs.iso1(sub_lang))))
+                    transcript.append((si, ctx.cached("transcribe", f"{ai}:{_seg_key([ctx.segments[si]])}:{sub_lang}",
+                                                      run)))
                 except Exception as e:  # noqa: BLE001
                     ctx.result.setdefault("warnings", []).append(f"transcription failed: {e}")
                     transcript = []
@@ -1181,6 +1390,24 @@ def check_subtitles(ctx: Ctx):
                   "Subtitles are offset: " + ", ".join(f"{a['name']} {a['sync']['offset']:+.1f}s" for a in off)
                   + (" (text matches once shifted)" if any(a.get("text") for a in off) else "") + ".",
                   offset=off[0]["sync"]["offset"], tracks=[a["name"] for a in off], **evidence)
+
+
+SUB_CACHE_MAX = 512 * 1024  # image subtitle packets are big; those are read again rather than stored
+
+
+def _sub_packets(ctx: Ctx, windows: list) -> dict:
+    """Embedded subtitle packets in the sampled windows, reused from the last scan when the file is unchanged.
+    Stored as JSON: stream indexes become strings and packet bytes become hex."""
+    key = f"subs:packets:{_seg_key(windows)}"
+    if key in ctx.cache and not ctx.forced("transcribe"):
+        got = ctx.cache[key]
+    else:
+        ctx.step("reading subtitles")
+        got = {str(k): [{**p, "data": p["data"].hex()} for p in v]
+               for k, v in media.sub_packets(ctx.path, windows).items()}
+    if len(json.dumps(got)) <= SUB_CACHE_MAX:
+        ctx.fresh[key] = got
+    return {int(k): [{**p, "data": bytes.fromhex(p["data"])} for p in v] for k, v in got.items()}
 
 
 def _read(path: str) -> str | None:
@@ -1401,7 +1628,13 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
         db.x("UPDATE scans SET status='cancelled', finished_at=? WHERE id=?", (now, scan_id))
         return {"scan_id": scan_id, "status": status}
     ctx.result["elapsed_s"] = round(elapsed, 1)
+    keep_cache = status == "done" and any(k != "made_at" for k in ctx.fresh)
+    if keep_cache:
+        ctx.result["cache"] = ctx.fresh
     with db.tx() as c:
+        if keep_cache:  # only the newest scan keeps its cache; older rows would just repeat it
+            c.execute("UPDATE scans SET result=json_remove(result, '$.cache') WHERE file_id=? AND id<>? "
+                      "AND result LIKE '%\"cache\"%'", (fid, scan_id))
         ignored = {r[0] for r in c.execute("SELECT DISTINCT code FROM issues WHERE file_id=? AND status='ignored'", (fid,))}
         c.execute("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open'", (now, fid))
         for i in ctx.issues:

@@ -101,4 +101,6 @@ def test_dual_actions_split():
 
     assert actions.is_dual({"kind": audio_request.KIND, "file_id": 1})
     assert not actions.is_dual({"kind": "redownload", "file_id": 1, "codes": ["truncated"]})
-    assert not actions.is_dual({"kind": "set_default_audio", "file_id": 1})
+    assert actions.is_dual({"kind": "set_default_audio", "file_id": 1})
+    assert actions.is_dual({"kind": "set_default_subtitle", "file_id": 1})
+    assert not actions.is_dual({"kind": "retag_audio", "file_id": 1})

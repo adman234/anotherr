@@ -223,13 +223,17 @@ def _acceptable_language_gaps(file_id: int, codes: set[str]) -> set[str]:
 
 
 def is_dual(a: dict) -> bool:
-    """Proposals that belong on the Dual actions tab: season-audio accepts, default-track changes (picking which
-    of several audio or subtitle tracks plays first), and redownloads raised only for single-language gaps (the
-    other language is there). A redownload for a file with no usable audio stays main."""
+    """Proposals that belong on the Dual actions tab: season-audio accepts, default-track changes the planner
+    marked as a dual-audio choice (English vs original language, see defaults.is_dual_choice), and redownloads
+    raised only for single-language gaps (the other language is there). A redownload for a file with no usable
+    audio stays main."""
     from . import audio_request
 
-    if a.get("kind") in (audio_request.KIND, "set_default_audio", "set_default_subtitle"):
+    if a.get("kind") == audio_request.KIND:
         return True
+    if a.get("kind") in ("set_default_audio", "set_default_subtitle"):
+        p = a.get("payload")
+        return bool((db.unj(p, {}) if isinstance(p, str) else p or {}).get("dual"))
     codes = set(a.get("codes") or [])
     if a.get("kind") != "redownload" or not codes or not codes <= set(audio_request.ALLOW_FOR_CODE):
         return False

@@ -57,15 +57,20 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
               fallback: str = "", subs_all: list[dict] | None = None) -> dict:
     """What a file needs. Returns {"ops": [...], "audio": {...}|None, "sub": {...}|None, "notes": [...]}.
     fallback: the language that should play when the file has no track in the preferred one (English)."""
-    out = {"ops": [], "audio": None, "sub": None, "notes": []}
+    out = {"ops": [], "audio": None, "sub": None, "notes": [], "dual": False}
     cur = current_default_audio(tracks)
     final_lang = (cur or {}).get("effective")
+    orig = pref
     if fallback and pref and not any(_same(t.get("effective"), pref) for t in tracks):
         pref = fallback
     if "default_audio_not_preferred" in codes and pref and cur and (cur.get("commentary")
                                                                   or not _same(cur.get("effective"), pref)):
         tgt = pick_audio(tracks, pref)
-        if tgt:
+        if not cur.get("commentary") and not cur.get("effective"):
+            # hold: what plays now is unidentified, so we can't tell whether this is a dual-audio choice
+            out["notes"].append(f"default audio track {cur['a_index'] + 1}'s language couldn't be identified - "
+                                "no change until a rescan identifies it")
+        elif tgt:
             out["ops"].append({"type": "a", "index": tgt["a_index"], "default": True, "expect_lang": tgt.get("tag") or ""})
             out["audio"] = {"to": tgt["a_index"], "to_lang": pref, "from": cur["a_index"], "from_lang": cur.get("effective"),
                             "channels": tgt.get("channels")}
@@ -101,7 +106,22 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
             out["ops"].append({"type": "s", "index": foreign["s_index"], "default": False})
             out["sub"] = {"to": None, "clear": foreign["s_index"], "from": foreign["s_index"],
                           "from_lang": foreign["lang"], "title": "", "image": False, "sdh": False}
+    out["dual"] = is_dual_choice(tracks, out["audio"], orig)
     return out
+
+
+def is_dual_choice(tracks: list[dict], audio: dict | None, orig: str) -> bool:
+    """Whether a default-track change is a dual-audio choice (the Dual actions tab).
+    Audio: only a swap between English and the original language (when the original isn't English).
+    English or original vs anything else is a plain fix. Subtitles: dual when the file has both English
+    and original-language audio, since the right subtitle depends on which of the two plays."""
+    if not orig or _same(orig, "eng"):
+        return False
+    if audio:
+        pair = (audio.get("from_lang") or "", audio.get("to_lang") or "")
+        return any(_same(a, "eng") and _same(b, orig) for a, b in (pair, pair[::-1]))
+    has = lambda lang: any(_same(t.get("effective"), lang) and t.get("confident") for t in tracks)
+    return has("eng") and has(orig)
 
 
 def fix_text_audio(tracks: list[dict], pref: str) -> str:
@@ -181,7 +201,7 @@ def refresh_item(item_id: int) -> dict:
         if not plan["ops"]:
             continue
         kind = AUDIO if plan["audio"] else SUBS
-        key = (kind, retag._season(f), _signature(plan))
+        key = (kind, retag._season(f), _signature(plan), plan["dual"])
         groups.setdefault(key, []).append({"file": f, "plan": plan, "scan_started": ev.get("scan_started"),
                                            "codes": codes})
     existing = {}
@@ -192,7 +212,7 @@ def refresh_item(item_id: int) -> dict:
     now = time.time()
     made = {"created": 0, "updated": 0, "withdrawn": 0}
     for key, grp in groups.items():
-        kind, season, sig = key
+        kind, season, sig, dual = key
         grp.sort(key=lambda g: g["file"].get("label") or "")
         files = []
         for g in grp:
@@ -203,7 +223,7 @@ def refresh_item(item_id: int) -> dict:
                           "why": _signature(g["plan"]), "conf": 1.0,
                           **trackedit.preview(f.get("local_path") or f["arr_path"], g["plan"]["ops"], cfg)})
         payload = {"item_id": item_id, "key": list(key), "family": "defaults", "season": season, "files": files,
-                   "series_language": pref}
+                   "series_language": pref, "dual": dual}
         reason = _reason(item, season, grp)
         sub_codes = sorted({c for g in grp for c in g["codes"] & {"default_subs_signs", "default_subs_foreign"}})
         codes = ["default_audio_not_preferred"] if kind == AUDIO else sub_codes or ["default_subs_signs"]

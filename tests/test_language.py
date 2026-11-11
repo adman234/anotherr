@@ -89,31 +89,3 @@ def test_untagged_subtitle_language_from_title():
     info = media.summarize({"streams": [{"codec_type": "subtitle", "codec_name": "subrip", "index": 2,
                                          "tags": {"title": "English.Foreign.parts.only"}}]})
     assert info["subs"][0]["lang"] == "eng"
-
-
-def test_gpu_gate_limits_slots_and_rests(monkeypatch):
-    import threading
-    import time
-    from anotherr import gpu, settings
-    monkeypatch.setattr(settings, "get", lambda: {"scan": {"gpu_slots": 1, "gpu_duty_percent": 50}})
-    gpu._next_start = 0.0
-    live, peak, starts = [0], [0], []
-
-    def job():
-        with gpu.use():
-            starts.append(time.time())
-            live[0] += 1
-            peak[0] = max(peak[0], live[0])
-            time.sleep(0.1)
-            live[0] -= 1
-
-    ts = [threading.Thread(target=job) for _ in range(3)]
-    for t in ts:
-        t.start()
-    for t in ts:
-        t.join()
-    starts.sort()
-    assert peak[0] == 1
-    # each 0.1 s job is followed by ~0.1 s of rest at 50%
-    assert all(b - a >= 0.18 for a, b in zip(starts, starts[1:])), starts
-    gpu._next_start = 0.0

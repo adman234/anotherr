@@ -11,9 +11,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/config/models/hf \
     PUID=99 PGID=100 TZ=Etc/UTC
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv ffmpeg tzdata ca-certificates util-linux \
-      tesseract-ocr tesseract-ocr-eng mkvtoolnix \
+# If the Ubuntu archive is unreachable from the build machine, retry once on another mirror.
+RUN inst() { apt-get update -o Acquire::http::Timeout=20 -o Acquire::Retries=2 \
+      && apt-get install -y --no-install-recommends -o Acquire::Retries=2 \
+         python3 python3-venv ffmpeg tzdata ca-certificates util-linux \
+         tesseract-ocr tesseract-ocr-eng mkvtoolnix; } \
+ && { inst || { sed -i -E 's#https?://(archive|security)\.ubuntu\.com/ubuntu/?#http://mirrors.edge.kernel.org/ubuntu/#g' \
+        /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null; inst; }; } \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m venv /opt/venv
 

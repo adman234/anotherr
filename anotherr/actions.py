@@ -430,15 +430,30 @@ def subs_out_of_sync_ids() -> list[int]:
     return out
 
 
-def approve_english_retags(min_conf: float | None = None) -> dict:
-    """Queue every qualifying English retag; they run one after another in the background."""
+def english_default_audio_ids() -> list[int]:
+    """Proposed set_default_audio batches on the main tab (not dual-audio choices) where every file's new default
+    audio track is English."""
+    from . import defaults
+
+    out = []
+    for a in db.q("SELECT id, kind, payload FROM actions WHERE kind='set_default_audio' AND status='proposed'"):
+        p = db.unj(a["payload"], {}) or {}
+        files = p.get("files") or []
+        if not p.get("dual") and files and all(
+                defaults._same((f.get("audio") or {}).get("to_lang"), "eng") for f in files):
+            out.append(a["id"])
+    return out
+
+
+def _approve_track_edits(ids: list[int], label: str) -> dict:
+    """Queue track-edit proposals; they run one after another in the background."""
     import threading
 
     from . import settings, trackedit
 
     if not settings.get()["retag"].get("enabled"):
         return {"ok": False, "error": "track editing is turned off in Settings -> Retag audio", "queued": 0}
-    claimed = [i for i in english_retag_ids(min_conf) if db.n(
+    claimed = [i for i in ids if db.n(
         "UPDATE actions SET status='running', result='queued', updated_at=? WHERE id=? AND status='proposed'",
         (time.time(), i))]
 
@@ -449,11 +464,21 @@ def approve_english_retags(min_conf: float | None = None) -> dict:
             except Exception as e:  # noqa: BLE001
                 db.x("UPDATE actions SET status='failed', result=?, updated_at=? WHERE id=? AND status='running'",
                      (f"crashed: {e}", time.time(), i))
-        db.log(f"Bulk English retag: {len(claimed)} action(s) processed")
+        db.log(f"{label}: {len(claimed)} action(s) processed")
 
     if claimed:
-        threading.Thread(target=go, name="anotherr-bulk-retag", daemon=True).start()
+        threading.Thread(target=go, name="anotherr-bulk-trackedit", daemon=True).start()
     return {"ok": True, "queued": len(claimed)}
+
+
+def approve_english_retags(min_conf: float | None = None) -> dict:
+    """Queue every qualifying English retag; they run one after another in the background."""
+    return _approve_track_edits(english_retag_ids(min_conf), "Bulk English retag")
+
+
+def approve_english_default_audio() -> dict:
+    """Queue every non-dual proposal that makes the English track the default audio."""
+    return _approve_track_edits(english_default_audio_ids(), "Bulk English default audio")
 
 
 def _run_queued(ids: list[int]) -> None:

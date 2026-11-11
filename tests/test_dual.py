@@ -104,3 +104,21 @@ def test_dual_actions_split():
     assert not actions.is_dual({"kind": "set_default_audio", "file_id": 1})
     assert actions.is_dual({"kind": "set_default_audio", "file_id": 1, "payload": {"dual": True}})
     assert not actions.is_dual({"kind": "retag_audio", "file_id": 1})
+
+
+def test_english_default_audio_bulk_picks_only_plain_english_targets():
+    from anotherr import actions
+
+    iid = db.x("INSERT INTO items(source, arr_id, kind, title) VALUES ('radarr', 1, 'movie', 'X')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, first_seen, status) "
+               "VALUES (?, 1, '/m/x.mkv', '[]', 0, 'ok')", (iid,))
+
+    def add(payload):
+        return db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
+                    "VALUES (?, 'set_default_audio', '', '[]', 'proposed', 0, ?, 0, 0)", (fid, db.j(payload)))
+
+    eng = add({"dual": False, "files": [{"audio": {"to_lang": "eng"}}]})
+    add({"dual": True, "files": [{"audio": {"to_lang": "eng"}}]})
+    add({"dual": False, "files": [{"audio": {"to_lang": "jpn"}}]})
+    add({"dual": False, "files": [{"audio": {"to_lang": "eng"}}, {"audio": {"to_lang": "jpn"}}]})
+    assert actions.english_default_audio_ids() == [eng]

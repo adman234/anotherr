@@ -881,12 +881,18 @@ def actions_bulk(body: dict = Body(...)):
 @app.get("/api/actions/bulk-preview", dependencies=[Depends(auth)])
 def actions_bulk_preview():
     return {"english_retags": len(actions.english_retag_ids()), "out_of_sync_resubs": len(actions.subs_out_of_sync_ids()),
+            "english_default_audio": len(actions.english_default_audio_ids()),
             "min_confidence": settings.get()["retag"].get("bulk_min_confidence", 0.95)}
 
 
 @app.post("/api/actions/bulk-english-retag", dependencies=[Depends(auth)])
 def actions_bulk_english():
     return actions.approve_english_retags()
+
+
+@app.post("/api/actions/bulk-english-default-audio", dependencies=[Depends(auth)])
+def actions_bulk_english_default_audio():
+    return actions.approve_english_default_audio()
 
 
 @app.post("/api/actions/bulk-out-of-sync", dependencies=[Depends(auth)])

@@ -1,6 +1,7 @@
 """faster-whisper wrapper: GPU when available, lazy load, unload when idle to free VRAM for Plex."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -8,7 +9,7 @@ import time
 
 import numpy as np
 
-from . import settings
+from . import gpu, settings
 
 log = logging.getLogger("anotherr.stt")
 SR = 16000
@@ -76,6 +77,9 @@ class Whisper:
         if self._model is not None and mins and time.time() - self.last_used > mins * 60:
             self.unload()
 
+    def _gpu(self):
+        return gpu.use() if (self.device or "").startswith("cuda") else contextlib.nullcontext()
+
     # ------------------------------------------------------------ inference
     def detect_language(self, audio: np.ndarray) -> tuple[str, float, list[tuple[str, float]]]:
         """Language detection on (up to) the first 30 s of speech audio."""
@@ -83,7 +87,8 @@ class Whisper:
             m = self._load()
             self.last_used = time.time()
             clip = audio[: SR * 30]
-            _, info = m.transcribe(clip, language=None, beam_size=1, condition_on_previous_text=False)
+            with self._gpu():
+                _, info = m.transcribe(clip, language=None, beam_size=1, condition_on_previous_text=False)
             probs = list(getattr(info, "all_language_probs", None) or [])[:5]
             return info.language, float(info.language_probability), [(l, float(p)) for l, p in probs]
 
@@ -91,9 +96,10 @@ class Whisper:
         with self._lock:
             m = self._load()
             self.last_used = time.time()
-            segs, _ = m.transcribe(audio, language=language or None, beam_size=2, vad_filter=True,
-                                   condition_on_previous_text=False)
-            out = [(s.start, s.end, s.text.strip()) for s in segs]
+            with self._gpu():  # segments are a generator: the GPU work happens while it is consumed
+                segs, _ = m.transcribe(audio, language=language or None, beam_size=2, vad_filter=True,
+                                       condition_on_previous_text=False)
+                out = [(s.start, s.end, s.text.strip()) for s in segs]
             self.last_used = time.time()
             return out
 

@@ -36,6 +36,9 @@ log = logging.getLogger("anotherr.trackedit")
 
 KINDS = ("retag_audio", "set_default_audio", "set_default_subtitle")
 MATROSKA = (".mkv", ".mka", ".mk3d", ".webm")
+# AVI has no per-track language or default flag, and ffmpeg can't pick a muxer for .divx: a copy would be
+# written in full and then fail verification every time, so these files are never proposed or edited.
+NO_TRACK_EDIT = (".avi", ".divx")
 LOG_PATH = os.path.join(db.CONFIG_DIR, "retag_log.jsonl")  # rollback records (name kept from the first version)
 MKVPROPEDIT = os.environ.get("ANOTHERR_MKVPROPEDIT", "mkvpropedit")
 EDIT_TIMEOUT = 60
@@ -99,6 +102,11 @@ def copy_args(path: str, tmp: str, ops: list[dict]) -> list[str]:
     return args + [tmp]
 
 
+def can_edit(path: str | None) -> bool:
+    """False for containers whose track headers can't hold a language or default flag (see NO_TRACK_EDIT)."""
+    return not (path or "").lower().endswith(NO_TRACK_EDIT)
+
+
 def method_for(path: str, nlink: int) -> str:
     return "mkvpropedit" if path.lower().endswith(MATROSKA) and nlink == 1 else "copy"
 
@@ -113,6 +121,8 @@ def preview(path: str, ops: list[dict], cfg: dict) -> dict:
         nlink = os.stat(path).st_nlink
     except OSError:
         nlink = 1
+    if not can_edit(path):
+        return {"method": "skip", "command": f"(skipped: {os.path.splitext(path)[1]} files can't store track languages or default flags)"}
     if nlink > 1 and not cfg["retag"].get("break_hardlinks"):
         return {"method": "skip", "command": f"(skipped: hardlinked to {nlink - 1} other path(s) - see retag.break_hardlinks)"}
     m = method_for(path, nlink)
@@ -147,7 +157,17 @@ def _shape(info: dict) -> tuple:
 
 
 def apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, str]:
-    """Write all ops in one go and verify. The original is untouched on any failure."""
+    """Write all ops in one go and verify. The original is untouched on any failure, and a copy's temp file
+    never outlives the call (an exception mid-copy used to leave a full-size .anotherr-edit.* behind)."""
+    if method != "copy":
+        return _apply(path, ops, method, size)
+    try:
+        return _apply(path, ops, method, size)
+    finally:
+        _rm(tmp_path(path))  # already renamed over the original on success; leftovers on any other way out
+
+
+def _apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, str]:
     before = media.summarize(media.ffprobe(path))
     if method == "mkvpropedit":
         try:
@@ -233,11 +253,15 @@ def _playing(path: str) -> bool:
 
 
 def write_path(f: dict, resolved: str) -> str | None:
-    """Where to write: the user-share path (/mnt/user/...) when that's writable - so only the media folders
-    need a read/write mount - otherwise the path the file was read from. None when neither is writable."""
+    """Where to write: the physical path the file was read from (/mnt/diskN/..., /mnt/cache/...) when that's
+    writable, otherwise the user-share path (/mnt/user/...). None when neither is writable.
+
+    The physical path comes first because a copy edit writes a whole new file next to the original: through
+    /mnt/user, Unraid puts that new file on the cache pool of a cache-enabled share and the mover has to carry
+    it back to the array. Written on the original's own disk it replaces the file in place."""
     from .sync import map_path
 
-    for p in (map_path(f["arr_path"]), resolved):
+    for p in (resolved, map_path(f["arr_path"])):
         if p and os.path.exists(p) and os.access(p, os.W_OK) and os.access(os.path.dirname(p), os.W_OK):
             return p
     return None
@@ -301,6 +325,8 @@ def edit_file(entry: dict, cfg: dict, action_id: int) -> dict:
     read_path = resolve_path(f)
     if not read_path:
         return {"status": "failed", "why": "file not found"}
+    if not can_edit(read_path):
+        return {"status": "skipped", "why": f"{os.path.splitext(read_path)[1]} files can't store track languages or default flags"}
     if not _allowed([read_path, map_path(f["arr_path"])], cfg):
         return {"status": "skipped", "why": "not under an allowed path (Settings -> Retag audio -> Allowed paths)"}
     path = write_path(f, read_path)
@@ -469,6 +495,37 @@ def refresh_apps(item: dict, bazarr: bool = True) -> list[str]:
         except arr.ServiceError as e:
             notes.append(f"Bazarr disk scan failed: {e}")
     return notes
+
+
+def sweep_temp(days: float = 7) -> int:
+    """Remove copy temp files that outlived their edit (container killed or restarted mid-copy, a failed
+    delete on the share layer). Temp files only exist while an edit runs, so with none running every
+    .anotherr-edit.* next to a file copied in the last `days` is a leftover. Only logged paths are checked:
+    no directory walks, so no array disks are woken for this."""
+    if _lock.locked():
+        return 0  # an edit is running: its temp file is live
+    cut = time.time() - days * 86400
+    paths: set[str] = set()
+    try:
+        with open(LOG_PATH) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("event") == "before" and r.get("method") == "copy" and r.get("path") and r.get("ts", 0) >= cut:
+                    paths.add(r["path"])
+    except OSError:
+        return 0
+    n = 0
+    for path in sorted(paths):
+        tmp = tmp_path(path)
+        if os.path.exists(tmp):
+            _rm(tmp)
+            if not os.path.exists(tmp):
+                n += 1
+                db.log(f"Removed a temp file left by an interrupted track edit: {tmp}", "warning")
+    return n
 
 
 def reap() -> int:

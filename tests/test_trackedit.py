@@ -134,3 +134,67 @@ def test_expand_clears_every_other_default_from_the_real_file():
                    {"type": "a", "index": 2, "default": False}]
     assert trackedit.mkv_args("f.mkv", ops)[2:] == ["--edit", "track:a1", "--set", "flag-default=1", "--edit", "track:a2",
                                                     "--set", "flag-default=0", "--edit", "track:a3", "--set", "flag-default=0"]
+
+
+# ====================================================================== keeping edits off the cache pool
+
+@pytest.mark.parametrize("name,ok", [("a.avi", False), ("A.DIVX", False), ("a.mkv", True), ("a.mp4", True), (None, True)])
+def test_can_edit_skips_avi(name, ok):
+    assert trackedit.can_edit(name) is ok
+
+
+def test_preview_skips_avi(tmp_path):
+    p = tmp_path / "x.avi"
+    p.write_bytes(b"x")
+    out = trackedit.preview(str(p), [{"type": "a", "index": 0, "language": "eng"}], {"retag": {}})
+    assert out["method"] == "skip" and ".avi" in out["command"]
+
+
+def test_write_path_prefers_physical_disk(tmp_path, monkeypatch):
+    import anotherr.sync
+    disk = tmp_path / "disk3" / "x.mkv"
+    share = tmp_path / "user" / "x.mkv"
+    for p in (disk, share):
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"x")
+    monkeypatch.setattr(anotherr.sync, "map_path", lambda _: str(share))
+    assert trackedit.write_path({"arr_path": "/tv/x.mkv"}, str(disk)) == str(disk)
+    # physical path not visible (e.g. not mounted): fall back to the share path
+    assert trackedit.write_path({"arr_path": "/tv/x.mkv"}, str(tmp_path / "nope" / "x.mkv")) == str(share)
+
+
+def test_apply_copy_removes_temp_on_crash(tmp_path, monkeypatch):
+    p = tmp_path / "x.mp4"
+    p.write_bytes(b"orig")
+
+    def boom(path, *a):
+        open(trackedit.tmp_path(path), "w").write("half a copy")
+        raise RuntimeError("killed mid-copy")
+
+    monkeypatch.setattr(trackedit, "_apply", boom)
+    with pytest.raises(RuntimeError):
+        trackedit.apply(str(p), [], "copy", 4)
+    assert not (tmp_path / ".anotherr-edit.x.mp4").exists()
+    assert p.read_bytes() == b"orig"
+
+
+def test_sweep_temp_removes_logged_leftovers(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setattr(trackedit, "LOG_PATH", str(log))
+    monkeypatch.setattr(db, "log", lambda *a, **k: None)
+    recent, old, mkv = (str(tmp_path / n) for n in ("a.mp4", "b.mp4", "c.mkv"))
+    now = time.time()
+    log.write_text("\n".join(json.dumps(r) for r in [
+        {"event": "before", "method": "copy", "path": recent, "ts": now - 60},
+        {"event": "before", "method": "copy", "path": old, "ts": now - 30 * 86400},
+        {"event": "before", "method": "mkvpropedit", "path": mkv, "ts": now},
+    ]) + "\nnot json\n")
+    for p in (recent, old, mkv):
+        open(trackedit.tmp_path(p), "w").write("x")
+
+    with trackedit._lock:
+        assert trackedit.sweep_temp() == 0  # an edit is running: its temp is live
+    assert trackedit.sweep_temp() == 1
+    assert not (tmp_path / ".anotherr-edit.a.mp4").exists()
+    assert (tmp_path / ".anotherr-edit.b.mp4").exists()  # outside the window
+    assert (tmp_path / ".anotherr-edit.c.mkv").exists()  # in-place edits never make one

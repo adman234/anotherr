@@ -884,6 +884,27 @@ def actions_bulk(body: dict = Body(...)):
     raise HTTPException(400, "op must be approve | reject")
 
 
+@app.post("/api/actions/bulk-subgen", dependencies=[Depends(auth)])
+def actions_bulk_subgen(body: dict = Body(default={})):
+    """Approve proposed subgen batches ({"ids": [...]}, empty = all of them). They join subgen's queue and run one
+    file at a time."""
+    from . import subgen
+
+    ids = [int(i) for i in (body or {}).get("ids") or []] or [
+        r["id"] for r in db.q("SELECT id FROM actions WHERE kind='subgen_transcribe' AND status='proposed' ORDER BY id")]
+    ok = files = 0
+    for i in ids:
+        a = db.q1("SELECT kind, payload FROM actions WHERE id=? AND status='proposed'", (i,))
+        if not a or a["kind"] != "subgen_transcribe":
+            continue
+        r = subgen.approve(i)
+        if not r.get("ok"):
+            return {"ok": bool(ok), "queued": ok, "files": files, "error": r.get("error")}
+        ok += 1
+        files += len((db.unj(a["payload"], {}) or {}).get("files") or [])
+    return {"ok": True, "queued": ok, "files": files}
+
+
 @app.get("/api/actions/bulk-preview", dependencies=[Depends(auth)])
 def actions_bulk_preview():
     """Proposal counts per bulk button, plus `files`: how many files each would touch (what the buttons show)."""

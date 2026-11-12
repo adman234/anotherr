@@ -198,6 +198,8 @@ def refresh_item(item_id: int) -> dict:
         codes = {r["code"] for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open'", (f["id"],))}
         if not codes & FIX_CODES or codes & BLOCKING or f["id"] in busy:
             continue
+        if not trackedit.can_edit(f.get("local_path") or f.get("arr_path")):
+            continue  # AVI has no default flag to set
         ev = retag._evidence(f) or {}
         if trackedit.held(holds, f["id"], ev.get("scan_started")):
             continue  # an edit already ran (or is running) since this evidence was gathered

@@ -187,6 +187,9 @@ def refresh_item(item_id: int) -> dict:
             if f.get("status") == "edited" and not f.get("verified"):
                 busy.add((f["file_id"], f["a_index"]))
     rows = [r for r in rows if (r["file_id"], r["a_index"]) not in busy]
+    paths = {f["id"]: f.get("local_path") or f.get("arr_path")
+             for f in db.q("SELECT id, local_path, arr_path FROM files WHERE item_id=?", (item_id,))}
+    rows = [r for r in rows if trackedit.can_edit(paths.get(r["file_id"]))]  # AVI can't hold a language tag
     holds = trackedit.edit_holds()
     if holds:
         fs = {f["id"]: f for f in db.q("SELECT id, audio_evidence, last_scan_id FROM files WHERE item_id=?", (item_id,))}

@@ -72,6 +72,7 @@ def _startup():
     if n:
         db.log(f"Replaced {n} resub proposal(s) with Whisper subtitle proposals (Bazarr found nothing for those series before)")
     def _refresh_track_proposals():
+        trackedit.sweep_temp()
         retag.refresh_all()
         defaults.refresh_all()
         subgen.refresh_all()

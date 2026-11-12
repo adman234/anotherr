@@ -79,6 +79,8 @@ action that writes the detected language into the file.
   stream-copied with ffmpeg and atomically replace the original, keeping owner and mode. Before each
   edit Anotherr checks the file is unchanged since the scan, writable, under an allowed path and not
   playing in Plex. Afterwards it verifies with ffprobe (same streams, same duration, new tag reads back).
+- **AVI and DivX** files are never proposed or edited: AVI has no per-track language or default flag,
+  so a copy would always fail verification.
 - **Hardlinked files** (seeding copies) are skipped unless `retag.break_hardlinks` is on, in which case
   they get a new copy.
 - **Afterwards:** Anotherr asks Sonarr/Radarr to rescan and Bazarr to scan the series from disk, and
@@ -94,6 +96,14 @@ To enable without giving Anotherr write access to all of `/mnt`:
 
 Anotherr reads from the physical disk paths but writes through these share paths. Start with one small
 batch and check the result in Sonarr, Bazarr and Plex.
+
+**Keep copy edits off the cache pool (recommended on cache-enabled shares).** A stream copy writes a whole
+new file. Written through `/mnt/user`, Unraid puts it on the cache pool and the mover has to carry it back
+to the array later. To write it on the original's own disk instead, also add a **Read/Write - Slave** path
+for the media folder on each physical disk, again with the same host and container path, e.g.
+`/mnt/disk1/media` → `/mnt/disk1/media` (repeat for every disk and `/mnt/cache/media`). Anotherr writes to
+the physical path whenever it is writable and falls back to the share path otherwise. A disk you add to the
+array later needs its own path added.
 
 ## Default audio and subtitle tracks
 

@@ -207,7 +207,19 @@ def test_unconfident_audio_or_wrong_track_choice_means_no_proposal(lib):
     assert "subgen would transcribe audio track 1" in plan(b)[1]
 
 
-def test_automatic_proposals_wait_for_a_failed_search_and_skip_new_episodes(lib):
+def test_subgen_first_proposes_without_a_failed_search_but_skips_new_episodes(lib):
+    iid = show()
+    fid = episode(lib, iid, "S04E01", [T(0, "kor", default=True)])
+    assert plan(fid, manual=False)[0]
+    assert actions.propose_for_file(fid) == []  # subgen covers it: no Bazarr resub
+    sync = episode(lib, iid, "S04E02", [T(0, "kor", default=True)], codes=("subs_out_of_sync",))
+    assert [db.scalar("SELECT kind FROM actions WHERE id=?", (a,)) for a in actions.propose_for_file(sync)] == ["resub"]
+    new = episode(lib, iid, "S04E09", [T(0, "kor", default=True)], date_added=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    assert "new episode" in plan(new, manual=False)[1]
+
+
+def test_with_subgen_first_off_automatic_proposals_wait_for_a_failed_search(lib):
+    settings.save({**settings.get(), "subgen": {**settings.get()["subgen"], "first": False}})
     iid = show()
     fid = episode(lib, iid, "S04E01", [T(0, "kor", default=True)])
     assert "hasn't failed" in plan(fid, manual=False)[1]

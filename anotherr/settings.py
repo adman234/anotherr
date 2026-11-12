@@ -125,6 +125,9 @@ DEFAULTS: dict = {
         "poll_s": 15,
         "max_consecutive_failures": 3,
         "refresh_every": 10,         # Sonarr/Radarr + Bazarr rescan after this many files (and at the end)
+        # missing or signs-only subtitles go straight to subgen; Bazarr keeps the small fixes (out of sync,
+        # mismatched text) and any file subgen can't take. Off = a Bazarr resub must fail for the series first.
+        "first": True,
         "new_episode_days": 7,       # newer episodes get a Bazarr resub first
         "gpu": False,                # subgen shares the GPU: pause Anotherr's scans while a subgen job runs
         "min_cues_per_min": 3,

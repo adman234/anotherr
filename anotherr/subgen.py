@@ -262,7 +262,7 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         return None, (f"subgen would transcribe audio track {pick['a_index'] + 1} (tagged {pick.get('tag') or 'und'}), "
                       f"not the {langs.name(lang3)} track {track['a_index'] + 1} - fix its tag first")
     if not manual:
-        if not actions.resub_failed_before(item["id"]):
+        if not cfg().get("first") and not actions.resub_failed_before(item["id"]):
             return None, "Bazarr's search hasn't failed for this show yet - a resub comes first"
         if _too_new(f):
             return None, "a new episode - Bazarr gets a week to find a subtitle first"

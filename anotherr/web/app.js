@@ -373,7 +373,9 @@ function bulkButtons(rows, bp) {
   const f = (bp && bp.files) || {};
   const resubs = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "resub"));
   const btn = (n, label, onclick, cls = "") => `<button${cls ? ` class="${cls}"` : ""} onclick="${onclick}"${n ? "" : " disabled"}>${label} (${n})</button>`;
-  return btn(resubs, "Approve all resubs", "bulk('approve','resub')")
+  const subgens = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "subgen_transcribe"));
+  return btn(subgens, "Approve all subgen generations", "bulkSubgen()")
+    + btn(resubs, "Approve all resubs (Bazarr)", "bulk('approve','resub')")
     + btn(f.english_retags || 0, "Approve English retags", "bulkEnglish()")
     + btn(f.english_default_audio || 0, "Approve default English audio", "bulkEnglishDefault()")
     + btn(f.foreign_defaults || 0, "Clear foreign defaults", "bulkForeignDefaults()")
@@ -531,6 +533,14 @@ function trackTable(a) {
 async function approveAction(id, kind, n) {
   if (kind === "redownload" && !confirm("Blocklist and redownload this file?")) return;
   await act(() => api(`/api/actions/${id}/approve`, { method: "POST" }), (r) => (r.ok ? "Started: " + r.result : "Not run: " + (r.result || r.error)));
+}
+async function bulkSubgen() {
+  const ids = window._actRows.filter((a) => a.status === "proposed" && a.kind === "subgen_transcribe").map((a) => a.id);
+  try {
+    const r = await api("/api/actions/bulk-subgen", { method: "POST", body: { ids } });
+    toast(r.error ? `Queued ${r.queued}, then stopped: ${r.error}` : `Sent ${r.files} file(s) to subgen's queue (${r.queued} batch(es)); they run one at a time`);
+  } catch (e) { toast(e.message); }
+  route();
 }
 async function bulk(op, kind) {
   const ids = window._actRows.filter((a) => a.status === "proposed" && (!kind || a.kind === kind)).map((a) => a.id);

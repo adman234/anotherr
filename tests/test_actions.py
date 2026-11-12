@@ -124,3 +124,21 @@ def test_bulk_preview_counts_files_per_button():
     assert p["english_retags"] == 1 and p["files"]["english_retags"] == 2   # one batch, two files
     assert p["files"]["out_of_sync_resubs"] == 3                            # no payload: one file each
     assert p["files"]["foreign_defaults"] == 0
+
+
+def test_bulk_subgen_approves_every_proposed_batch(monkeypatch):
+    from anotherr import api, subgen
+
+    fid = _file()
+    now = time.time()
+    for files in ([{"file_id": fid}, {"file_id": fid + 1}], [{"file_id": fid}]):
+        db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) "
+             "VALUES (?, 'subgen_transcribe', 'proposed', ?, ?, ?)", (fid, json.dumps({"files": files}), now, now))
+    db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "
+         "VALUES (?, 'resub', 'proposed', '[]', 'x', ?, ?)", (fid, now, now))
+    seen = []
+    monkeypatch.setattr(subgen, "approve", lambda i: seen.append(i) or {"ok": True})
+    r = api.actions_bulk_subgen({})
+    assert r == {"ok": True, "queued": 2, "files": 3} and len(seen) == 2   # the resub is left alone
+    monkeypatch.setattr(subgen, "approve", lambda i: {"ok": False, "error": "subgen.url is not set"})
+    assert api.actions_bulk_subgen({})["error"] == "subgen.url is not set"

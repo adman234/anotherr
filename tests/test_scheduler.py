@@ -177,3 +177,57 @@ def test_orphan_queue_rows_dont_count_or_keep_forcing_on():
     assert "queued" not in scheduler.next_run(settings.get())["why"]
     scheduler.enqueue([live], "quick")
     assert scheduler.queue_count() == 1
+
+
+def _scanned_files(disk: str, n: int, days_ago: float) -> list[int]:
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', ?, ?, 'series')", (hash(disk) % 10000, disk))
+    now = time.time()
+    return [db.x("INSERT INTO files(item_id, arr_file_id, arr_path, disk, first_seen, last_scan_at) VALUES (?,?,?,?,?,?)",
+                 (iid, 1000 + k, f"/tv/{disk}/{k}.mkv", disk, now, now - (days_ago + k / 10) * 86400)) for k in range(n)]
+
+
+def test_daily_budget_rescans_one_disks_oldest_files_then_stops(array, monkeypatch):
+    ids, scanned = array
+    db.x("UPDATE files SET last_scan_at=?", (time.time() - 86400,))   # the fixture's files: scanned yesterday
+    disk1 = _scanned_files("disk1", 17, 2)
+    _scanned_files("disk2", 17, 2)
+    _scanned_files("disk3", 17, 2)
+    # 9-day cycle, 1 disk a day, 3 disks with 18 files each: every disk is visited 3 times a cycle -> 6 files a visit
+    settings.save({"schedule": {"rescan_after_days": 9, "cache_slot": False}})
+    w = _worker()
+    for _ in range(10):
+        w.tick()
+    plan = settings.state_get("rescan_plan")
+    assert plan["disks"] == ["disk1"] and plan["quota"] == {"disk1": 6}
+    assert [d for _, d, _ in scanned] == ["disk1"] * 6 and all("daily rescan" in why for *_, why in scanned)
+    oldest = sorted(disk1, reverse=True)[:6]   # higher k = scanned longer ago
+    assert {r["id"] for r in db.q("SELECT id FROM files WHERE last_scan_at > ?", (time.time() - 60,))} == set(oldest)
+
+    monkeypatch.setattr(scheduler, "_day", lambda: "2099-01-01")   # next day: the next disk, not disk1 again
+    scanned.clear()
+    w.tick()
+    assert settings.state_get("rescan_plan")["disks"] == ["disk2"] and scanned[0][1] == "disk2"
+
+
+def test_daily_budget_catches_up_on_overdue_files_at_up_to_double_pace(array):
+    ids, scanned = array
+    db.x("UPDATE files SET last_scan_at=?", (time.time() - 86400,))
+    _scanned_files("disk1", 17, 30)    # all older than the 9-day cycle
+    settings.save({"schedule": {"rescan_after_days": 9, "cache_slot": False, "disks": ["disk1"]}})
+    _worker().tick()
+    # one disk visited every day: ceil(18 / 9) = 2 a day, doubled while 17 files are overdue
+    assert settings.state_get("rescan_plan")["quota"] == {"disk1": 4}
+
+
+def test_never_scanned_files_dont_wait_for_their_disks_day(array):
+    ids, scanned = array
+    settings.save({"schedule": {"cache_slot": False}})
+    _worker().tick()
+    assert scanned[0][1] == "disk1" and "daily rescan" not in scanned[0][2]
+    assert settings.state_get("rescan_plan")["quota"] == {}   # nothing scanned yet, so nothing to rescan
+
+
+def test_windows_spinup_spreads_the_cycle_over_scan_days_only():
+    sc = {"spinup": "windows", "windows": [{"days": [5, 6], "start": "01:00", "end": "07:00"}]}
+    assert scheduler.scan_days_per_week(sc) == 2
+    assert scheduler.scan_days_per_week({"spinup": "anytime"}) == 7

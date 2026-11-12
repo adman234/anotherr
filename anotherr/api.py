@@ -256,9 +256,7 @@ def coverage():
         "disk_state": unraid.disks_state(),
         "oldest_unscanned": db.q("""SELECT f.id, i.title, f.label, f.disk, f.date_added FROM files f JOIN items i ON
             i.id=f.item_id WHERE f.missing=0 AND f.last_scan_at IS NULL ORDER BY f.first_seen LIMIT 10"""),
-        "next_up": [{"id": r["id"], "title": r["title"], "label": r["label"], "disk": r["disk"],
-                     "score": round(r["score"], 1)}
-                    for r in scheduler.next_files(None, settings.get()["schedule"]["rescan_after_days"], 10)],
+        "next_up": scheduler.next_up(10),
     }
 
 

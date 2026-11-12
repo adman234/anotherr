@@ -81,6 +81,9 @@ action that writes the detected language into the file.
   playing in Plex. Afterwards it verifies with ffprobe (same streams, same duration, new tag reads back).
 - **AVI and DivX** files are never proposed or edited: AVI has no per-track language or default flag,
   so a copy would always fail verification.
+- **Weak English files** (confidence at or below `retag.bulk_min_confidence`) get their own proposal, so one
+  shaky episode doesn't keep "Approve English retags" from taking the rest of its season. The bulk buttons
+  show how many files each would touch and are disabled when there is nothing to do.
 - **Hardlinked files** (seeding copies) are skipped unless `retag.break_hardlinks` is on, in which case
   they get a new copy.
 - **Afterwards:** Anotherr asks Sonarr/Radarr to rescan and Bazarr to scan the series from disk, and

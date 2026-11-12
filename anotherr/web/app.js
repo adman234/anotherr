@@ -203,7 +203,7 @@ async function itemPage(id) {
       <div>Original language</div><div>${esc(it.original_language_name || "?")} (${esc(it.original_language || "?")})</div>
       <div>Requested audio</div><div><b>${esc(it.audio_request_effective)}</b> <span class="small muted">(${it.audio_request_source === "override" ? "set here" : it.audio_request_source === "profile" ? `from quality profile "${esc(it.quality_profile)}"` : `no mapped profile${it.quality_profile ? ` ("${esc(it.quality_profile)}")` : ""}`})</span>
         <select id="areq" onchange="saveItem(${it.id})" style="margin-left:8px">${[["", "follow profile"], ["original", "original"], ["english", "english"], ["either", "either"]].map(([v, l]) => `<option value="${v}" ${v === (it.audio_request_override || "") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-      <div>Accepted as is</div><div>${it.audio_exceptions.length ? it.audio_exceptions.map((e) => `<div>${scopeText(e)}: ${e.allow === "original_only" ? "no English audio" : "no original-language audio"} <span class="small muted">${esc(e.note || "")}</span> <button class="sm" onclick="if(confirm('Remove this exception? The season is rescanned and the warning comes back if it is still true.')) act(()=>api('/api/audio_exceptions/${e.id}',{method:'DELETE'}),r=>'Removed; queued '+r.queued+' file(s) for a rescan')">Remove</button></div>`).join("") : '<span class="muted">none</span>'}${it.kind === "series" ? (it.open_audio_gaps || []).map((al) => `<div><button class="sm" title="Stop flagging this missing audio for every season, now and later" onclick="acceptShowAudio(${it.id}, ${esc(JSON.stringify(it.title))}, '${al}')">Accept entire show as is</button> <span class="small muted">(no ${MISSING_LANG[al]} audio)</span></div>`).join("") : ""}</div>
+      <div>Accepted as is</div><div>${it.audio_exceptions.length ? it.audio_exceptions.map((e) => `<div>${scopeText(e)}: ${e.allow === "original_only" ? "no English audio" : "no original-language audio"} <span class="small muted">${esc(e.note || "")}</span> <button class="sm" onclick="act(()=>api('/api/audio_exceptions/${e.id}',{method:'DELETE'}),r=>'Removed; queued '+r.queued+' file(s) for a rescan')">Remove</button></div>`).join("") : '<span class="muted">none</span>'}${it.kind === "series" ? (it.open_audio_gaps || []).map((al) => `<div><button class="sm" title="Stop flagging this missing audio for every season, now and later" onclick="acceptShowAudio(${it.id}, ${esc(JSON.stringify(it.title))}, '${al}')">Accept entire show as is</button> <span class="small muted">(no ${MISSING_LANG[al]} audio)</span></div>`).join("") : ""}</div>
       <div>Preferred audio override</div><div><input id="ovr" placeholder="e.g. eng (blank = original)" value="${esc(it.language_override)}" style="width:220px"> <button class="sm" onclick="saveItem(${it.id})">Save</button>
         <span class="small muted">Original language is always preferred unless you set this.</span></div>
       <div>Anime rules</div><div><input type="checkbox" id="anime" ${it.is_anime ? "checked" : ""} onchange="saveItem(${it.id})"></div>
@@ -301,7 +301,7 @@ function issueGroupRow(g) {
       <div class="small">${g.items.map((i) => `<a href="#/file/${i.file_id}" title="${esc(i.message)}">${esc(epLabel(i))}</a>`).join(", ")}</div></td>
     <td><b>${esc(g.code)}</b><br><span class="small">${g.message ? esc(g.message) : `<details><summary>details differ per file</summary>${g.items.map((i) => `${esc(epLabel(i))}: ${esc(i.message)}`).join("<br>")}</details>`}</span></td>
     <td class="muted">${esc(g.disks.join(", "))}</td>
-    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${GEN_CODES.includes(g.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" title="Propose subgen subtitles for these files (each is checked first)" onclick="${genSub(`issue_ids:${ids}`)}">Generate subtitles (${n})</button> ` : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="if(confirm('Ignore all ${n}?')) ${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
+    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${GEN_CODES.includes(g.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" title="Propose subgen subtitles for these files (each is checked first)" onclick="${genSub(`issue_ids:${ids}`)}">Generate subtitles (${n})</button> ` : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
       : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
 }
 async function issues(_, dual = false) {
@@ -351,46 +351,39 @@ async function actionsPage(dual = false) {
   const rows = await api(`/api/actions?status=${ACT.status}&dual=${dual ? "only" : "exclude"}`);
   const s = window.STATUS || (await api("/api/status"));
   const sg = s.subgen_configured ? await api("/api/subgen/status") : null;
+  const bp = ACT.status === "proposed" && rows.length ? await api("/api/actions/bulk-preview").catch(() => null) : null;
   $("#app").innerHTML = `<h2>${dual ? "Dual actions" : "Actions"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Fixes for single-language audio: accept the season as it is, or redownload where that language was requested.</div>` : sg ? subgenCard(sg) : ""}
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<span class="small muted">${actFileCount(rows)} files in ${groupActions(rows).length} rows</span>` : ""}
-    ${ACT.status === "proposed" && rows.length ? `<button onclick="bulk('approve','resub')">Approve all resubs</button><button onclick="bulkEnglish()">Approve English retags</button><button onclick="bulkEnglishDefault()">Approve default English audio</button><button onclick="bulkForeignDefaults()">Clear foreign defaults</button><button onclick="bulkSync()">Approve out-of-sync resubs</button><button onclick="if(confirm('Reject all proposals?'))bulk('reject')">Reject all</button>` : ""}</div>
+    ${ACT.status === "proposed" && rows.length ? bulkButtons(rows, bp) : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
     ${groupActions(rows).map((a) => a.choice ? choiceRow(a) : a.group ? groupRow(a) : `<tr><td><span class="st s-${a.status}">${a.status}</span>${a.auto ? ' <span class="pill">auto</span>' : ""}</td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
       <td>${BATCH_KINDS.includes(a.kind) ? esc(a.title) : `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>`}</td><td class="small">${esc(a.reason)}${a.payload ? (a.kind === "subgen_transcribe" ? subgenTable(a) : a.kind === "accept_season_audio" ? acceptTable(a) : trackTable(a)) : ""}</td><td class="small">${esc(a.result)}</td>
       <td>${a.status === "proposed" || a.status === "failed" ? `<button class="sm primary" onclick="approveAction(${a.id}, '${a.kind}', ${(a.payload && a.payload.files || []).length})">Approve</button>` : ""}
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
         ${a.kind === "subgen_transcribe" ? subgenButtons(a) : ""}
-        ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="if(confirm('Restore the original track languages and default flags for this batch?')) act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
+        ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
   if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith(dual ? "#/dualactions" : "#/actions")) actionsPage(dual); }, 3000);
   $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(dual); };
   window._actRows = rows;
 }
-async function bulkEnglish() {
-  const p = await api("/api/actions/bulk-preview");
-  if (!p.english_retags) return toast("No English retag proposals above " + p.min_confidence + " confidence");
-  if (!confirm(`Approve ${p.english_retags} retag batch(es) that set the audio to English at confidence above ${p.min_confidence}? (Change the threshold in Settings -> Retag audio.)`)) return;
-  await act(() => api("/api/actions/bulk-english-retag", { method: "POST" }), "Queued");
+// Bulk buttons show how many files each would touch; a button with nothing to do is disabled.
+function bulkButtons(rows, bp) {
+  const f = (bp && bp.files) || {};
+  const resubs = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "resub"));
+  const btn = (n, label, onclick, cls = "") => `<button${cls ? ` class="${cls}"` : ""} onclick="${onclick}"${n ? "" : " disabled"}>${label} (${n})</button>`;
+  return btn(resubs, "Approve all resubs", "bulk('approve','resub')")
+    + btn(f.english_retags || 0, "Approve English retags", "bulkEnglish()")
+    + btn(f.english_default_audio || 0, "Approve default English audio", "bulkEnglishDefault()")
+    + btn(f.foreign_defaults || 0, "Clear foreign defaults", "bulkForeignDefaults()")
+    + btn(f.out_of_sync_resubs || 0, "Approve out-of-sync resubs", "bulkSync()")
+    + btn(actFileCount(rows), "Reject all", "if(confirm('Reject every proposal on this tab?'))bulk('reject')", "danger");
 }
-async function bulkEnglishDefault() {
-  const p = await api("/api/actions/bulk-preview");
-  if (!p.english_default_audio) return toast("No default-audio proposals that pick English");
-  if (!confirm(`Make the English track the default audio on ${p.english_default_audio} proposal(s)? Dual-audio choices are on the Dual actions tab and are not included.`)) return;
-  await act(() => api("/api/actions/bulk-english-default-audio", { method: "POST" }), "Queued");
-}
-async function bulkForeignDefaults() {
-  const p = await api("/api/actions/bulk-preview");
-  if (!p.foreign_defaults) return toast("No proposals that take the default off a foreign track");
-  if (!confirm(`Approve ${p.foreign_defaults} proposal(s) that take the default flag off an audio or subtitle track that is neither English nor the original language? Dual-audio choices are on the Dual actions tab and are not included.`)) return;
-  await act(() => api("/api/actions/bulk-foreign-defaults", { method: "POST" }), "Queued");
-}
-async function bulkSync() {
-  const p = await api("/api/actions/bulk-preview");
-  if (!p.out_of_sync_resubs) return toast("No out-of-sync resub proposals");
-  if (!confirm(`Approve ${p.out_of_sync_resubs} out-of-sync subtitle resub request(s)?`)) return;
-  await act(() => api("/api/actions/bulk-out-of-sync", { method: "POST" }), "Queued");
-}
+const bulkEnglish = () => act(() => api("/api/actions/bulk-english-retag", { method: "POST" }), "Queued");
+const bulkEnglishDefault = () => act(() => api("/api/actions/bulk-english-default-audio", { method: "POST" }), "Queued");
+const bulkForeignDefaults = () => act(() => api("/api/actions/bulk-foreign-defaults", { method: "POST" }), "Queued");
+const bulkSync = () => act(() => api("/api/actions/bulk-out-of-sync", { method: "POST" }), "Queued");
 // resub/redownload proposals for the same series + season with the same reason get one Approve
 const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
 const GROUP_MAX = { whisper_subtitle: 5 };  // Bazarr's Whisper route: at most 5 episodes per approval
@@ -454,21 +447,16 @@ function choiceRow(c) {
       <div class="small muted">Pick one; the other is withdrawn.</div></td></tr>`;
 }
 const MISSING_LANG = { original_only: "English", english_only: "original-language" };
-const acceptShowText = (title, allow) => `Accept ${title} as is for every season, now and later? It stops flagging missing ${MISSING_LANG[allow] || "requested"} audio for this show.`;
 async function acceptShowAudio(itemId, title, allow) {
-  if (!confirm(acceptShowText(title, allow))) return;
   await act(() => api(`/api/items/${itemId}/accept_show_audio`, { method: "POST", body: { allow } }), (r) => r.result);
 }
 async function choosePick(key, pick, n, title, allow) {
-  if (pick === "accept_show_audio" && !confirm(acceptShowText(title, allow))) return;
   if (pick === "redownload" && !confirm(`Blocklist and redownload these ${n} files?`)) return;
-  if (pick === "accept_season_audio" && !confirm("Accept this whole season (or movie) as it is? The missing-audio warnings are resolved and later imports into the season are not flagged. You can remove the exception on the show page.")) return;
   await act(() => api("/api/actions/choose", { method: "POST", body: { choice_key: key, pick } }),
     (r) => (pick === "redownload" ? `Queued ${r.queued} redownload(s)` : pick === "accept_show_audio" ? "Accepted the entire show as is" : "Accepted as is"));
 }
 async function approveGroup(ids, kind) {
   if (kind === "redownload" && !confirm(`Blocklist and redownload these ${ids.length} files?`)) return;
-  if (kind === "whisper_subtitle" && !confirm(`Ask Bazarr's Whisper provider (subgen) to transcribe these ${ids.length} episodes? They run one at a time on the GPU - roughly a few minutes each.`)) return;
   await act(() => api("/api/actions/bulk", { method: "POST", body: { op: "approve", ids } }),
     (r) => (r.ok ? `Queued ${r.queued} - they run one after another` : "Nothing to run (already handled?)"));
 }
@@ -488,7 +476,6 @@ async function exceptionsPage() {
       <td><button class="sm" onclick="removeException(${e.id}, ${esc(JSON.stringify(e.title))}, '${esc(scopeText(e))}')">Remove</button></td></tr>`).join("") || '<tr><td colspan=7 class="muted">Nothing accepted as is.</td></tr>'}</table>`;
 }
 async function removeException(id, title, scope) {
-  if (!confirm(`Remove "${scope}" of ${title}? ${scope === "Whole show" ? "The whole show" : "It"} is rescanned and flagged again where the audio is still missing.`)) return;
   await act(() => api("/api/audio_exceptions/" + id, { method: "DELETE" }), (r) => `Removed; queued ${r.queued} file(s) for a rescan`);
 }
 // ------------------------------------------------------------------ subgen
@@ -515,7 +502,7 @@ function subgenButtons(a) {
   const out = [];
   if ((a.status === "queued" || a.status === "running") && !p.paused) out.push(`<button class="sm" onclick="${call("pause", "Pausing after the current file")}">Pause</button>`);
   if (p.paused || (a.status === "failed" && fs.some((e) => e.status === "not attempted") && !p.cancel)) out.push(`<button class="sm primary" onclick="${call("resume", "Resumed")}">Resume</button>`);
-  if (a.status === "queued" || a.status === "running") out.push(`<button class="sm danger" onclick="if(confirm('Cancel this batch? A file subgen is already transcribing finishes on its own.')) ${call("cancel", "Cancelled")}">Cancel</button>`);
+  if (a.status === "queued" || a.status === "running") out.push(`<button class="sm danger" onclick="${call("cancel", "Cancelled")}">Cancel</button>`);
   return out.join(" ");
 }
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
@@ -543,11 +530,6 @@ function trackTable(a) {
 }
 async function approveAction(id, kind, n) {
   if (kind === "redownload" && !confirm("Blocklist and redownload this file?")) return;
-  if (kind === "accept_season_audio" && !confirm("Accept this whole season (or movie) as it is? The missing-audio warnings are resolved and later imports into the season are not flagged. You can remove the exception on the show page.")) return;
-  if (kind === "retag_audio" && !confirm(`Write the audio language tag into ${n} file(s)? Each change is logged and can be undone.`)) return;
-  if ((kind === "set_default_audio" || kind === "set_default_subtitle") && !confirm(`Change the default track flags in ${n} file(s)? Other defaults of the same type are cleared, forced flags are kept. Each change is logged and can be undone.`)) return;
-  if (kind === "subgen_transcribe" && !confirm(`Send these ${n} file(s) to subgen? They go one at a time - each waits until the previous subtitle is written and checked.`)) return;
-  if (kind === "whisper_subtitle" && !confirm("Ask Bazarr's Whisper provider to transcribe this episode? It uses Bazarr's Whisper server (GPU) for several minutes.")) return;
   await act(() => api(`/api/actions/${id}/approve`, { method: "POST" }), (r) => (r.ok ? "Started: " + r.result : "Not run: " + (r.result || r.error)));
 }
 async function bulk(op, kind) {

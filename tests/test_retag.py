@@ -234,3 +234,19 @@ def test_writes_through_share_path_when_disk_path_is_read_only(monkeypatch, tmp_
     assert retag.write_path(f, str(disk / "ep.mkv")) == str(share / "ep.mkv")   # rw share mount wins
     writable.clear()
     assert retag.write_path(f, str(disk / "ep.mkv")) is None                     # nothing writable -> skip
+
+
+def test_weak_english_file_gets_its_own_proposal():
+    from anotherr import actions
+
+    iid = _item("Superbook", "eng")
+    for e in range(1, 4):
+        _file(iid, f"S04E0{e}", 4, [{"windows": W("eng", 3, 0.99)}])
+    weak = _file(iid, "S04E04", 4, [{"windows": W("eng", 3, 0.92)}])
+    retag.refresh_item(iid)
+    season, alone = sorted(_batches(), key=lambda b: len(b["payload"]["files"]), reverse=True)
+    assert len(season["payload"]["files"]) == 3 and weak not in {f["file_id"] for f in season["payload"]["files"]}
+    assert [f["file_id"] for f in alone["payload"]["files"]] == [weak] and "Listed on its own" in alone["reason"]
+    assert actions.english_retag_ids() == [season["id"]]
+    retag.refresh_item(iid)  # stable: the same two proposals are updated, not recreated
+    assert sorted(b["id"] for b in _batches()) == sorted([season["id"], alone["id"]])

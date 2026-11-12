@@ -658,7 +658,7 @@ const pretty = (k) => k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
 function render(path, val) {
   return Object.entries(val).map(([k, v]) => {
     const p = `${path}.${k}`;
-    if (k.endsWith("windows")) { const dflt = k === "quiet_windows" ? ["02:30", "04:30"] : ["01:00", "07:00"]; return field(p, pretty(k), `<div data-win="${p}">${v.map(winRow).join("")}</div><button class="sm" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend', winRow({days:[0,1,2,3,4,5,6],start:'${dflt[0]}',end:'${dflt[1]}'}))">+ Add window</button>`); }
+    if (k.endsWith("windows") && Array.isArray(v)) { const dflt = k === "quiet_windows" ? ["02:30", "04:30"] : ["01:00", "07:00"]; return field(p, pretty(k), `<div data-win="${p}">${v.map(winRow).join("")}</div><button class="sm" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend', winRow({days:[0,1,2,3,4,5,6],start:'${dflt[0]}',end:'${dflt[1]}'}))">+ Add window</button>`); }
     if (p === "schedule.spinup") return field(p, "Spin up idle disks", `<select data-k="${p}">${["anytime", "windows", "never"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.stream_pause") return field(p, pretty(k), `<select data-k="${p}">${["same_disk", "any", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "review.title_cards") return field(p, pretty(k), `<select data-k="${p}">${["never", "multi_episode", "flagged", "always"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);

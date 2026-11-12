@@ -107,3 +107,20 @@ def test_bulk_english_retag_and_out_of_sync_selection():
     db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "
          "VALUES (?, 'resub', 'proposed', '[\"subs_missing\"]', 'x', ?, ?)", (fid, now, now))
     assert len(actions.subs_out_of_sync_ids()) == 1
+
+
+def test_bulk_preview_counts_files_per_button():
+    from anotherr import api
+
+    fid = _file()
+    now = time.time()
+    two = [{"file_id": fid, "new": "eng", "conf": 0.99}, {"file_id": fid + 1, "new": "eng", "conf": 0.99}]
+    db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) "
+         "VALUES (?, 'retag_audio', 'proposed', ?, ?, ?)", (fid, json.dumps({"files": two}), now, now))
+    for _ in range(3):
+        db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "
+             "VALUES (?, 'resub', 'proposed', '[\"subs_out_of_sync\"]', 'x', ?, ?)", (fid, now, now))
+    p = api.actions_bulk_preview()
+    assert p["english_retags"] == 1 and p["files"]["english_retags"] == 2   # one batch, two files
+    assert p["files"]["out_of_sync_resubs"] == 3                            # no payload: one file each
+    assert p["files"]["foreign_defaults"] == 0

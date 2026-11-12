@@ -888,10 +888,23 @@ def actions_bulk(body: dict = Body(...)):
 
 @app.get("/api/actions/bulk-preview", dependencies=[Depends(auth)])
 def actions_bulk_preview():
-    return {"english_retags": len(actions.english_retag_ids()), "out_of_sync_resubs": len(actions.subs_out_of_sync_ids()),
-            "english_default_audio": len(actions.english_default_audio_ids()),
-            "foreign_defaults": len(actions.foreign_default_ids()),
-            "min_confidence": settings.get()["retag"].get("bulk_min_confidence", 0.95)}
+    """Proposal counts per bulk button, plus `files`: how many files each would touch (what the buttons show)."""
+    sets = {"english_retags": actions.english_retag_ids(), "out_of_sync_resubs": actions.subs_out_of_sync_ids(),
+            "english_default_audio": actions.english_default_audio_ids(), "foreign_defaults": actions.foreign_default_ids()}
+    out = {k: len(v) for k, v in sets.items()}
+    out["files"] = {k: _action_files(v) for k, v in sets.items()}
+    out["min_confidence"] = settings.get()["retag"].get("bulk_min_confidence", 0.95)
+    return out
+
+
+def _action_files(ids: list[int]) -> int:
+    """Files covered by these actions: a batch counts each file in its payload, anything else counts one."""
+    n = 0
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        for a in db.q(f"SELECT payload FROM actions WHERE id IN ({','.join('?' * len(chunk))})", tuple(chunk)):
+            n += len((db.unj(a["payload"], {}) or {}).get("files") or []) or 1
+    return n
 
 
 @app.post("/api/actions/bulk-english-retag", dependencies=[Depends(auth)])

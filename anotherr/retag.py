@@ -195,9 +195,15 @@ def refresh_item(item_id: int) -> dict:
         fs = {f["id"]: f for f in db.q("SELECT id, audio_evidence, last_scan_id FROM files WHERE item_id=?", (item_id,))}
         rows = [r for r in rows if not trackedit.held(holds, r["file_id"],
                                                        (_evidence(fs.get(r["file_id"]) or {}) or {}).get("scan_started"))]
+    # An English file at or below the bulk-approve confidence gets its own proposal, so one weak episode doesn't
+    # keep "Approve English retags" from taking the rest of its season.
+    min_conf = float(cfg["retag"].get("bulk_min_confidence", 0.95))
     groups: dict[tuple, list] = {}
     for r in rows:
-        groups.setdefault((r["case"], r["season"], r["review"]), []).append(r)
+        key = (r["case"], r["season"], r["review"])
+        if r["new"] == "eng" and not r["review"] and (r.get("conf") or 0) <= min_conf:
+            key += (r["file_id"],)
+        groups.setdefault(key, []).append(r)
     existing = {}
     for a in db.q("SELECT * FROM actions WHERE kind=? AND status='proposed'", (KIND,)):
         p = db.unj(a["payload"], {}) or {}
@@ -207,13 +213,15 @@ def refresh_item(item_id: int) -> dict:
     made = {"created": 0, "updated": 0, "withdrawn": 0}
     files = {f["id"]: f for f in db.q("SELECT * FROM files WHERE item_id=?", (item_id,))}
     for key, grp in groups.items():
-        case, season, review = key
+        case, season, review = key[:3]
         grp.sort(key=lambda r: (r["label"], r["a_index"]))
         payload = {"item_id": item_id, "key": list(key), "case": case, "season": season, "review": review,
                    "series_language": langs.norm(item.get("language_override")) or langs.norm(item.get("original_language")),
                    "files": [dict(r, **_plan(files[r["file_id"]], r, cfg), ops=_ops(r),
                                   path=files[r["file_id"]].get("local_path"), status="pending") for r in grp]}
         reason = _reason(item, case, season, review, grp)
+        if len(key) > 3:
+            reason += f" Listed on its own: below the {min_conf:.2f} confidence that bulk approve needs."
         codes = ["audio_mislabeled" if case == WRONG else "audio_untagged"]
         a = existing.pop(tuple(key), None) or existing.pop(tuple(list(key)), None)
         if a:

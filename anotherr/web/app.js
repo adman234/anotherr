@@ -107,7 +107,7 @@ async function dashboard() {
     <h3>Coverage by disk</h3>
     <table><tr><th>Disk</th><th>Files</th><th>Checked</th><th>Health</th><th>Bad</th><th></th></tr>${c.disks.map(covRow).join("")}</table>
     <div class="grid" style="margin-top:12px">
-      <div><h3>Next up</h3><table>${c.next_up.map((r) => `<tr><td><a href="#/file/${r.id}">${esc(r.title)} ${esc(r.label || "")}</a></td><td class="muted">${esc(r.disk)}</td><td class="muted">${r.score}</td></tr>`).join("") || '<tr><td class="muted">Nothing due</td></tr>'}</table></div>
+      <div><h3>Next up</h3><table>${c.next_up.map((r) => `<tr><td><a href="#/file/${r.id}">${esc(r.title)} ${esc(r.label || "")}</a></td><td class="muted">${esc(r.disk)}</td><td class="muted">${esc(r.why || "")}</td></tr>`).join("") || '<tr><td class="muted">Nothing due</td></tr>'}</table></div>
       <div><h3>Activity</h3><div id="activity" class="card small" style="max-height:340px;overflow:auto"></div></div>
     </div>
     <h3>Where scan time goes <select id="tdays" class="sm"><option value="1">last 24 h</option><option value="7" selected>last 7 days</option><option value="30">last 30 days</option></select></h3>
@@ -607,7 +607,7 @@ const HELP = {
   "schedule.quiet_windows": "No new scans start during these (e.g. while scheduled updates or backups run). Running scans finish first.",
   "schedule.pause_on_mover": "Don't start scans while Unraid's mover is running.",
   "schedule.disks": "Only scan these disks with scheduled scans (none ticked = all disks).",
-  "schedule.rescan_after_days": "Files are re-checked after this many days.",
+  "schedule.rescan_after_days": "Every file is re-checked once in this many days. The work is spread out: each scan day picks Max disks drives (the ones visited longest ago) and rescans just enough of their longest-unchecked files to keep that pace, so there is never a big wave of rescans. Cache/SSD pools get a share every day.",
   "schedule.max_streams": "Only for stream pause 'any': pause when Plex has more than this many active streams.",
   "schedule.stream_pause": "same_disk = while Plex streams, skip files on the disk it is reading (others keep scanning) · any = pause all scanning during streams · off. Needs Tautulli.",
   "schedule.pause_on_streams": "Master switch for the stream pause below.",

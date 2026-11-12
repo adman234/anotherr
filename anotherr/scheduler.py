@@ -1,6 +1,8 @@
 """Background worker: scan slots, disk choice, pauses, automation.
 
 Scans run in slots: up to `max_disks` hard-drive slots (each on a different disk) plus one cache/SSD slot.
+Rescans follow a daily budget (see build_plan): each day picks `max_disks` disks and rescans just enough of
+their longest-unscanned files that the whole library comes round once every `rescan_after_days`.
 Each slot takes the cheapest work first:
   cache/SSD slot: queued files on cache, then scheduled files on cache
   hard-drive slot: queued files on a spinning disk, scheduled files on a spinning disk (sticking with the disk
@@ -26,16 +28,13 @@ _streams_cache = {"t": 0.0, "n": 0, "err": "", "sessions": [], "busy_disks": set
 
 # ------------------------------------------------------------------ priority
 
-def next_files(disks: list[str] | None, rescan_days: float, limit: int = 1, exclude: set[str] | None = None) -> list[dict]:
-    """Highest-priority files that are due for a scan.
+def next_files(disks: list[str] | None, limit: int = 1, exclude: set[str] | None = None) -> list[dict]:
+    """Never-scanned files, most urgent first. They're always due and don't count against the daily budget.
 
-    score = never scanned (1000) or days since last scan
-          + recently added and unscanned (300)
-          + release-group failure rate * 200
-          + had problems last time (100)
+    score = 1000 + recently added (300) + release-group failure rate * 200
     """
     now = time.time()
-    args: list = [now, now - 7 * 86400, now - rescan_days * 86400]
+    args: list = [now, now - 7 * 86400]
     disk_sql = ""
     if disks is not None:
         if not disks:
@@ -50,18 +49,121 @@ def next_files(disks: list[str] | None, rescan_days: float, limit: int = 1, excl
         SELECT f.*, i.title,
           (CASE WHEN f.last_scan_at IS NULL THEN 1000 ELSE (?1 - f.last_scan_at) / 86400.0 END)
           + (CASE WHEN f.last_scan_at IS NULL AND f.first_seen > ?2 THEN 300 ELSE 0 END)
-          + COALESCE(g.badrate, 0) * 200
-          + (CASE WHEN f.status IN ('warning','error','critical','failed') THEN 100 ELSE 0 END) AS score
+          + COALESCE(g.badrate, 0) * 200 AS score
         FROM files f JOIN items i ON i.id = f.item_id
         LEFT JOIN (SELECT release_group,
                      AVG(CASE WHEN status IN ('error','critical') THEN 1.0 ELSE 0.0 END) AS badrate
                    FROM files WHERE last_scan_at IS NOT NULL AND release_group != ''
                    GROUP BY release_group HAVING COUNT(*) >= 3) g ON g.release_group = f.release_group
-        WHERE f.missing = 0 AND i.excluded = 0
-          AND (f.last_scan_at IS NULL OR f.last_scan_at < ?3)
+        WHERE f.missing = 0 AND i.excluded = 0 AND f.last_scan_at IS NULL
           AND f.id NOT IN (SELECT file_id FROM queue)
           {disk_sql}
         ORDER BY score DESC LIMIT ?""", args)
+
+
+def oldest_files(disk: str, before: float, limit: int = 1) -> list[dict]:
+    """Files on one disk scanned longest ago (and not since `before`), for the daily rescan budget."""
+    return db.q("""SELECT f.*, i.title, f.last_scan_at AS score FROM files f JOIN items i ON i.id = f.item_id
+                   WHERE f.missing = 0 AND i.excluded = 0 AND f.disk = ? AND f.last_scan_at IS NOT NULL
+                     AND f.last_scan_at < ? AND f.id NOT IN (SELECT file_id FROM queue)
+                   ORDER BY f.last_scan_at LIMIT ?""", (disk, before, limit))
+
+
+# ------------------------------------------------------------------ daily rescan budget
+#
+# Instead of letting every file come due at once `rescan_after_days` after the first full pass, each scan day
+# picks `max_disks` hard drives (the ones visited longest ago) and rescans a fixed number of each one's
+# longest-unscanned files: enough that every file comes round once per cycle. Cache/SSD pools get their share
+# every day. A disk that has fallen behind (files older than the cycle) gets up to double its share until it
+# catches up.
+
+def scan_days_per_week(sc: dict) -> int:
+    if sc.get("spinup") == "windows":
+        days = {d for w in (sc.get("windows") or []) for d in (w.get("days") or [])}
+        return len(days) or 7
+    return 7
+
+
+def _day() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def _day_start() -> float:
+    t = time.localtime()
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+def _disk_counts(cutoff: float) -> dict[str, tuple[int, int]]:
+    """disk -> (scanned files, files last scanned before cutoff)."""
+    return {r["disk"]: (r["n"], r["old"] or 0) for r in db.q(
+        """SELECT f.disk, COUNT(*) n, SUM(f.last_scan_at < ?) old FROM files f JOIN items i ON i.id = f.item_id
+           WHERE f.missing = 0 AND i.excluded = 0 AND f.last_scan_at IS NOT NULL GROUP BY f.disk""", (cutoff,))}
+
+
+def build_plan(sc: dict, hdds: set[str], fast: set[str], old: dict | None = None) -> dict:
+    """Today's disks and how many files each may rescan. `old` = today's earlier plan (settings changed)."""
+    rescan_days = max(1.0, float(sc.get("rescan_after_days", 180) or 180))
+    cycle = max(1.0, rescan_days * scan_days_per_week(sc) / 7)   # scan days in one cycle
+    counts = _disk_counts(time.time() - rescan_days * 86400)
+    hdds = sorted(d for d in hdds if counts.get(d, (0, 0))[0])
+    slots = min(max(0, int(sc.get("max_disks", 1) or 0)), len(hdds))
+    visits = settings.state_get("rescan_visits", {}) or {}
+    today = _day()
+    keep = [d for d in (old or {}).get("disks", []) if d in hdds and d not in fast]
+    rest = sorted((d for d in hdds if d not in keep), key=lambda d: (visits.get(d, ""), d))
+    disks = (keep + rest)[:slots]
+    for d in disks:
+        visits[d] = today
+    settings.state_set("rescan_visits", visits)
+
+    def share(d: str, every: float) -> int:
+        n, behind = counts.get(d, (0, 0))
+        base = -(-n * every // cycle) if n else 0   # ceil(n / visits per cycle)
+        return int(base + min(behind, base))
+
+    quota = {d: share(d, len(hdds) / slots) for d in disks}
+    quota.update({d: share(d, 1) for d in sorted(fast) if counts.get(d, (0, 0))[0]})
+    return {"date": today, "sig": _plan_sig(sc), "disks": disks, "quota": quota,
+            "done": dict((old or {}).get("done") or {}), "day_start": _day_start()}
+
+
+def _plan_sig(sc: dict) -> list:
+    return [sc.get("max_disks"), sc.get("rescan_after_days"), sorted(sc.get("disks") or []), sc.get("spinup"),
+            scan_days_per_week(sc), bool(sc.get("cache_slot", True))]
+
+
+def today_plan(sc: dict, hdds: set[str], fast: set[str]) -> dict:
+    plan = settings.state_get("rescan_plan")
+    if plan and plan.get("date") == _day() and plan.get("sig") == _plan_sig(sc):
+        return plan
+    plan = build_plan(sc, hdds, fast, plan if plan and plan.get("date") == _day() else None)
+    settings.state_set("rescan_plan", plan)
+    db.log("Rescan plan for today: " + (", ".join(f"{d} {n}" for d, n in plan["quota"].items()) or "nothing due"))
+    return plan
+
+
+def _plan_left(plan: dict, disk: str) -> int:
+    return max(0, int(plan["quota"].get(disk, 0)) - int(plan["done"].get(disk, 0)))
+
+
+def next_up(limit: int = 10) -> list[dict]:
+    """What scheduled scanning will do next: never-scanned files, then today's remaining rescans."""
+    out = [{"id": r["id"], "title": r["title"], "label": r["label"], "disk": r["disk"], "why": "never scanned"}
+           for r in next_files(None, limit)]
+    plan = settings.state_get("rescan_plan") or {}
+    if plan.get("date") == _day():
+        for d in plan.get("quota", {}):
+            left = min(_plan_left(plan, d), limit - len(out))
+            for r in (oldest_files(d, plan["day_start"], left) if left > 0 else []):
+                days = (time.time() - r["last_scan_at"]) / 86400
+                out.append({"id": r["id"], "title": r["title"], "label": r["label"], "disk": d,
+                            "why": f"daily rescan, last checked {days:.0f} days ago"})
+    return out[:limit]
+
+
+def _plan_count(plan: dict, disk: str) -> None:
+    plan["done"][disk] = int(plan["done"].get(disk, 0)) + 1
+    settings.state_set("rescan_plan", plan)
 
 
 def all_disks() -> list[str]:
@@ -234,8 +336,26 @@ class Worker(threading.Thread):
         disks = all_disks()
         only = set(cfg["schedule"].get("disks") or [])
         fast = {d for d in disks if unraid.is_fast_disk(d, state)}
+        mine = (lambda ds: ds & only) if only else (lambda ds: ds)
+        sc = cfg["schedule"]
+        plan = today_plan(sc, mine(set(disks) - fast), mine(fast) if sc.get("cache_slot", True) else set())
+        STATUS["rescan_plan"] = {"date": plan["date"], "disks": plan["disks"],
+                                 "progress": {d: [int(plan["done"].get(d, 0)), n] for d, n in plan["quota"].items()}}
         return {"state": state, "spun": spun, "disks": disks, "only": only, "fast": fast, "busy": busy,
-                "taken": {a["disk"] for a in self.active.values()}}
+                "plan": plan, "taken": {a["disk"] for a in self.active.values()}}
+
+    @staticmethod
+    def _due(ctx: dict, disk: str) -> tuple[dict | None, str]:
+        """Scheduled work on one disk: a never-scanned file first, then (budget left) its oldest scan."""
+        got = next_files([disk])
+        if got:
+            return got[0], "new"
+        plan = ctx["plan"]
+        if _plan_left(plan, disk):
+            got = oldest_files(disk, plan["day_start"])
+            if got:
+                return got[0], "rescan"
+        return None, ""
 
     def _queue_job(self, ctx: dict, disks: set[str] | None, exclude: set[str]) -> dict | None:
         """Next due queue job on one of `disks` (None = any disk not excluded)."""
@@ -252,7 +372,6 @@ class Worker(threading.Thread):
 
     def _fill(self, slot: str, cfg: dict, ctx: dict, queue_ok: bool, sched_ok: bool, fast: bool) -> int:
         sc = cfg["schedule"]
-        rescan = float(sc.get("rescan_after_days", 180))
         profile = sc.get("profile") or cfg["scan"]["default_profile"]
         taken = ctx["taken"] | ctx["busy"]
         pick = None  # (file_id, profile, source, why, queue_id, disk)
@@ -263,10 +382,12 @@ class Worker(threading.Thread):
                 if j:
                     pick = (j["file_id"], j["profile"], j["source"], f"cache/SSD - {j['source']}", j["id"], j["disk"])
             if not pick and sched_ok:
-                allowed = sorted((pool & ctx["only"]) if ctx["only"] else pool)
-                got = next_files(allowed, rescan) if allowed else []
-                if got:
-                    pick = (got[0]["id"], profile, "scheduled", "cache/SSD", None, got[0]["disk"])
+                for d in sorted((pool & ctx["only"]) if ctx["only"] else pool):
+                    f, kind = self._due(ctx, d)
+                    if f:
+                        pick = (f["id"], profile, "scheduled", "cache/SSD" + (" - daily rescan" if kind == "rescan" else ""),
+                                None, d, kind)
+                        break
         else:
             hdds = set(ctx["disks"]) - ctx["fast"]
             spinning = hdds if ctx["spun"] is None else hdds & set(ctx["spun"])
@@ -279,34 +400,44 @@ class Worker(threading.Thread):
                 if j:
                     pick = (j["file_id"], j["profile"], j["source"], f"already spinning - {j['source']}", j["id"], j["disk"])
             # 2. scheduled files on a spinning disk, staying on this slot's disk while it has work
+            #    (never-scanned files on any disk; rescans only on today's disks, within their budget)
             if not pick and sched_ok:
                 cands = allowed(spinning - exclude)
                 order = ([sticky] if sticky in cands else []) + sorted(cands - {sticky})
                 for d in order:
-                    got = next_files([d], rescan)
-                    if got:
-                        pick = (got[0]["id"], profile, "scheduled", "already spinning", None, d)
+                    f, kind = self._due(ctx, d)
+                    if f:
+                        pick = (f["id"], profile, "scheduled", "already spinning" + (" - daily rescan" if kind == "rescan" else ""),
+                                None, d, kind)
                         break
             # 3. queued files on an idle disk (you asked for them, so they may wake it)
             if not pick and queue_ok:
                 j = self._queue_job(ctx, None, exclude)
                 if j:
                     pick = (j["file_id"], j["profile"], j["source"], f"woke disk - {j['source']}", j["id"], j["disk"])
-            # 4. wake the next idle disk in rotation
+            # 4. wake an idle disk: today's rescan disks first, then the next one in rotation with new files
             if not pick and sched_ok and self._may_spin_up(sc):
                 idle = sorted(allowed(hdds - spinning - exclude))
-                if idle:
+                for d in [d for d in ctx["plan"]["disks"] if d in idle]:
+                    f, kind = self._due(ctx, d)
+                    if f:
+                        pick = (f["id"], profile, "scheduled", "woke today's disk" + (" - daily rescan" if kind == "rescan" else ""),
+                                None, d, kind)
+                        break
+                if not pick and idle:
                     last = settings.state_get("rotation_last")
                     start = (idle.index(last) + 1) if last in idle else 0
                     for d in idle[start:] + idle[:start]:
-                        got = next_files([d], rescan)
+                        got = next_files([d])
                         if got:
                             settings.state_set("rotation_last", d)
-                            pick = (got[0]["id"], profile, "scheduled", "woke idle disk (rotation)", None, d)
+                            pick = (got[0]["id"], profile, "scheduled", "woke idle disk (rotation)", None, d, "new")
                             break
         if not pick:
             return 0
-        fid, prof, source, why, qid, disk = pick
+        fid, prof, source, why, qid, disk = pick[:6]
+        if pick[6:] == ("rescan",):
+            _plan_count(ctx["plan"], disk)
         ctx["taken"].add(disk)
         self.last_disk[slot] = disk
         full = bool(qid and db.scalar("SELECT full FROM queue WHERE id=?", (qid,)))
@@ -419,8 +550,11 @@ def next_run(cfg: dict) -> dict:
         nxt = next_window_start(w)
         return {"at": time.time(), "why": "scanning cache and spinning disks; idle disks wake "
                 + (f"from {nxt:%a %H:%M}" if nxt else "never (no spin-up window set)")}
-    return {"at": time.time(), "why": "around the clock: cache first, then spinning disks, then wakes one idle disk"
-            + ("" if spin != "never" else " (never wakes idle disks)")}
+    plan = STATUS.get("rescan_plan") or {}
+    today = ", ".join(f"{d} {a}/{b}" for d, (a, b) in (plan.get("progress") or {}).items())
+    return {"at": time.time(), "why": "around the clock: new files on any disk, plus today's rescans"
+            + (f" ({today})" if today else " (none due)")
+            + ("" if spin != "never" else "; never wakes idle disks")}
 
 
 WORKER: Worker | None = None

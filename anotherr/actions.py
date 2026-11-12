@@ -74,7 +74,8 @@ WHISPER_CODES = ("subs_missing", "subs_signs_only")  # no usable full subtitle: 
 
 def _sub_fix(file_id: int, item_id: int | None, codes: list[str]) -> tuple[str, str]:
     """Bazarr resub - or, once Bazarr's normal search came up empty for this series, a Whisper subtitle.
-    With subgen set up the Whisper step is subgen's own proposal (subgen.refresh_item), never a Bazarr one."""
+    With subgen set up the Whisper step is subgen's own proposal (subgen.refresh_item), never a Bazarr one;
+    with subgen.first on, propose_for_file never gets here for a file subgen can take (subgen.wanted)."""
     from . import subgen
 
     base = "Issues: " + ", ".join(codes)

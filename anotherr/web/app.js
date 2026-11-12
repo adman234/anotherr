@@ -588,6 +588,7 @@ const HELP = {
   "subgen.timeout_min_s": "Minimum per-file budget in seconds.",
   "subgen.max_consecutive_failures": "Stop a batch after this many failed files in a row (Resume continues it).",
   "subgen.refresh_every": "Ask Sonarr/Radarr and Bazarr to rescan after this many files, and at the end of a batch.",
+  "subgen.first": "On: missing or signs-only subtitles go straight to subgen, and Bazarr keeps the small fixes (out of sync, mismatched text) plus any file subgen can't take. Off: a Bazarr resub has to fail for the series first.",
   "subgen.new_episode_days": "Automatic proposals leave newer episodes to a normal Bazarr search first. 'Generate subtitle' ignores this.",
   "subgen.gpu": "Turn on if subgen runs on the same GPU as Anotherr: Anotherr then finishes its scans, unloads its Whisper model and pauses scanning while a subgen job runs.",
   "subgen.min_cues_per_min": "Results with fewer cues per minute are rejected (a dialogue track is usually 10-20).",

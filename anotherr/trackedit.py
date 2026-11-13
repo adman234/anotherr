@@ -258,11 +258,20 @@ def write_path(f: dict, resolved: str) -> str | None:
 
     The physical path comes first because a copy edit writes a whole new file next to the original: through
     /mnt/user, Unraid puts that new file on the cache pool of a cache-enabled share and the mover has to carry
-    it back to the array. Written on the original's own disk it replaces the file in place."""
+    it back to the array. Written on the original's own disk it replaces the file in place.
+
+    The folder only has to be writable for a copy edit (new file, then rename over the original). An in-place
+    mkvpropedit edit only rewrites the file itself, so a read-only folder (e.g. root-owned) doesn't block it."""
     from .sync import map_path
 
     for p in (resolved, map_path(f["arr_path"])):
-        if p and os.path.exists(p) and os.access(p, os.W_OK) and os.access(os.path.dirname(p), os.W_OK):
+        if not (p and os.path.exists(p) and os.access(p, os.W_OK)):
+            continue
+        try:
+            in_place = method_for(p, os.stat(p).st_nlink) == "mkvpropedit"
+        except OSError:
+            continue
+        if in_place or os.access(os.path.dirname(p), os.W_OK):
             return p
     return None
 

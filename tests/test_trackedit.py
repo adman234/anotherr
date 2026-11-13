@@ -1,5 +1,6 @@
 """Track-edit executor: every action ends done or failed, with progress, per-file logs and a reaper."""
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -161,6 +162,22 @@ def test_write_path_prefers_physical_disk(tmp_path, monkeypatch):
     assert trackedit.write_path({"arr_path": "/tv/x.mkv"}, str(disk)) == str(disk)
     # physical path not visible (e.g. not mounted): fall back to the share path
     assert trackedit.write_path({"arr_path": "/tv/x.mkv"}, str(tmp_path / "nope" / "x.mkv")) == str(share)
+
+
+def test_write_path_read_only_folder_blocks_copy_but_not_in_place_edit(tmp_path, monkeypatch):
+    import anotherr.sync
+    mkv, mp4 = tmp_path / "ro" / "x.mkv", tmp_path / "ro" / "x.mp4"
+    mkv.parent.mkdir()
+    for p in (mkv, mp4):
+        p.write_bytes(b"x")
+    monkeypatch.setattr(anotherr.sync, "map_path", lambda _: "")
+    real = os.access
+    monkeypatch.setattr(os, "access", lambda p, mode: False if str(p) == str(mkv.parent) else real(p, mode))
+    f = {"arr_path": "/tv/x"}
+    assert trackedit.write_path(f, str(mkv)) == str(mkv)   # mkvpropedit rewrites the file in place: folder not needed
+    assert trackedit.write_path(f, str(mp4)) is None       # a copy edit writes a new file in the folder
+    os.link(mkv, tmp_path / "ro" / "link.mkv")             # hardlinked: would be a copy edit again
+    assert trackedit.write_path(f, str(mkv)) is None
 
 
 def test_apply_copy_removes_temp_on_crash(tmp_path, monkeypatch):

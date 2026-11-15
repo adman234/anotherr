@@ -13,7 +13,7 @@ RESUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mism
 REDOWNLOAD_CODES = [
     "unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "decode_stopped_early",
     "duration_short", "wrong_content",
-    "original_audio_missing", "english_audio_missing", "silent_audio", "visual_review_failed", "full_decode_errors",
+    "original_audio_missing", "english_audio_missing", "audio_description_only", "silent_audio", "visual_review_failed", "full_decode_errors",
 ]
 
 DEFAULTS: dict = {

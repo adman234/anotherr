@@ -43,7 +43,7 @@ def current_default_audio(tracks: list[dict]) -> dict | None:
 
 def pick_audio(tracks: list[dict], pref: str) -> dict | None:
     cands = [t for t in tracks if _same(t.get("effective"), pref) and t.get("confident") and t.get("all_agree")
-             and t.get("windows") and not t.get("commentary") and not _NOT_MAIN.search(t.get("title") or "")]
+             and t.get("windows") and not t.get("commentary") and not t.get("described") and not _NOT_MAIN.search(t.get("title") or "")]
     return sorted(cands, key=lambda t: (-(t.get("channels") or 0), t["a_index"]))[0] if cands else None
 
 
@@ -63,10 +63,11 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
     orig = pref
     if fallback and pref and not any(_same(t.get("effective"), pref) for t in tracks):
         pref = fallback
-    if "default_audio_not_preferred" in codes and pref and cur and (cur.get("commentary")
+    cur_off = bool(cur and (cur.get("commentary") or cur.get("described")))
+    if "default_audio_not_preferred" in codes and pref and cur and (cur_off
                                                                   or not _same(cur.get("effective"), pref)):
         tgt = pick_audio(tracks, pref)
-        if not cur.get("commentary") and not cur.get("effective"):
+        if not cur_off and not cur.get("effective"):
             # hold: what plays now is unidentified, so we can't tell whether this is a dual-audio choice
             out["notes"].append(f"default audio track {cur['a_index'] + 1}'s language couldn't be identified - "
                                 "no change until a rescan identifies it")

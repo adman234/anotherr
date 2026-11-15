@@ -374,6 +374,7 @@ def run_pipeline(ctx: Ctx):
     if ctx.info["audio"]:
         check_audio(ctx)
         check_language(ctx)
+        check_described_audio(ctx)
     check_subtitles(ctx)
     check_dual_audio(ctx)
     check_multi_episode(ctx)
@@ -749,6 +750,28 @@ def _expected(ctx: Ctx) -> str:
     return langs.norm(ctx.item.get("language_override")) or langs.norm(ctx.item.get("original_language"))
 
 
+def check_described_audio(ctx: Ctx):
+    """A track for the expected or English language that exists only as an audio-description (narrated for the blind)
+    mix: players with no plain track in that language can only play the narration."""
+    audio = [a for a in ctx.info["audio"] if not a.get("commentary")]
+    desc = [a for a in audio if a.get("described")]
+    if not desc:
+        return
+    plain = [a for a in audio if not a.get("described")]
+    exp = getattr(ctx, "expected", "") or ""
+    for d in desc:
+        lang = d.get("lang") or ""
+        if not lang or not (lang_match(lang, "eng") or (exp and lang_match(lang, exp))):
+            continue
+        if any((not p.get("lang")) or lang_match(p["lang"], lang) for p in plain):
+            continue
+        ctx.issue("language", "audio_description_only", "error",
+                  f"The only {langs.name(lang)} audio is an audio-description track (track {d['a_index'] + 1}"
+                  f"{', ' + repr(d['title']) if d.get('title') else ''}); there is no plain {langs.name(lang)} track.",
+                  track=d["a_index"] + 1, lang=lang)
+        return
+
+
 def check_audio(ctx: Ctx):
     ctx.expected = _expected(ctx)
     dub = langs.norm(ctx.cfg["anime"]["dub_language"])
@@ -1068,13 +1091,15 @@ def check_language(ctx: Ctx):
         dstream = next((a for a in ctx.info["audio"] if a["default"]), None)
     else:
         dstream = ctx.info["audio"][0] if ctx.info["audio"] else None
-    if dstream and dstream.get("commentary") and tracks:
+    if dstream and (dstream.get("commentary") or dstream.get("described")) and tracks:
         from . import defaults
 
         view = _track_view(ctx)
         pref = exp if orig else "eng" if english else ""
         tgt = defaults.pick_audio(view, pref) if pref else None
+        kind = "commentary" if dstream.get("commentary") else "audio description"
         ctx.issue("language", "default_audio_not_preferred", "warning",
+                  f"Default audio track {dstream['a_index'] + 1} is an {kind} track." if kind != "commentary" else
                   f"Default audio track {dstream['a_index'] + 1} is a commentary track."
                   + (f" Fix available: make track {tgt['a_index'] + 1} ({langs.name(pref)}) the default." if tgt else ""),
                   fix_available=bool(tgt), target_track=tgt["a_index"] + 1 if tgt else None, commentary=True)
@@ -1682,7 +1707,7 @@ def _track_view(ctx: Ctx) -> list[dict]:
         t = ctx.tracks.get(ai, {})
         out.append({"a_index": ai, "tag": a.get("lang", ""), "title": a.get("title", ""), "codec": a.get("codec"),
                     "channels": a.get("channels"), "default": bool(a.get("default")),
-                    "commentary": bool(a.get("commentary")), "forced": bool(a.get("forced")),
+                    "commentary": bool(a.get("commentary")), "described": bool(a.get("described")), "forced": bool(a.get("forced")),
                     "hi": bool(a.get("hearing_impaired") or a.get("visual_impaired")),
                     "analysed": bool(t), "speech_s": t.get("speech_s"),
                     "effective": t.get("effective", a.get("lang", "") if not t else ""), "confident": bool(t.get("confident")),

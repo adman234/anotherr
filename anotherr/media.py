@@ -19,6 +19,7 @@ FFMPEG = os.environ.get("ANOTHERR_FFMPEG", "ffmpeg")
 FFPROBE = os.environ.get("ANOTHERR_FFPROBE", "ffprobe")
 SR = 16000
 
+DESCRIBED_RE = re.compile(r"descriptive|audio[\s._-]*descri|\bdvs\b|\[ad\]|\(ad\)|\bad\b|visually[\s._-]*impaired", re.I)
 TEXT_SUB_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text", "srt"}
 IMAGE_SUB_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
 SIDE_EXTS = (".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup")
@@ -220,6 +221,7 @@ def summarize(probe: dict) -> dict:
                         commentary=bool(disp.get("comment")) or "comment" in base["title"].lower(),
                         hearing_impaired=bool(disp.get("hearing_impaired")),
                         visual_impaired=bool(disp.get("visual_impaired")))
+            base["described"] = base["visual_impaired"] or bool(DESCRIBED_RE.search(base["title"]))
             audio.append(base)
         elif t == "subtitle":
             if not base["lang"]:

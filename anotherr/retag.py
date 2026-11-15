@@ -55,7 +55,7 @@ def _evidence(f: dict) -> dict | None:
         return None
     return {"scan_started": s["started_at"], "tracks": [
         {"a_index": a["a_index"], "tag": a.get("lang", ""), "title": a.get("title", ""),
-         "commentary": bool(a.get("commentary")), "forced": bool(a.get("forced")),
+         "commentary": bool(a.get("commentary")), "described": bool(a.get("described")), "forced": bool(a.get("forced")),
          "hi": bool(a.get("hearing_impaired")), "speech_s": by_idx.get(a["a_index"], {}).get("speech_s"),
          "windows": by_idx.get(a["a_index"], {}).get("windows", [])} for a in audio]}
 
@@ -109,7 +109,7 @@ def assess_item(item: dict) -> list[dict]:
         rows = []
         for idx, t in x["tracks"].items():
             a = t["a"]
-            if t.get("commentary") or t.get("forced") or t.get("hi"):
+            if t.get("commentary") or t.get("described") or t.get("forced") or t.get("hi"):
                 continue
             if (t.get("speech_s") or 0) < 10 or not a["det"] or a["det"] not in langs.NAMES:
                 continue

@@ -407,17 +407,26 @@ def approve_many(ids: list[int]) -> dict:
 
 
 def english_retag_ids(min_conf: float | None = None) -> list[int]:
-    """Proposed retag_audio batches where every file is being tagged English (untagged or wrong tag) with confidence
-    above `min_conf` (default settings retag.bulk_min_confidence) and nothing flagged for review or mismatch."""
-    from . import settings
+    """Proposed retag_audio batches safe to approve in bulk: every file is either tagged English (untagged or wrong
+    tag) or an untagged track tagged with the series' language, with confidence above `min_conf` (default
+    settings retag.bulk_min_confidence) and nothing flagged for review or mismatch. Overwriting an existing tag
+    with a non-English language stays manual."""
+    from . import defaults, settings
 
     if min_conf is None:
         min_conf = float(settings.get()["retag"].get("bulk_min_confidence", 0.95))
+
+    def ok(f, series):
+        if (f.get("conf") or 0) <= min_conf or f.get("review") or f.get("mismatch"):
+            return False
+        new = f.get("new") or ""
+        return new == "eng" or bool(series and not f.get("old") and defaults._same(new, series))
+
     out = []
     for a in db.q("SELECT id, payload FROM actions WHERE kind='retag_audio' AND status='proposed'"):
-        files = (db.unj(a["payload"], {}) or {}).get("files") or []
-        if files and all(f.get("new") == "eng" and (f.get("conf") or 0) > min_conf and not f.get("review")
-                         and not f.get("mismatch") for f in files):
+        p = db.unj(a["payload"], {}) or {}
+        files = p.get("files") or []
+        if files and all(ok(f, p.get("series_language") or "") for f in files):
             out.append(a["id"])
     return out
 
@@ -496,7 +505,7 @@ def _approve_track_edits(ids: list[int], label: str) -> dict:
 
 def approve_english_retags(min_conf: float | None = None) -> dict:
     """Queue every qualifying English retag; they run one after another in the background."""
-    return _approve_track_edits(english_retag_ids(min_conf), "Bulk English retag")
+    return _approve_track_edits(english_retag_ids(min_conf), "Bulk confident retag")
 
 
 def approve_english_default_audio() -> dict:

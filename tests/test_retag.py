@@ -69,7 +69,7 @@ def test_wrong_tag_needs_series_language_and_two_agreeing_siblings():
         _file(iid, f"S09E0{e}", 9, [{"tag": "eng", "windows": W("kor", 3, 0.99)}], issues=[("audio_mislabeled", "open")])
     retag.refresh_item(iid)
     (b,) = _batches()
-    assert b["payload"]["case"] == "wrong_tag" and "Manual approval only" in b["reason"]
+    assert b["payload"]["case"] == "wrong_tag"
     assert {f["old"] for f in b["payload"]["files"]} == {"eng"}
 
 
@@ -85,7 +85,7 @@ def test_mismatched_language_goes_to_review_batch_per_file():
     iid = _item("Dragon Ball Z", "jpn")
     for e in range(1, 4):  # siblings: Japanese track 2 confirmed elsewhere in the season
         _file(iid, f"S02E0{e}", 2, [{"tag": "eng", "windows": W("eng", 3)}, {"windows": W("jpn", 3)}])
-    dbz = _file(iid, "S02E09", 2, [{"windows": W("eng", 3)}, {"windows": W("jpn", 2) + W("kor", 1, 0.4)}])
+    dbz = _file(iid, "S02E09", 2, [{"windows": W("eng", 3)}, {"windows": W("kor", 3)}])  # third language
     retag.refresh_item(iid)
     b = _batches()
     review = [x for x in b if x["payload"]["review"]]
@@ -246,7 +246,19 @@ def test_weak_english_file_gets_its_own_proposal():
     retag.refresh_item(iid)
     season, alone = sorted(_batches(), key=lambda b: len(b["payload"]["files"]), reverse=True)
     assert len(season["payload"]["files"]) == 3 and weak not in {f["file_id"] for f in season["payload"]["files"]}
-    assert [f["file_id"] for f in alone["payload"]["files"]] == [weak] and "Listed on its own" in alone["reason"]
+    assert [f["file_id"] for f in alone["payload"]["files"]] == [weak] and "Listed separately" in alone["reason"]
     assert actions.english_retag_ids() == [season["id"]]
     retag.refresh_item(iid)  # stable: the same two proposals are updated, not recreated
     assert sorted(b["id"] for b in _batches()) == sorted([season["id"], alone["id"]])
+
+
+def test_english_dub_next_to_series_language_is_not_review():
+    from anotherr import actions
+
+    iid = _item("Dragon Ball Z", "jpn")
+    for e in range(1, 4):
+        _file(iid, f"S03E0{e}", 3, [{"windows": W("eng", 3, 0.99)}, {"windows": W("jpn", 3, 0.99)}])
+    retag.refresh_item(iid)
+    b = _batches()
+    assert len(b) == 1 and not b[0]["payload"]["review"] and len(b[0]["payload"]["files"]) == 6
+    assert actions.english_retag_ids() == [b[0]["id"]]

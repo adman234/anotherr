@@ -409,18 +409,22 @@ def approve_many(ids: list[int]) -> dict:
 def english_retag_ids(min_conf: float | None = None) -> list[int]:
     """Proposed retag_audio batches safe to approve in bulk: every file is either tagged English (untagged or wrong
     tag) or an untagged track tagged with the series' language, with confidence above `min_conf` (default
-    settings retag.bulk_min_confidence) and nothing flagged for review or mismatch. Overwriting an existing tag
-    with a non-English language stays manual."""
+    settings retag.bulk_min_confidence) and nothing flagged for review. An English dub in a foreign series is
+    fine. Overwriting an existing tag with the series' language needs every window to agree."""
     from . import defaults, settings
 
     if min_conf is None:
         min_conf = float(settings.get()["retag"].get("bulk_min_confidence", 0.95))
 
     def ok(f, series):
-        if (f.get("conf") or 0) <= min_conf or f.get("review") or f.get("mismatch"):
+        if (f.get("conf") or 0) <= min_conf or f.get("review"):
             return False
         new = f.get("new") or ""
-        return new == "eng" or bool(series and not f.get("old") and defaults._same(new, series))
+        if new == "eng":
+            return True
+        if f.get("mismatch") or not (series and defaults._same(new, series)):
+            return False
+        return not f.get("old") or bool(f.get("all_agree"))
 
     out = []
     for a in db.q("SELECT id, payload FROM actions WHERE kind='retag_audio' AND status='proposed'"):

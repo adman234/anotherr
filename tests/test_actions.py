@@ -102,6 +102,13 @@ def test_bulk_english_retag_and_out_of_sync_selection():
     retag([{"file_id": fid, "new": "eng", "conf": 0.99, "review": True}])      # flagged
     assert len(actions.english_retag_ids()) == 1
     assert len(actions.english_retag_ids(0.85)) == 2
+    db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) VALUES (?, 'retag_audio', "
+         "'proposed', ?, ?, ?)", (fid, json.dumps({"series_language": "jpn", "files": [
+             {"file_id": fid, "new": "jpn", "old": "", "conf": 0.98}]}), now, now))   # untagged -> series language
+    db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) VALUES (?, 'retag_audio', "
+         "'proposed', ?, ?, ?)", (fid, json.dumps({"series_language": "jpn", "files": [
+             {"file_id": fid, "new": "jpn", "old": "eng", "conf": 0.98}]}), now, now))  # overwrite: stays manual
+    assert len(actions.english_retag_ids()) == 2
     db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "
          "VALUES (?, 'resub', 'proposed', '[\"subs_out_of_sync\"]', 'x', ?, ?)", (fid, now, now))
     db.x("INSERT INTO actions(file_id, kind, status, codes, reason, created_at, updated_at) "

@@ -376,7 +376,7 @@ function bulkButtons(rows, bp) {
   const subgens = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "subgen_transcribe"));
   return btn(subgens, "Approve all subgen generations", "bulkSubgen()")
     + btn(resubs, "Approve all resubs (Bazarr)", "bulk('approve','resub')")
-    + btn(f.english_retags || 0, "Approve English retags", "bulkEnglish()")
+    + btn(f.english_retags || 0, "Approve confident retags", "bulkEnglish()")
     + btn(f.english_default_audio || 0, "Approve default English audio", "bulkEnglishDefault()")
     + btn(f.foreign_defaults || 0, "Clear foreign defaults", "bulkForeignDefaults()")
     + btn(f.out_of_sync_resubs || 0, "Approve out-of-sync resubs", "bulkSync()")

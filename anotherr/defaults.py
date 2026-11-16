@@ -94,8 +94,10 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
             elif not tgt:
                 out["notes"].append(f"no full embedded {langs.name(sub_lang)} subtitle track")
     if "default_subs_foreign" in codes and not out["sub"]:
-        foreign = next((s for s in subs_all or [] if s.get("default") and s.get("lang")
-                        and not _same(s["lang"], sub_lang) and not _same(s["lang"], pref)), None)
+        # some releases flag every subtitle track default: deal with all the foreign ones at once, not one per scan
+        foreigns = [s for s in subs_all or [] if s.get("default") and s.get("lang")
+                    and not _same(s["lang"], sub_lang) and not _same(s["lang"], pref)]
+        foreign = foreigns[0] if foreigns else None
         tgt = None if _same(final_lang, sub_lang) else pick_full_sub(subs, sub_lang)
         if foreign and tgt:
             out["ops"].append({"type": "s", "index": tgt["s_index"], "default": True})
@@ -103,10 +105,13 @@ def plan_file(tracks: list[dict], subs: list[dict], codes: set[str], pref: str, 
                           "image": not tgt.get("text"), "sdh": bool(tgt.get("hearing_impaired")),
                           "from": foreign["s_index"], "from_lang": foreign["lang"]}
         elif foreign:
-            # the audio is already in your language (or there is no full track to move to): just drop the flag
-            out["ops"].append({"type": "s", "index": foreign["s_index"], "default": False})
-            out["sub"] = {"to": None, "clear": foreign["s_index"], "from": foreign["s_index"],
-                          "from_lang": foreign["lang"], "title": "", "image": False, "sdh": False}
+            # the audio is already in your language (or there is no full track to move to): just drop the flags
+            for f in foreigns:
+                out["ops"].append({"type": "s", "index": f["s_index"], "default": False})
+            out["sub"] = {"to": None, "clear": foreign["s_index"], "clears": [f["s_index"] for f in foreigns],
+                          "from": foreign["s_index"], "from_lang": foreign["lang"],
+                          "from_langs": list(dict.fromkeys(f["lang"] for f in foreigns)),
+                          "title": "", "image": False, "sdh": False}
     out["dual"] = is_dual_choice(tracks, out["audio"], orig)
     return out
 
@@ -149,7 +154,8 @@ def _signature(plan: dict) -> str:
     if plan["audio"]:
         parts.append(f"audio {langs.name(plan['audio']['to_lang'])} <- {langs.name(plan['audio']['from_lang'])}")
     if plan["sub"] and plan["sub"].get("clear") is not None:
-        parts.append(f"subtitle clear {langs.name(plan['sub']['from_lang'])}")
+        parts.append("subtitle clear " + ", ".join(langs.name(x) for x in plan["sub"].get("from_langs")
+                                                   or [plan["sub"]["from_lang"]]))
     elif plan["sub"]:
         parts.append("subtitle full" + (" (image)" if plan["sub"]["image"] else ""))
     return " + ".join(parts)
@@ -165,9 +171,11 @@ def _reason(item: dict, season, plans: list[dict]) -> str:
         bits.append(f"make audio track {'/'.join(map(str, tos))} ({langs.name(p0['audio']['to_lang'])}) the default on "
                     f"{n} file(s). Was {langs.name(p0['audio']['from_lang'])} (track {'/'.join(map(str, froms))})")
     if p0["sub"] and p0["sub"].get("clear") is not None:
-        idx = sorted({p["plan"]["sub"]["clear"] + 1 for p in plans})
-        bits.append(f"{'and ' if bits else ''}clear the default flag on the {langs.name(p0['sub']['from_lang'])} "
-                    f"subtitle track s{'/s'.join(map(str, idx))}{'' if bits else f' on {n} file(s)'}")
+        idx = sorted({i + 1 for p in plans for i in p["plan"]["sub"].get("clears") or [p["plan"]["sub"]["clear"]]})
+        names = ", ".join(langs.name(x) for x in p0["sub"].get("from_langs") or [p0["sub"]["from_lang"]])
+        many = len(idx) > 1
+        bits.append(f"{'and ' if bits else ''}clear the default flag on the {names} subtitle track{'s' if many else ''} "
+                    f"s{'/s'.join(map(str, idx))}{'' if bits else f' on {n} file(s)'}")
     elif p0["sub"]:
         was = (f"the {langs.name(p0['sub']['from_lang'])} track" if p0["sub"].get("from_lang")
                else "the signs-only track")

@@ -72,6 +72,10 @@ class Sonarr(Client):
         rows = self.get("/api/v3/history/series", seriesId=series_id, episodeId=episode_id, eventType=1) or []
         return sorted(rows, key=lambda r: r.get("date", ""), reverse=True)
 
+    def import_history(self, series_id: int, episode_id: int):
+        rows = self.get("/api/v3/history/series", seriesId=series_id, episodeId=episode_id, eventType=3) or []
+        return sorted(rows, key=lambda r: r.get("date", ""), reverse=True)
+
     def mark_failed(self, history_id: int):
         return self.req("POST", f"/api/v3/history/failed/{history_id}")
 
@@ -96,6 +100,10 @@ class Radarr(Client):
 
     def grab_history(self, movie_id: int):
         rows = self.get("/api/v3/history/movie", movieId=movie_id, eventType=1) or []
+        return sorted(rows, key=lambda r: r.get("date", ""), reverse=True)
+
+    def import_history(self, movie_id: int):
+        rows = self.get("/api/v3/history/movie", movieId=movie_id, eventType=3) or []
         return sorted(rows, key=lambda r: r.get("date", ""), reverse=True)
 
     def mark_failed(self, history_id: int):

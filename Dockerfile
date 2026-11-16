@@ -11,8 +11,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/config/models/hf \
     PUID=99 PGID=100 TZ=Etc/UTC
 
+# Changes weekly (the scheduled build passes the ISO week), so the apt layer below is rebuilt for security fixes
+# instead of being served from the registry cache forever.
+ARG APT_CACHE_BUST=0
+
 # If the Ubuntu archive is unreachable from the build machine, retry once on another mirror.
-RUN inst() { apt-get update -o Acquire::http::Timeout=20 -o Acquire::Retries=2 \
+RUN : "apt cache key ${APT_CACHE_BUST}"; inst() { apt-get update -o Acquire::http::Timeout=20 -o Acquire::Retries=2 \
       && apt-get install -y --no-install-recommends -o Acquire::Retries=2 \
          python3 python3-venv ffmpeg tzdata ca-certificates util-linux \
          tesseract-ocr tesseract-ocr-eng mkvtoolnix; } \

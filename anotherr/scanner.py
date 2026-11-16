@@ -53,6 +53,8 @@ class Ctx:
     info: dict = field(default_factory=dict)
     segments: list = field(default_factory=list)
     issues: list = field(default_factory=list)
+    queue_rev: int | None = None                # the queue request this scan answers (None: it was not queued)
+    ran: set = field(default_factory=set)       # issue categories whose checks completed; only these may resolve old issues
     reviews: list = field(default_factory=list)
     result: dict = field(default_factory=dict)
     audio: dict = field(default_factory=dict)   # (a_index, seg_idx) -> np.ndarray
@@ -322,6 +324,7 @@ def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None,
             "disk": f.get("disk", ""), "why": why, "profile": profile, "started_at": started, "step": "starting"}
     CURRENT[slot] = live
     ctx = Ctx(file=f, item=item, cfg=cfg, profile=profile, pcfg=pcfg, seed=seed, live=live, full=full)
+    ctx.queue_rev = db.scalar("SELECT COALESCE(rev, 0) FROM queue WHERE file_id=?", (file_id,))
     status, error = "done", ""
     try:
         run_pipeline(ctx)
@@ -333,13 +336,21 @@ def _scan_file(file_id: int, profile: str | None, source: str, seed: int | None,
     finally:
         CURRENT.pop(slot, None)
         _release_cache(ctx.path)
-    return persist(ctx, scan_id, status, error, time.time() - started)
+    try:
+        return persist(ctx, scan_id, status, error, time.time() - started)
+    except Exception as e:  # noqa: BLE001
+        # a failed save must not leave the scan row 'running' forever
+        log.exception("saving scan %s failed", scan_id)
+        db.x("UPDATE scans SET status='failed', finished_at=?, error=? WHERE id=? AND status='running'",
+             (time.time(), f"saving the scan failed: {e}", scan_id))
+        return {"scan_id": scan_id, "status": "failed", "error": str(e)}
 
 
 def run_pipeline(ctx: Ctx):
     rng = random.Random(ctx.seed)
     ctx.step("locating file")
     ctx.path = resolve_path(ctx.file)
+    ctx.ran.add("config")
     if not ctx.path:
         from .sync import map_path
 
@@ -371,15 +382,20 @@ def run_pipeline(ctx: Ctx):
     ctx.segments = reuse or media.pick_segments(ctx.info["duration"], n, secs, rng)
     ctx.result["segments"] = ctx.segments
     check_decode(ctx)
+    ctx.ran.update(("integrity", "video"))
     if ctx.info["audio"]:
         check_audio(ctx)
         check_language(ctx)
         check_described_audio(ctx)
+    ctx.ran.update(("audio", "language"))
     check_subtitles(ctx)
     check_dual_audio(ctx)
+    ctx.ran.add("subtitles")
     check_multi_episode(ctx)
+    ctx.ran.add("multi_episode")
     queue_reviews(ctx, rng)
     consolidate(ctx)
+    ctx.ran.add("identity")
     # render the frames a reviewer (you or Claude) will look at now, while the file is open and the
     # disk is spinning - viewing reviews later then never starts ffmpeg or wakes a disk
     want = [t for r in ctx.reviews if r.get("status", "pending") == "pending" for t in r["timestamps"]]
@@ -1735,8 +1751,33 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
             c.execute("UPDATE scans SET result=json_remove(result, '$.cache') WHERE file_id=? AND id<>? "
                       "AND result LIKE '%\"cache\"%'", (fid, scan_id))
         ignored = {r[0] for r in c.execute("SELECT DISTINCT code FROM issues WHERE file_id=? AND status='ignored'", (fid,))}
-        c.execute("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open'", (now, fid))
+        # Only what this scan actually checked may close old issues: a failed or early-exit scan (file
+        # unreadable, crash mid-pipeline) saw only part of the file, and its silence is not "fixed".
+        # Codes re-found now are always replaced, so they never duplicate.
+        cats = sorted(ctx.ran)
+        found = sorted({i["code"] for i in ctx.issues})
+        conds, args = [], []
+        if cats:
+            conds.append(f"category IN ({','.join('?' * len(cats))})")
+            args += cats
+        if found:
+            conds.append(f"code IN ({','.join('?' * len(found))})")
+            args += found
+        if conds:
+            c.execute("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open' AND ("
+                      + " OR ".join(conds) + ")", (now, fid, *args))
+        refreshed: set[str] = set()
         for i in ctx.issues:
+            if i["code"] in ignored and i["code"] not in refreshed:
+                # an ignored code keeps its one row: refresh it rather than piling up a new row per scan
+                refreshed.add(i["code"])
+                row = c.execute("SELECT id FROM issues WHERE file_id=? AND code=? AND status='ignored' "
+                                "ORDER BY id DESC LIMIT 1", (fid, i["code"])).fetchone()
+                if row:
+                    c.execute("UPDATE issues SET scan_id=?, category=?, severity=?, message=?, details=?, updated_at=? "
+                              "WHERE id=?", (scan_id, i["category"], i["severity"], i["message"], db.j(i["details"]),
+                                             now, row[0]))
+                    continue
             c.execute("INSERT INTO issues(file_id, scan_id, category, code, severity, message, details, status, "
                       "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                       (fid, scan_id, i["category"], i["code"], i["severity"], i["message"], db.j(i["details"]),
@@ -1756,7 +1797,8 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
                    _audio_evidence(ctx), fid))
         c.execute("UPDATE scans SET status=?, finished_at=?, result=?, error=? WHERE id=?",
                   (status, now, db.j(ctx.result), error, scan_id))
-        c.execute("DELETE FROM queue WHERE file_id=?", (fid,))
+        if ctx.queue_rev is not None:  # a request made while this scan ran is a newer one: keep it
+            c.execute("DELETE FROM queue WHERE file_id=? AND COALESCE(rev, 0)=?", (fid, ctx.queue_rev))
     label = f"{ctx.item['title']} {ctx.file.get('label', '')}".strip()
     db.log(f"Scanned {label} [{ctx.profile}] -> {fstatus} ({len(ctx.issues)} issues, {elapsed:.0f}s)",
            "warning" if fstatus in ("error", "critical", "failed") else "info")

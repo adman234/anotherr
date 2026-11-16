@@ -231,3 +231,14 @@ def test_windows_spinup_spreads_the_cycle_over_scan_days_only():
     sc = {"spinup": "windows", "windows": [{"days": [5, 6], "start": "01:00", "end": "07:00"}]}
     assert scheduler.scan_days_per_week(sc) == 2
     assert scheduler.scan_days_per_week({"spinup": "anytime"}) == 7
+
+
+def test_enqueue_keeps_stronger_profile_and_manual_source_and_bumps_rev():
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 1, 'S', 'series')")
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, first_seen) VALUES (?, 1, '/tv/q.mkv', ?)", (iid, time.time()))
+    scheduler.enqueue([fid], "deep", "manual")
+    scheduler.enqueue([fid], "quick", "recheck")
+    row = db.q1("SELECT * FROM queue WHERE file_id=?", (fid,))
+    assert (row["profile"], row["source"], row["rev"]) == ("deep", "manual", 1)
+    scheduler.enqueue([fid], "quick", "recheck")
+    assert db.scalar("SELECT rev FROM queue WHERE file_id=?", (fid,)) == 2

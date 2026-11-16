@@ -172,10 +172,12 @@ def _reason(item: dict, season, plans: list[dict]) -> str:
                     f"{n} file(s). Was {langs.name(p0['audio']['from_lang'])} (track {'/'.join(map(str, froms))})")
     if p0["sub"] and p0["sub"].get("clear") is not None:
         idx = sorted({i + 1 for p in plans for i in p["plan"]["sub"].get("clears") or [p["plan"]["sub"]["clear"]]})
-        names = ", ".join(langs.name(x) for x in p0["sub"].get("from_langs") or [p0["sub"]["from_lang"]])
+        all_names = [langs.name(x) for x in p0["sub"].get("from_langs") or [p0["sub"]["from_lang"]]]
+        names = ", ".join(all_names[:4]) + (f" and {len(all_names) - 4} more" if len(all_names) > 4 else "")
         many = len(idx) > 1
+        tracks = f"s{'/s'.join(map(str, idx))}" if len(idx) <= 4 else f"({len(idx)} tracks)"
         bits.append(f"{'and ' if bits else ''}clear the default flag on the {names} subtitle track{'s' if many else ''} "
-                    f"s{'/s'.join(map(str, idx))}{'' if bits else f' on {n} file(s)'}")
+                    f"{tracks}{'' if bits else f' on {n} file(s)'}")
     elif p0["sub"]:
         was = (f"the {langs.name(p0['sub']['from_lang'])} track" if p0["sub"].get("from_lang")
                else "the signs-only track")

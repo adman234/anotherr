@@ -14,7 +14,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, audio_request, db, defaults, frames, health, media, paths, redact, retag, scanner, scheduler, settings, stt, subgen, sync, trackedit, unraid
+from . import __version__, actions, arr, audio_request, db, defaults, frames, health, media, paths, redact, retag, runtime_check, scanner, scheduler, settings, stt, subgen, sync, trackedit, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -420,7 +420,7 @@ def file_detail(file_id: int):
     return f
 
 
-MCP_BRIDGE_VERSION = 10  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
+MCP_BRIDGE_VERSION = 11  # bump when mcp/anotherr_mcp.py changes in a way users should re-download for
 FRAME_LIMITER = anyio.CapacityLimiter(frames.MAX_LIVE)
 FRAME_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
@@ -910,6 +910,8 @@ def actions_bulk_preview():
     """Proposal counts per bulk button, plus `files`: how many files each would touch (what the buttons show)."""
     sets = {"english_retags": actions.english_retag_ids(), "out_of_sync_resubs": actions.subs_out_of_sync_ids(),
             "english_default_audio": actions.english_default_audio_ids(), "foreign_defaults": actions.foreign_default_ids()}
+    runtime_check.propose_all()  # files with runtime issues raised before this feature get their proposal too
+    sets["runtime_checks"] = runtime_check.request_ids()
     out = {k: len(v) for k, v in sets.items()}
     out["files"] = {k: _action_files(v) for k, v in sets.items()}
     out["min_confidence"] = settings.get()["retag"].get("bulk_min_confidence", 0.95)
@@ -924,6 +926,28 @@ def _action_files(ids: list[int]) -> int:
         for a in db.q(f"SELECT payload FROM actions WHERE id IN ({','.join('?' * len(chunk))})", tuple(chunk)):
             n += len((db.unj(a["payload"], {}) or {}).get("files") or []) or 1
     return n
+
+
+@app.post("/api/actions/bulk-runtime-checks", dependencies=[Depends(auth)])
+def actions_bulk_runtime_checks():
+    """Hand every open runtime issue to Claude: it looks the real runtime up online next time the MCP is used."""
+    return runtime_check.approve_all()
+
+
+@app.get("/api/runtime-checks", dependencies=[Depends(auth)])
+def runtime_checks_waiting():
+    return runtime_check.waiting()
+
+
+@app.post("/api/runtime-checks/{action_id}", dependencies=[Depends(auth)])
+def runtime_check_submit(action_id: int, body: dict = Body(...)):
+    """{"verdict": "file_ok" | "file_bad" | "unsure", "runtime_min": 30, "notes": "...", "sources": ["url", ...]}"""
+    rt = body.get("runtime_min")
+    out = runtime_check.submit(action_id, str(body.get("verdict") or ""), float(rt) if rt not in (None, "") else None,
+                               str(body.get("notes") or ""), [str(s) for s in body.get("sources") or []])
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("error"))
+    return out
 
 
 @app.post("/api/actions/bulk-english-retag", dependencies=[Depends(auth)])

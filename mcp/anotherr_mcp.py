@@ -33,7 +33,7 @@ from mcp.server.fastmcp import FastMCP, Image
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-BRIDGE_VERSION = 10  # the server reports the version it expects; older bridges say so in their answers
+BRIDGE_VERSION = 11  # the server reports the version it expects; older bridges say so in their answers
 URL = os.environ.get("ANOTHERR_URL", "http://localhost:9797").rstrip("/")
 KEY = os.environ.get("ANOTHERR_API_KEY", "")
 MAX_FRAMES = int(os.environ.get("ANOTHERR_MAX_FRAMES", "8"))
@@ -43,7 +43,11 @@ mcp = FastMCP("anotherr", instructions=(
     "Anotherr monitors a Plex media library on Unraid (via Sonarr/Radarr) for bad files: corruption, wrong "
     "audio language, missing/out-of-sync subtitles, wrong episodes. Local checks run on the server. Use "
     "pending_reviews + get_review to look at frames the server flagged for visual checks, then submit_review. "
-    "Never approve a redownload without the user's say-so unless they asked you to handle approvals."))
+    "Never approve a redownload without the user's say-so unless they asked you to handle approvals. "
+    "The user may have asked you to check runtime issues online: early in any session that uses these tools, call "
+    "runtime_check_requests; for each one waiting, search the web for the title's real runtime (IMDb, TVDB, TMDB, "
+    "Wikipedia; for an episode, that episode's runtime) and report it with submit_runtime_check. That only records "
+    "your finding; the user still approves any change."))
 
 
 def _client() -> httpx.Client:
@@ -357,6 +361,37 @@ def submit_review(review_id: int, verdict: str, notes: str = "", request_redownl
     res = _send("POST", f"/api/reviews/{review_id}/verdict",
                 {"verdict": verdict, "notes": notes, "request_redownload": request_redownload, "severity": severity})
     return _j(res)
+
+
+# ---------------------------------------------------------------- runtime checks
+
+@mcp.tool()
+def runtime_check_requests() -> str:
+    """Runtime issues the user asked you to verify online. Each shows the title, year, episode, the file's length and
+    what the server expected. Look up the real runtime on the web, then call submit_runtime_check for each."""
+    rows = _get("/api/runtime-checks")
+    if not rows:
+        return _outdated() + "No runtime checks waiting."
+    out = []
+    for r in rows:
+        exp = "; ".join(x["message"] for x in r["issues"]) or "no open runtime issue left"
+        out.append(f"check {r['action_id']}: {r['title']}" + (f" ({r['year']})" if r.get("year") else "")
+                   + f" [{r['kind']}]" + (f" {r['episode']}" if r.get("episode") else "")
+                   + f", file {r.get('file') or '?'}" + (f", {r['file_minutes']} min" if r.get("file_minutes") else "")
+                   + f" | server says: {exp}"
+                   + (f" | redownload proposal {r['redownload_action']} waits on this" if r.get("redownload_action") else ""))
+    return _outdated() + "\n".join(out)
+
+
+@mcp.tool()
+def submit_runtime_check(check_id: int, verdict: str, runtime_min: float | None = None, notes: str = "",
+                         sources: list[str] | None = None) -> str:
+    """Report what you found for a runtime check. verdict: file_ok (the real runtime matches the file, so the
+    issue is a false alarm), file_bad (the file really is shorter/longer than the real runtime) or unsure.
+    runtime_min = the real runtime you found; sources = the pages you used. file_ok makes a proposal the user can
+    approve to ignore the issue and drop its redownload; file_bad leaves the redownload proposal for the user."""
+    return _j(_send("POST", f"/api/runtime-checks/{check_id}",
+                    {"verdict": verdict, "runtime_min": runtime_min, "notes": notes, "sources": sources or []}))
 
 
 # ---------------------------------------------------------------- actions

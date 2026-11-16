@@ -354,7 +354,7 @@ async function actionsPage(dual = false) {
   const bp = ACT.status === "proposed" && rows.length ? await api("/api/actions/bulk-preview").catch(() => null) : null;
   $("#app").innerHTML = `<h2>${dual ? "Dual actions" : "Actions"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Fixes for single-language audio: accept the season as it is, or redownload where that language was requested.</div>` : sg ? subgenCard(sg) : ""}
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
-    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="undone">Undone</option><option value="">All</option></select>
+    <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="waiting">Waiting for Claude</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<span class="small muted">${actFileCount(rows)} files in ${groupActions(rows).length} rows</span>` : ""}
     ${ACT.status === "proposed" && rows.length ? bulkButtons(rows, bp) : ""}</div>
     <table><tr><th>Status</th><th>Kind</th><th>File</th><th>Reason</th><th>Result</th><th></th></tr>
@@ -380,11 +380,13 @@ function bulkButtons(rows, bp) {
     + btn(f.english_default_audio || 0, "Approve default English audio", "bulkEnglishDefault()")
     + btn(f.foreign_defaults || 0, "Clear foreign defaults", "bulkForeignDefaults()")
     + btn(f.out_of_sync_resubs || 0, "Approve out-of-sync resubs", "bulkSync()")
+    + btn(f.runtime_checks || 0, "Ask Claude to check all runtime issues", "bulkRuntimeChecks()")
     + btn(actFileCount(rows), "Reject all", "if(confirm('Reject every proposal on this tab?'))bulk('reject')", "danger");
 }
 const bulkEnglish = () => act(() => api("/api/actions/bulk-english-retag", { method: "POST" }), "Queued");
 const bulkEnglishDefault = () => act(() => api("/api/actions/bulk-english-default-audio", { method: "POST" }), "Queued");
 const bulkForeignDefaults = () => act(() => api("/api/actions/bulk-foreign-defaults", { method: "POST" }), "Queued");
+const bulkRuntimeChecks = () => act(() => api("/api/actions/bulk-runtime-checks", { method: "POST" }), (r) => `${r.waiting} runtime check(s) wait for Claude: they run the next time the MCP is used`);
 const bulkSync = () => act(() => api("/api/actions/bulk-out-of-sync", { method: "POST" }), "Queued");
 // resub/redownload proposals for the same series + season with the same reason get one Approve
 const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
@@ -509,7 +511,8 @@ function subgenButtons(a) {
 }
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
   set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle",
-  subgen_transcribe: "Generate subtitle (subgen)", accept_season_audio: "Accept season audio as is" };
+  subgen_transcribe: "Generate subtitle (subgen)", accept_season_audio: "Accept season audio as is",
+  mcp_review: "Ask Claude to check runtime" };
 const TRACK_KINDS = ["retag_audio", "set_default_audio", "set_default_subtitle"];
 const BATCH_KINDS = [...TRACK_KINDS, "subgen_transcribe", "accept_season_audio"];
 function acceptTable(a) {

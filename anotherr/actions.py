@@ -41,6 +41,12 @@ def propose_for_file(file_id: int) -> list[int]:
     created = [c for c in created if c]
     if created:
         maybe_auto(created)
+    from . import runtime_check
+
+    if codes & set(runtime_check.CODES):  # never automatic: it waits for Claude, then for the person
+        rc = runtime_check.propose(file_id)
+        if rc:
+            created.append(rc)
     return created
 
 
@@ -554,6 +560,14 @@ def execute(action_id: int, wait: bool = False) -> dict:
 
         return audio_request.accept(action_id)
     codes = db.unj(a["codes"], []) or []
+    if a["kind"] == "mcp_review":
+        from . import runtime_check
+
+        if codes and not _still_open(a["file_id"], codes):
+            db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",
+                 ("Withdrawn: the issues behind it are no longer open", time.time(), action_id))
+            return {"ok": False, "error": "withdrawn - the issues behind this action have since been resolved"}
+        return runtime_check.approve(action_id)
     if codes and not _still_open(a["file_id"], codes):
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",
              ("Withdrawn: the issues behind it are no longer open", time.time(), action_id))

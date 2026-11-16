@@ -131,7 +131,8 @@ def _rearm_point(file_id: int) -> float:
     """When something changed that makes a new Bazarr search worthwhile: the audio language was retagged (Bazarr
     picks subtitles by it) or a Whisper subtitle was fetched."""
     return db.scalar("SELECT MAX(updated_at) FROM actions a WHERE status='done' AND kind IN ('retag_audio','whisper_subtitle') "
-                     "AND (file_id=? OR payload LIKE ?)", (file_id, f'%"file_id": {int(file_id)},%')) or 0
+                     "AND (file_id=? OR (json_valid(payload) AND EXISTS (SELECT 1 FROM json_each(payload, '$.files') j "
+                     "WHERE json_extract(j.value, '$.file_id')=?)))", (file_id, int(file_id))) or 0
 
 
 def _rearmed(file_id: int) -> bool:
@@ -542,6 +543,13 @@ def _run_queued(ids: list[int]) -> None:
            "info" if not failed else "warning")
 
 
+def _claim(action_id: int) -> bool:
+    """Flip an action to 'running' only if it is still runnable, so two clicks (or a click and a queue worker)
+    can't both start it."""
+    return db.n("UPDATE actions SET status='running', updated_at=? WHERE id=? AND status IN ('proposed','failed','queued')",
+                (time.time(), action_id)) > 0
+
+
 def execute(action_id: int, wait: bool = False) -> dict:
     """Run one action. wait=True runs a Whisper request to the end in this thread (group approvals go one by one)."""
     a = db.q1("SELECT * FROM actions WHERE id=?", (action_id,))
@@ -572,7 +580,8 @@ def execute(action_id: int, wait: bool = False) -> dict:
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",
              ("Withdrawn: the issues behind it are no longer open", time.time(), action_id))
         return {"ok": False, "error": "withdrawn - the issues behind this action have since been resolved"}
-    db.x("UPDATE actions SET status='running', updated_at=? WHERE id=?", (time.time(), action_id))
+    if not _claim(action_id):
+        return {"ok": False, "error": "action already running"}
     if a["kind"] == "redownload":
         from . import audio_request
 
@@ -685,6 +694,16 @@ def _resub(f: dict, item: dict) -> str:
     return f"Bazarr subtitle search ({lang2}) triggered"
 
 
+def _current_grab(grabs: list[dict], imports: list[dict]) -> dict | None:
+    """The grab that produced the file now on disk: the one sharing the newest import's downloadId. The newest
+    grab is not it when a later search was rejected or the file was imported by hand, and blocklisting that would
+    ban a release nobody used. Without import history only an unambiguous single grab is trusted."""
+    if imports:
+        did = imports[0].get("downloadId")
+        return next((g for g in grabs if did and g.get("downloadId") == did), None)
+    return grabs[0] if len(grabs) == 1 else None
+
+
 def _redownload(f: dict, item: dict) -> str:
     delete = settings.get()["automation"].get("redownload_delete_file", True)
     notes = []
@@ -694,14 +713,14 @@ def _redownload(f: dict, item: dict) -> str:
         failed = set()
         packs = 0
         for e in eps:
-            hist = s.grab_history(item["arr_id"], e["id"])
-            if not hist or hist[0]["id"] in failed:
+            grab = _current_grab(s.grab_history(item["arr_id"], e["id"]), s.import_history(item["arr_id"], e["id"]))
+            if not grab or grab["id"] in failed:
                 continue
-            if str((hist[0].get("data") or {}).get("fullSeason", "")).lower() == "true":
+            if str((grab.get("data") or {}).get("fullSeason", "")).lower() == "true":
                 packs += 1  # never blocklist a whole season pack because of one episode
                 continue
-            s.mark_failed(hist[0]["id"])
-            failed.add(hist[0]["id"])
+            s.mark_failed(grab["id"])
+            failed.add(grab["id"])
         notes.append(f"blocklisted {len(failed)} release(s)" if failed else "no grab history (not blocklisted)")
         if packs:
             notes.append("season pack not blocklisted")
@@ -715,9 +734,9 @@ def _redownload(f: dict, item: dict) -> str:
         notes.append("search triggered")
     else:
         r = arr.Radarr()
-        hist = r.grab_history(item["arr_id"])
-        if hist:
-            r.mark_failed(hist[0]["id"])
+        grab = _current_grab(r.grab_history(item["arr_id"]), r.import_history(item["arr_id"]))
+        if grab:
+            r.mark_failed(grab["id"])
             notes.append("blocklisted release")
         else:
             notes.append("no grab history (not blocklisted)")

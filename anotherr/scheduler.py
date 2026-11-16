@@ -455,14 +455,16 @@ class Worker(threading.Thread):
         return True
 
     def _start(self, slot, fid, profile, source, why, qid, disk, full=False):
+        rev = db.scalar("SELECT rev FROM queue WHERE id=?", (qid,)) if qid else None
+
         def run():
             try:
                 scanner.scan_file(fid, profile, source, slot=slot, why=why, full=full)
             except Exception:  # noqa: BLE001
                 log.exception("scan failed in slot %s", slot)
             finally:
-                if qid:
-                    db.x("DELETE FROM queue WHERE id=?", (qid,))
+                if qid:  # a request made while this scan ran (rev moved on) stays queued
+                    db.x("DELETE FROM queue WHERE id=? AND COALESCE(rev, 0)=?", (qid, rev or 0))
 
         t = threading.Thread(target=run, daemon=True, name=f"anotherr-scan-{slot}")
         self.active[slot] = {"thread": t, "disk": disk, "file_id": fid, "why": why}
@@ -567,6 +569,9 @@ def start():
         WORKER.start()
 
 
+_RANK_SQL = "(CASE {0} WHEN 'quick' THEN 0 WHEN 'deep' THEN 2 ELSE 1 END)"
+
+
 def enqueue(file_ids: list[int], profile: str, source: str = "manual", full: bool = False) -> int:
     """Queue files for a scan. Files no longer in the library (missing=1) are skipped: the worker never picks
     them, so their rows would sit in the queue forever and keep it from ever looking empty."""
@@ -575,8 +580,12 @@ def enqueue(file_ids: list[int], profile: str, source: str = "manual", full: boo
     for fid in file_ids:
         n += db.n("INSERT INTO queue(file_id, profile, source, created_at, full) SELECT id, ?, ?, ?, ? FROM files "
                   "WHERE id=? AND missing=0 "
-                  "ON CONFLICT(file_id) DO UPDATE SET profile=excluded.profile, source=excluded.source, "
-                  "full=MAX(COALESCE(queue.full, 0), excluded.full)",
+                  "ON CONFLICT(file_id) DO UPDATE SET "
+                  # a second request never downgrades the first: keep the stronger profile, and a manual origin
+                  f"profile=CASE WHEN {_RANK_SQL.format('excluded.profile')} >= {_RANK_SQL.format('queue.profile')} "
+                  "THEN excluded.profile ELSE queue.profile END, "
+                  "source=CASE WHEN queue.source='manual' THEN 'manual' ELSE excluded.source END, "
+                  "full=MAX(COALESCE(queue.full, 0), excluded.full), rev=COALESCE(queue.rev, 0) + 1",
                   (profile, source, now, int(full), fid)) and 1
     return n
 

@@ -5,6 +5,14 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+    # only changes that can affect the app or the image need the test run
+    paths:
+      - "anotherr/**"
+      - "tests/**"
+      - "docker/**"
+      - "Dockerfile"
+      - "requirements*.txt"
+      - ".github/workflows/docker.yml"
   # Weekly rebuild so the image picks up security fixes in the CUDA/Ubuntu base
   # image even when nothing here changes. Layers are reused from the registry
   # cache, so if the base image hasn't changed the rebuild changes nothing.
@@ -72,7 +80,9 @@ jobs:
             type=semver,pattern={{version}}
             type=sha,format=short
       - id: build
-        run: echo "id=$(echo ${{ github.sha }} | cut -c1-7) $(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "id=$(echo ${{ github.sha }} | cut -c1-7) $(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_OUTPUT"
+          echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       # The registry cache keeps unchanged layers byte-identical between builds,
       # so Unraid only re-downloads the layers that actually changed.
       - uses: docker/build-push-action@v6
@@ -83,5 +93,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ANOTHERR_BUILD=${{ steps.build.outputs.id }}
+            APT_CACHE_BUST=${{ steps.build.outputs.week }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

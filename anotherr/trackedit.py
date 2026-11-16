@@ -43,6 +43,7 @@ LOG_PATH = os.path.join(db.CONFIG_DIR, "retag_log.jsonl")  # rollback records (n
 MKVPROPEDIT = os.environ.get("ANOTHERR_MKVPROPEDIT", "mkvpropedit")
 EDIT_TIMEOUT = 60
 STALL_AFTER = 600
+COPY_HARD_LIMIT = 4 * 3600  # absolute cap on one copy edit; apply() has its own tighter size-based limit
 SLOW_KINDS = {"whisper_subtitle": 2 * 3600, "subgen_transcribe": 1800}  # subgen heartbeats every poll
 _lock = threading.Lock()
 _owner: dict = {"action": None, "since": 0.0}
@@ -205,7 +206,9 @@ def _apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, st
     if problems:
         if method == "copy":
             _rm(target)
-        return False, "verification failed: " + "; ".join(problems)
+            return False, "verification failed: " + "; ".join(problems)
+        # mkvpropedit already rewrote the file in place: put the tags back instead of leaving a half-edit
+        return False, "verification failed: " + "; ".join(problems) + "; " + _rollback_inplace(path, before)
     if method == "copy":
         try:
             os.replace(target, path)
@@ -213,6 +216,33 @@ def _apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, st
             _rm(target)
             return False, f"couldn't replace the original ({e}); it was left untouched"
     return True, "ok"
+
+
+def _rollback_inplace(path: str, before: dict) -> str:
+    """Restore every track's language/default flag from the pre-edit probe after a failed in-place edit."""
+    try:
+        now = media.summarize(media.ffprobe(path))
+        ops = []
+        for sn in snapshot(before):
+            tr = _tracks(now, sn["type"])
+            if sn["index"] >= len(tr):
+                continue
+            cur = tr[sn["index"]]
+            o = {"type": sn["type"], "index": sn["index"]}
+            if cur["lang"] != sn["language"]:
+                o["language"] = sn["language"] or "und"
+            if bool(cur["default"]) != sn["default"]:
+                o["default"] = sn["default"]
+            if len(o) > 2:
+                ops.append(o)
+        if not ops:
+            return "file is unchanged"
+        p = subprocess.run(mkv_args(path, ops), capture_output=True, text=True, timeout=EDIT_TIMEOUT)
+        if p.returncode not in (0, 1):
+            return f"ROLLBACK FAILED, tags may be half-edited: {(p.stdout + p.stderr).strip()[-200:]}"
+        return "rolled back to the original tags"
+    except Exception as e:  # noqa: BLE001
+        return f"ROLLBACK FAILED, tags may be half-edited: {e}"
 
 
 def verify(before: dict, after: dict, ops: list[dict]) -> list[str]:
@@ -391,8 +421,9 @@ def start(action_id: int) -> dict:
         db.x("UPDATE actions SET status='failed', result=?, updated_at=? WHERE id=?",
              ("Track editing is turned off (Settings -> Retag audio). Nothing was changed.", time.time(), action_id))
         return {"ok": False, "error": "track editing is turned off in Settings -> Retag audio"}
-    db.x("UPDATE actions SET status='running', result=?, updated_at=? WHERE id=?",
-         (f"queued: 0 of {n} files done", time.time(), action_id))
+    if not db.n("UPDATE actions SET status='running', result=?, updated_at=? WHERE id=? "
+                "AND status IN ('proposed','failed','queued')", (f"queued: 0 of {n} files done", time.time(), action_id)):
+        return {"ok": False, "error": "action already running"}  # a second click or worker lost the race
     db.log(f"{a['kind']} action {action_id} started ({n} file(s))")
     threading.Thread(target=run, args=(action_id,), daemon=True, name=f"anotherr-trackedit-{action_id}").start()
     return {"ok": True, "result": f"started: {n} file(s)"}
@@ -410,8 +441,9 @@ def run(action_id: int):
         log.exception("track edit action %s crashed", action_id)
         _finish(action_id, "failed", f"crashed: {e} ({traceback.format_exc().strip().splitlines()[-1][:200]})")
     finally:
-        _owner.update(action=None, since=0.0)
-        if _lock.locked():
+        # release only our own hold: if the reaper freed the lock and another action took it, it is not ours
+        if _owner.get("action") == action_id:
+            _owner.update(action=None, since=0.0)
             try:
                 _lock.release()
             except RuntimeError:
@@ -445,7 +477,7 @@ def _run(action_id: int):
     for n, e in enumerate(entries, 1):
         t0 = time.time()
         fut = _pool.submit(edit_file, e, cfg, action_id)
-        limit = EDIT_TIMEOUT if e.get("method") != "copy" else None  # copies have their own size-based timeout
+        limit = EDIT_TIMEOUT if e.get("method") != "copy" else COPY_HARD_LIMIT  # copies also have a size-based timeout
         try:
             r = fut.result(timeout=limit)
         except cf.TimeoutError:
@@ -583,57 +615,87 @@ def after_scan(file_id: int, info: dict):
 
 
 def undo(action_id: int) -> dict:
-    """Restore every track's language and default flag to the snapshot taken before the edit."""
+    """Restore every track's language and default flag to the snapshot taken before the edit. Goes through the
+    same guards as the edit itself (allowed paths, writable, not playing, hardlinks) and the same one-at-a-time lock."""
     recs = []
     try:
         with open(LOG_PATH) as fh:
             for line in fh:
-                r = json.loads(line)
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue  # one damaged line must not hide every record after it
                 if r.get("action_id") == action_id:
                     recs.append(r)
-    except (OSError, ValueError):
+    except OSError:
         pass
     applied = {r["file_id"] for r in recs if r["event"] == "applied"}
     befores = [r for r in recs if r["event"] == "before" and r["file_id"] in applied]
     if not befores:
         return {"ok": False, "error": "nothing to undo"}
+    if not _lock.acquire(timeout=60):
+        return {"ok": False, "error": "a track edit is running - try the undo again in a minute"}
+    _owner.update(action="undo", since=time.time())
+    cfg = settings.get()
     done, failed = 0, []
-    for r in befores:
-        path = r["path"]
-        try:
-            st = os.stat(path)
-            info = media.summarize(media.ffprobe(path))
-            if r.get("snapshot") is not None:
-                ops = []
-                for s in r["snapshot"]:
-                    tr = _tracks(info, s["type"])
-                    if s["index"] >= len(tr):
-                        continue
-                    cur = tr[s["index"]]
-                    o = {"type": s["type"], "index": s["index"]}
-                    if cur["lang"] != s["language"]:
-                        o["language"] = s["language"] or "und"
-                    if bool(cur["default"]) != s["default"]:
-                        o["default"] = s["default"]
-                    if len(o) > 2:
-                        ops.append(o)
-            else:  # records from the first retag version: one language change
-                ops = [{"type": "a", "index": r["a_index"], "language": r["old"] or "und"}]
-            if not ops:
-                ok, msg = True, "already as before"
+    try:
+        for r in befores:
+            path = r["path"]
+            try:
+                st = os.stat(path)
+                if not can_edit(path):
+                    raise RuntimeError("this container can't store track languages or default flags")
+                if not _allowed([path], cfg):
+                    raise RuntimeError("not under an allowed path (Settings -> Retag audio -> Allowed paths)")
+                if not os.access(path, os.W_OK):
+                    raise RuntimeError("not writable")
+                if _playing(path):
+                    raise RuntimeError("Plex is playing it right now")
+                if st.st_nlink > 1 and not cfg["retag"].get("break_hardlinks"):
+                    raise RuntimeError(f"hardlinked to {st.st_nlink - 1} other path(s) (seeding copy?)")
+                method = method_for(path, st.st_nlink)
+                if method == "copy" and not os.access(os.path.dirname(path), os.W_OK):
+                    raise RuntimeError("folder not writable")
+                info = media.summarize(media.ffprobe(path))
+                if r.get("snapshot") is not None:
+                    ops = []
+                    for s in r["snapshot"]:
+                        tr = _tracks(info, s["type"])
+                        if s["index"] >= len(tr):
+                            continue
+                        cur = tr[s["index"]]
+                        o = {"type": s["type"], "index": s["index"]}
+                        if cur["lang"] != s["language"]:
+                            o["language"] = s["language"] or "und"
+                        if bool(cur["default"]) != s["default"]:
+                            o["default"] = s["default"]
+                        if len(o) > 2:
+                            ops.append(o)
+                else:  # records from the first retag version: one language change
+                    ops = [{"type": "a", "index": r["a_index"], "language": r["old"] or "und"}]
+                if not ops:
+                    ok, msg = True, "already as before"
+                else:
+                    ok, msg = apply(path, ops, method, st.st_size)
+            except Exception as e:  # noqa: BLE001
+                ok, msg = False, str(e)
+            _log({"ts": time.time(), "action_id": action_id, "file_id": r["file_id"], "path": path,
+                  "event": "undone" if ok else "undo_failed", "message": msg})
+            if ok:
+                done += 1
+                db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?, 'quick', 'retag', ?)",
+                     (r["file_id"], time.time()))
             else:
-                ok, msg = apply(path, ops, method_for(path, st.st_nlink), st.st_size)
-        except Exception as e:  # noqa: BLE001
-            ok, msg = False, str(e)
-        _log({"ts": time.time(), "action_id": action_id, "file_id": r["file_id"], "path": path,
-              "event": "undone" if ok else "undo_failed", "message": msg})
-        if ok:
-            done += 1
-            db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?, 'quick', 'retag', ?)",
-                 (r["file_id"], time.time()))
-        else:
-            failed.append(f"{os.path.basename(path)}: {msg}")
-    db.x("UPDATE actions SET status='undone', result=?, updated_at=? WHERE id=?",
-         (f"Undone: restored {done} file(s)" + (f", {len(failed)} failed" if failed else ""), time.time(), action_id))
+                failed.append(f"{os.path.basename(path)}: {msg}")
+    finally:
+        if _owner.get("action") == "undo":
+            _owner.update(action=None, since=0.0)
+            try:
+                _lock.release()
+            except RuntimeError:
+                pass
+    if done:  # only mark it undone when something was actually restored
+        db.x("UPDATE actions SET status='undone', result=?, updated_at=? WHERE id=?",
+             (f"Undone: restored {done} file(s)" + (f", {len(failed)} failed" if failed else ""), time.time(), action_id))
     db.log(f"Action {action_id} undone: {done} restored, {len(failed)} failed", "warning" if failed else "info")
     return {"ok": not failed, "restored": done, "failed": failed}

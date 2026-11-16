@@ -155,6 +155,7 @@ _ADDED_COLUMNS = [
     ("items", "audio_request_override", "TEXT DEFAULT ''"),  # manual request; '' = follow the profile
     ("audio_exceptions", "scope", "TEXT DEFAULT 'season'"),  # season | show; older rows are season exceptions
     ("actions", "payload", "TEXT"),
+    ("queue", "rev", "INTEGER DEFAULT 0"),  # bumped whenever a queued file is re-requested, so a running scan only clears the request it took
     ("queue", "full", "INTEGER DEFAULT 0"),  # 1 = full scan, don't reuse the last scan's measurements  # batch actions (retag_audio): files, tracks, preview, per-file results
 ]
 

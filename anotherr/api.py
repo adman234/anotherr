@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import hmac
 import os
 import random
 import threading
@@ -39,7 +40,7 @@ def auth(request: Request):
     if not API_KEY:
         return
     key = request.headers.get("x-api-key") or request.query_params.get("apikey")
-    if key != API_KEY:
+    if not key or not hmac.compare_digest(key.encode(), API_KEY.encode()):
         raise HTTPException(401, "invalid or missing API key")
 
 
@@ -71,18 +72,19 @@ def _startup():
     n = actions.upgrade_resubs_to_whisper()
     if n:
         db.log(f"Replaced {n} resub proposal(s) with Whisper subtitle proposals (Bazarr found nothing for those series before)")
-    def _refresh_track_proposals():
+    db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
+    # subgen batches survive a restart: the worker reconciles them with subgen's /queue
+    db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running' AND kind!=?",
+         (subgen.KIND,))
+    db.x("UPDATE actions SET status='proposed', result='' WHERE status='queued' AND kind!=?", (subgen.KIND,))
+
+    def _refresh_track_proposals():  # after the status cleanup above, so it never sees half-reset rows
         trackedit.sweep_temp()
         retag.refresh_all()
         defaults.refresh_all()
         subgen.refresh_all()
 
     threading.Thread(target=_refresh_track_proposals, daemon=True, name="anotherr-track-proposals").start()
-    db.x("UPDATE scans SET status='failed', error='interrupted by restart' WHERE status='running'")
-    # subgen batches survive a restart: the worker reconciles them with subgen's /queue
-    db.x("UPDATE actions SET status='failed', result='interrupted by restart' WHERE status='running' AND kind!=?",
-         (subgen.KIND,))
-    db.x("UPDATE actions SET status='proposed', result='' WHERE status='queued' AND kind!=?", (subgen.KIND,))
     if os.environ.get("ANOTHERR_NO_WORKER") != "1":
         scheduler.start()
         if db.scalar("SELECT COUNT(*) FROM actions WHERE kind=? AND status IN ('queued','running')", (subgen.KIND,)):
@@ -123,6 +125,8 @@ def _scrub_stored_secrets():
 
 
 def page(sql_base: str, args: list, page_no: int, per: int, order: str) -> dict:
+    per = max(1, min(int(per), 500))
+    page_no = max(1, int(page_no))
     total = db.scalar(f"SELECT COUNT(*) FROM ({sql_base})", args)
     rows = db.q(f"{sql_base} ORDER BY {order} LIMIT ? OFFSET ?", args + [per, (page_no - 1) * per])
     return {"total": total, "page": page_no, "per_page": per, "rows": rows}

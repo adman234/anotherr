@@ -14,6 +14,7 @@ def test_redownload_skips_season_packs(monkeypatch):
     calls = []
     hist = {300: [{"id": 1, "data": {"fullSeason": "True"}}], 301: [{"id": 2, "data": {}}]}
     monkeypatch.setattr(arr.Sonarr, "grab_history", lambda self, s, e: hist[e])
+    monkeypatch.setattr(arr.Sonarr, "import_history", lambda self, s, e: [])
     monkeypatch.setattr(arr.Sonarr, "mark_failed", lambda self, h: calls.append(("failed", h)))
     monkeypatch.setattr(arr.Sonarr, "delete_file", lambda self, f: calls.append(("delete", f)))
     monkeypatch.setattr(arr.Sonarr, "search", lambda self, ids: calls.append(("search", tuple(ids))))
@@ -157,3 +158,19 @@ def test_bulk_subgen_approves_every_proposed_batch(monkeypatch):
     assert r == {"ok": True, "queued": 2, "files": 3} and len(seen) == 2   # the resub is left alone
     monkeypatch.setattr(subgen, "approve", lambda i: {"ok": False, "error": "subgen.url is not set"})
     assert api.actions_bulk_subgen({})["error"] == "subgen.url is not set"
+
+
+def test_current_grab_follows_the_import_not_the_newest_grab():
+    grabs = [{"id": 9, "downloadId": "NEW"}, {"id": 5, "downloadId": "OLD"}]
+    assert actions._current_grab(grabs, [{"downloadId": "OLD"}])["id"] == 5
+    assert actions._current_grab(grabs, [{"downloadId": "GONE"}]) is None
+    assert actions._current_grab(grabs, []) is None  # ambiguous without import history
+    assert actions._current_grab(grabs[:1], [])["id"] == 9
+
+
+def test_claim_is_atomic():
+    fid = _file()
+    aid = actions.propose(fid, "redownload", "test")
+    assert actions._claim(aid) is True
+    assert actions._claim(aid) is False
+    assert actions.execute(aid)["ok"] is False

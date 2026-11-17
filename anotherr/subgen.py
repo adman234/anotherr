@@ -40,7 +40,7 @@ from . import db, langs, media, settings
 
 log = logging.getLogger("anotherr.subgen")
 KIND = "subgen_transcribe"
-TRIGGER = {"subs_missing", "subs_signs_only"}
+TRIGGER = {"subs_missing", "subs_signs_only", "subs_image_only"}
 ACTIVE_FILE = ("waiting", "submitted", "running")
 _ENGLISH = set("""the a an and or but of to in on at for with from by is are was were be been being am i you he she
 it we they me him her us them my your his its our their this that these there here what who where when why how not no
@@ -236,7 +236,10 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         return None, busy[f["id"]]
     sub = _sub_lang()
     ev = _evidence(f) or {}
-    if any(_same(s.get("lang"), sub) and s.get("kind") == "full" for s in ev.get("subs") or []):
+    # image-only is the one case where a full subtitle exists but isn't text: only a text track counts as covered
+    image_only = "subs_image_only" in codes and not codes & {"subs_missing", "subs_signs_only"}
+    if any(_same(s.get("lang"), sub) and s.get("kind") == "full" and (s.get("text") or not image_only)
+           for s in ev.get("subs") or []):
         return None, f"already has a full {langs.name(sub)} subtitle"
     tracks = ev.get("tracks") or []
     ok = [t for t in tracks if t.get("confident") and t.get("all_agree") and t.get("windows") and not t.get("commentary")]
@@ -262,7 +265,7 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         return None, (f"subgen would transcribe audio track {pick['a_index'] + 1} (tagged {pick.get('tag') or 'und'}), "
                       f"not the {langs.name(lang3)} track {track['a_index'] + 1} - fix its tag first")
     if not manual:
-        if not cfg().get("first") and not actions.resub_failed_before(item["id"]):
+        if not image_only and not cfg().get("first") and not actions.resub_failed_before(item["id"]):
             return None, "Bazarr's search hasn't failed for this show yet - a resub comes first"
         if _too_new(f):
             return None, "a new episode - Bazarr gets a week to find a subtitle first"

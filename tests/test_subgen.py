@@ -198,6 +198,16 @@ def test_almost_no_speech_means_no_proposal(lib):
     assert plan(fid)[0] is None and "speech" in plan(fid)[1]
 
 
+def test_image_only_subtitles_get_a_proposal_even_though_a_full_track_exists(lib):
+    iid = show("My Hero Academia", "jpn")
+    img = {**S(), "text": False}
+    fid = episode(lib, iid, "S05E01", [T(0, "jpn", default=True)], subs=[img], codes=("subs_image_only",))
+    assert plan(fid, manual=False)[0]  # no "Bazarr failed first" wait either
+    txt = episode(lib, iid, "S05E02", [T(0, "jpn", default=True)], subs=[img, {**S(), "text": True}],
+                  codes=("subs_image_only",))
+    assert "already has" in plan(txt)[1]
+
+
 def test_unconfident_audio_or_wrong_track_choice_means_no_proposal(lib):
     iid = show()
     a = episode(lib, iid, "S01E01", [T(0, "kor", default=True, agree=False)])

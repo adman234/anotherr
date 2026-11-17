@@ -1240,6 +1240,26 @@ def _no_dialogue(ctx: Ctx) -> bool:
     return bool(tr) and all(t["speech_s"] < 10 and t["speech_s"] / t["window_s"] < 0.03 for t in tr)
 
 
+def _sub_cue_rate(ctx: Ctx, tracks: list) -> float:
+    """Best cheap cues/min over the given subtitle tracks (sidecar text read, or the muxer's frame-count tag)."""
+    dur = max(float(ctx.info.get("duration") or 0), 60.0)
+    best = 0.0
+    for s in tracks[:6]:
+        n = 0
+        if s["external"]:
+            if not s["text"]:
+                continue
+            raw = _read(s["path"])
+            if raw is None:
+                continue
+            parsed, _ = analysis.dialogue_cues(raw)
+            n = len(parsed)
+        else:
+            n = int(s.get("frames") or 0)
+        best = max(best, n / (dur / 60))
+    return best
+
+
 def check_subtitles(ctx: Ctx):
     lcfg = ctx.cfg["languages"]
     sub_lang = langs.norm(lcfg["subtitle_language"]) or "eng"
@@ -1250,12 +1270,18 @@ def check_subtitles(ctx: Ctx):
     else:
         needs = bool(ctx.item.get("is_anime")) or (bool(exp) and not lang_match(exp, sub_lang)) \
             or bool(lcfg["require_subs_for_native_audio"])
-    if needs and _no_dialogue(ctx):
-        ctx.issue("subtitles", "no_dialogue", "info",
-                  "Almost no speech detected, so subtitle requirements were skipped.")
-        needs = False
     subs = ctx.info["subs"]
     mine = [s for s in subs if lang_match(s["lang"], sub_lang)]
+    if needs and _no_dialogue(ctx):
+        # The VAD can read ~0 speech on quiet or 5.1 tracks of dialogue-heavy films, so a full-density subtitle
+        # track outranks it: real dialogue means the subtitle checks must run.
+        rate = _sub_cue_rate(ctx, mine)
+        if rate >= float(lcfg["min_full_sub_cues_per_min"]):
+            ctx.result["no_dialogue_overridden"] = round(rate, 1)
+        else:
+            ctx.issue("subtitles", "no_dialogue", "info",
+                      "Almost no speech detected, so subtitle requirements were skipped.")
+            needs = False
     if needs and not mine:
         hs = _hardsubs(ctx, sub_lang)
         if hs:

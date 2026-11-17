@@ -46,6 +46,13 @@ def effective(item: dict) -> tuple[str, str]:
     return (req, "profile") if req in ("original", "english") else ("", "none")
 
 
+def english_sufficient(item: dict, cfg: dict | None = None) -> bool:
+    """True when the item's quality profile is one where English-only audio is the goal (not a dual-audio profile)."""
+    names = ((((cfg or {}).get("languages") or settings.get().get("languages") or {})
+              .get("english_sufficient_profiles")) or [])
+    return (item.get("quality_profile") or "").strip().lower() in {n.strip().lower() for n in names}
+
+
 def describe(item: dict) -> dict:
     req, src = effective(item)
     return {"audio_request_effective": req or "either", "audio_request_source": src}

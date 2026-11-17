@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import analysis, audio_request, db, frames, langs, media, ocr, runtime, settings, stt
+from . import analysis, audio_request, db, frames, langs, media, ocr, runtime, settings, stt, trackedit
 
 log = logging.getLogger("anotherr.scan")
 
@@ -826,7 +826,7 @@ def check_audio(ctx: Ctx):
     ctx.result["audio_tracks"] = list(ctx.tracks.values())
 
 
-TRACK_KEYS = ("speech_s", "window_s", "level_db", "windows", "silent", "extra_tried")
+TRACK_KEYS = ("speech_s", "window_s", "level_db", "windows", "silent", "extra_tried", "speech_tried")
 
 
 def _track_base(a: dict) -> dict:
@@ -981,6 +981,43 @@ def _extra_language_windows(ctx: Ctx, t: dict, positions=(0.15, 0.35, 0.55, 0.75
     t.update(detected=agg["detected"], prob=agg["prob"], agree=agg["agree"], all_agree=agg["all_agree"])
 
 
+def _sample_until_speech(ctx: Ctx, t: dict, want_s: float = 10.0, max_samples: int = 5, secs: float = 30.0):
+    """An untagged track that has too little detected speech (or only one language window) gets more samples from
+    across the file until it has `want_s` seconds of speech and two language windows, at most `max_samples` more."""
+    if t.get("speech_tried") or t.get("silent") or t.get("level_db", -120) <= -70:
+        return
+    t["speech_tried"] = True
+    dur = ctx.info.get("duration") or 0
+    if dur < 120:
+        return
+    tried = 0
+    for p in (0.5, 0.25, 0.75, 0.1, 0.9, 0.4, 0.6):
+        if tried >= max_samples or (t.get("speech_s", 0) >= want_s and len(t["windows"]) >= 2):
+            break
+        start = dur * p
+        if any(abs(start - w["at"]) < secs for w in t["windows"]):
+            continue
+        tried += 1
+        ctx.step(f"more speech samples track {t['a_index'] + 1} ({tried}/{max_samples})")
+        audio = media.extract_audio_multi(ctx.path, [t["a_index"]], start, secs).get(t["a_index"])
+        if audio is None or audio.size == 0:
+            continue
+        iv = stt.speech_intervals(audio)
+        got = sum(e - s for s, e in iv)
+        t["speech_s"] = round(t.get("speech_s", 0) + got, 1)
+        t["window_s"] = round(t.get("window_s", 0) + secs, 1)
+        if got < 4:
+            continue
+        try:
+            lang, prob, _ = stt.WHISPER.detect_language(stt.speech_audio(audio, iv, 30))
+        except Exception:  # noqa: BLE001
+            break
+        t["windows"].append({"at": round(start, 1), "lang": langs.norm(lang) or lang, "prob": round(prob, 3),
+                             "extra": True})
+    agg = analysis.aggregate_language([(w["lang"], w["prob"]) for w in t["windows"]])
+    t.update(detected=agg["detected"], prob=agg["prob"], agree=agg["agree"], all_agree=agg["all_agree"])
+
+
 def _sibling_mislabel(ctx: Ctx, exp: str) -> dict | None:
     """Another file of this series whose track, tagged like ours, was confirmed to be the expected language."""
     if not ctx.item.get("id"):
@@ -1012,6 +1049,11 @@ def check_language(ctx: Ctx):
             if len(t.get("windows", [])) < 3 and t.get("level_db", -120) > -70:
                 ctx.step(f"extra language samples track {t['a_index'] + 1}")
                 _extra_language_windows(ctx, t)
+    if _check_on(ctx, "extra_language_samples"):
+        for t in tracks:
+            if not langs.norm(t["tag"]) and (t.get("speech_s", 0) < 10 or len(t.get("windows", [])) < 2):
+                _sample_until_speech(ctx, t)
+    can_tag = trackedit.can_edit(ctx.path)
     for t in tracks:
         n, agree = len(t.get("windows", [])), t.get("agree", 0)
         det, tag = t["detected"], t["tag"]
@@ -1030,6 +1072,8 @@ def check_language(ctx: Ctx):
             t.update(effective=tag, confident=bool(det))
         elif det and ((agree >= 2 and t["prob"] >= 0.6) or (n == 1 and t["prob"] >= 0.8)):
             t.update(effective=det, confident=True)
+            if not can_tag:
+                continue  # AVI/DivX can't hold a language tag, so there is nothing to fix
             ctx.issue("language", "audio_untagged", "info",
                       f"Audio track #{t['a_index'] + 1} has no language tag; detected {langs.name(det)} "
                       f"({agree}/{n} windows).", a_index=t["a_index"], windows=t["windows"])

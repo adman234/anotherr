@@ -89,3 +89,48 @@ def test_untagged_subtitle_language_from_title():
     info = media.summarize({"streams": [{"codec_type": "subtitle", "codec_name": "subrip", "index": 2,
                                          "tags": {"title": "English.Foreign.parts.only"}}]})
     assert info["subs"][0]["lang"] == "eng"
+
+
+def _untagged_ctx(path, speech_s, windows, duration=2400):
+    c = scanner.Ctx(file={"id": 1}, item={"kind": "series", "original_language": "eng", "language_override": ""},
+                    cfg={"anime": {"dub_language": "eng", "prefer_dual_audio": False}}, profile="standard", pcfg={}, seed=1)
+    c.path = path
+    c.info = {"audio": [{"default": True}], "duration": duration}
+    c.tracks[0] = {"a_index": 0, "tag": "", "default": True, "speech_s": speech_s, "window_s": 45, "level_db": -20,
+                   "windows": [dict(at=a, lang=l, prob=p) for a, l, p in windows], "detected": "", "prob": 0.0, "extra_tried": True,
+                   "agree": 0, "all_agree": False}
+    c.expected = "eng"
+    return c
+
+
+def test_untagged_track_keeps_sampling_until_ten_seconds_of_speech(monkeypatch):
+    import numpy as np
+    from anotherr import media, stt
+    calls = []
+    monkeypatch.setattr(media, "extract_audio_multi", lambda path, idx, start, secs: calls.append(start) or {idx[0]: np.ones(10)})
+    monkeypatch.setattr(stt, "speech_intervals", lambda a: [(0.0, 5.0)])  # 5 s of speech per sample
+    monkeypatch.setattr(stt, "speech_audio", lambda a, iv, n: a)
+    monkeypatch.setattr(stt.WHISPER, "detect_language", lambda a: ("en", 0.97, {}), raising=False)
+    c = _untagged_ctx("/x/a.mkv", 0.0, [])
+    scanner.check_language(c)
+    t = c.tracks[0]
+    assert len(calls) == 2 and t["speech_s"] == 10.0 and len(t["windows"]) == 2   # stops once 10 s and 2 windows are in
+    assert any(i["code"] == "audio_untagged" for i in c.issues)
+
+
+def test_untagged_sampling_gives_up_after_five_samples(monkeypatch):
+    import numpy as np
+    from anotherr import media, stt
+    calls = []
+    monkeypatch.setattr(media, "extract_audio_multi", lambda path, idx, start, secs: calls.append(start) or {idx[0]: np.zeros(10)})
+    monkeypatch.setattr(stt, "speech_intervals", lambda a: [])
+    c = _untagged_ctx("/x/a.mkv", 0.0, [])
+    scanner.check_language(c)
+    assert len(calls) == 5 and not any(i["code"] == "audio_untagged" for i in c.issues)
+
+
+def test_avi_untagged_audio_is_not_flagged_since_it_cannot_be_retagged():
+    c = _untagged_ctx("/x/a.avi", 60, [(100, "eng", .98), (900, "eng", .97), (1500, "eng", .99)])
+    c.tracks[0].update(detected="eng", prob=.98, agree=3, all_agree=True)
+    scanner.check_language(c)
+    assert not any(i["code"] == "audio_untagged" for i in c.issues) and c.tracks[0]["effective"] == "eng"

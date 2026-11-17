@@ -32,7 +32,7 @@ def test_tier_boundaries(height, tier):
     assert scanner._res_tier(None) == ""
 
 
-@pytest.mark.parametrize("height,small,large,hours", [(480, 0.15, 6, 4), (1080, 0.30, 20, 2), (2160, 1.0, 45, 1.5)])
+@pytest.mark.parametrize("height,small,large,hours", [(480, 0.05, 6, 12), (1080, 0.30, 20, 2), (2160, 1.0, 45, 1.5)])
 def test_rate_boundaries_per_tier_for_movies(height, small, large, hours):
     # movie lengths chosen so the absolute floor (500 MB) and ceiling (80 GB) stay out of the way
     dur = hours * HOUR
@@ -53,7 +53,7 @@ def test_message_and_evidence():
 
 
 def test_absolute_floor_episode_and_movie():
-    # a short SD file where only the absolute floor applies: 49 MB in 6 minutes is 0.48 GB/h, above the 0.15 GB/h floor
+    # a short SD file where only the absolute floor applies: 49 MB in 6 minutes is 0.48 GB/h, above the 0.05 GB/h floor
     r = _run(49 * MB, 6 * 60, 480)
     assert set(r) == {"size_too_small"} and r["size_too_small"]["details"]["threshold"] == "50 MB"
     assert _codes(50 * MB, 6 * 60, 480) == set()
@@ -118,7 +118,7 @@ def test_size_falls_back_to_the_file_on_disk(tmp_path):
 
 def test_defaults_are_in_settings_and_survive_a_partial_save():
     d = settings.get()["scan"]["checks"]["file_size"]
-    assert d["enabled"] and d["too_small_gb_per_hour"] == {"sd": 0.15, "hd": 0.30, "uhd": 1.0}
+    assert d["enabled"] and d["too_small_gb_per_hour"] == {"sd": 0.05, "hd": 0.30, "uhd": 1.0}
     assert d["too_large_gb_per_hour"] == {"sd": 6, "hd": 20, "uhd": 45}
     assert (d["min_episode_mb"], d["min_movie_mb"], d["max_episode_gb"], d["max_movie_gb"]) == (50, 500, 20, 80)
     settings.save({"scan": {"checks": {"file_size": {"too_large_gb_per_hour": {"hd": 25}}}}})

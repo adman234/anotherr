@@ -112,6 +112,14 @@ def test_no_dialogue_skips_subtitle_requirements(d, fake_whisper, monkeypatch):
     assert "no_dialogue" in codes and "subs_missing" not in codes, codes
 
 
+def test_no_dialogue_not_flagged_when_full_sidecar_subs_prove_dialogue(d, fake_whisper, monkeypatch):
+    monkeypatch.setattr(stt, "speech_intervals", lambda audio: [])
+    v = make_video(d, "quietfilm", [(440, "kor")], [])
+    open(os.path.join(d, "quietfilm.en.srt"), "w").write(_srt(CUES, TEXTS))
+    _, codes = scan(v, original="kor")
+    assert "no_dialogue" not in codes, codes
+
+
 def test_truncated_suppresses_downstream():
     c = scanner.Ctx(file={"id": 1}, item={"kind": "movie"}, cfg={}, profile="standard", pcfg={}, seed=1)
     for code in ("truncated", "silent_audio", "decode_errors_severe", "subs_mismatch", "original_audio_missing"):

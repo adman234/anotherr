@@ -594,3 +594,13 @@ def test_existing_exception_rows_without_scope_read_as_season():
     db.init()
     assert db.q1("SELECT scope FROM audio_exceptions")["scope"] == "season"
     assert audio_request.allows(1, 2, "original_only") and not audio_request.allows(1, 3, "original_only")
+
+
+def test_english_only_profile_does_not_flag_english_only_audio():
+    codes = _check(_item("english", quality_profile="Default TV - English Only"), [("eng", True)])
+    assert "original_audio_missing" not in codes
+
+
+def test_dual_audio_profile_still_flags_english_only_audio():
+    codes = _check(_item("english", quality_profile="Default Anime - Dual Audio"), [("eng", True)])
+    assert "original_audio_missing" in codes

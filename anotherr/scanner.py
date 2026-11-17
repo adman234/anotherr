@@ -1073,7 +1073,9 @@ def check_language(ctx: Ctx):
             # English only: a dual-audio gap (blue). An unidentified track could be the original, so that case is
             # dual_track_unlabeled instead; a season exception can accept the gap.
             e_only = True
-            if not unsure and not audio_request.allows(ctx.item.get("id"), season, "english_only"):
+            en_ok = (request == "english" and request_source == "profile"
+                     and audio_request.english_sufficient(ctx.item, ctx.cfg))
+            if not unsure and not en_ok and not audio_request.allows(ctx.item.get("id"), season, "english_only"):
                 asked = request == "original"
                 ctx.issue("language", "original_audio_missing", "dual",
                           f"Only English audio: no {langs.name(exp)} audio ({what} language)"

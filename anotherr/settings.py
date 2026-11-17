@@ -34,6 +34,8 @@ DEFAULTS: dict = {
                          "Anime - Original Language Only"],
             "english": ["Default TV - English Only", "Default Movie - English Only", "Default Anime - Dual Audio"],
         },
+        # Profiles where English-only audio is exactly what was asked for: no original-language gap is raised.
+        "english_sufficient_profiles": ["Default TV - English Only", "Default Movie - English Only"],
     },
     "anime": {
         "prefer_dual_audio": True,

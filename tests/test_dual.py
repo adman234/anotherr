@@ -159,7 +159,7 @@ def test_badges_count_what_the_tabs_list(monkeypatch):
             db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
                  "VALUES (?, 'set_default_audio', '', '[]', 'proposed', 0, ?, 0, 0)", (fid, db.j({"dual": dual})))
     s = api.status()
-    assert s["open_issues"] == api.issues(page_no=1, dual="exclude")["total"]
+    assert s["open_issues"] == api.issues(severity="critical,error,warning", page_no=1, dual="exclude")["total"]
     assert s["open_dual_issues"] == api.issues(page_no=1, dual="only")["total"]
     assert s["pending_reviews"] == len(api.reviews(limit=500))
     assert s["queue"] == len(api.queue_list())

@@ -310,7 +310,7 @@ async function issues(_, dual = false) {
   const res = await api("/api/issues?" + p);
   $("#app").innerHTML = `<h2>${dual ? "Dual audio" : "Issues"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Foreign-language titles that should carry both the original audio and an English dub. ${sev("dual")} means one of them is missing, unidentified or from a different cut. A wrong default track stays a yellow warning on the Issues tab.</div>` : ""}
     <div class="toolbar"><select id="is"><option value="open">Open</option><option value="ignored">Ignored</option><option value="resolved">Resolved</option></select>
-      <select id="isev"><option value="">Any severity</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="dual">Dual audio</option><option value="info">Info</option></select>
+      <select id="isev"><option value="">Any severity</option><option value="critical,error,warning,dual">Any severity above info</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="dual">Dual audio</option><option value="info">Info</option></select>
       <select id="icode"><option value="">Any type</option>${res.codes.map((c) => `<option value="${esc(c.code)}">${esc(c.code)} (${c.n})</option>`).join("")}</select>
       <input id="iq" placeholder="Search" value="${esc(ISS.search)}"><label class="small"><input type="checkbox" id="igroup" ${ISS.group ? "checked" : ""}> Group by show + season</label>
       <span class="muted">${ISS.group ? `${res.issues} issues in ${res.total} rows` : res.total}</span>

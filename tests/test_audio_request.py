@@ -367,6 +367,7 @@ def test_approving_the_redownload_withdraws_the_accept_proposal(monkeypatch):
     _scan(files[(1, 1)], TRACKS["O"])
     _scan(files[(2, 1)], TRACKS["O"])
     monkeypatch.setattr(actions, "_redownload", lambda f, item: "blocklisted; search triggered")
+    monkeypatch.setattr(actions, "_redownload_replace", lambda f, item, lang: "grabbed")
     redl = next(a for a in _proposed("redownload") if a["file_id"] == files[(1, 1)])
     assert actions.execute(redl["id"])["ok"]
     left = _proposed("accept_season_audio")

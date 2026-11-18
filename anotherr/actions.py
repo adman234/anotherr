@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 
 from . import arr, db, langs, settings
@@ -596,7 +597,8 @@ def execute(action_id: int, wait: bool = False) -> dict:
         if a["kind"] == "resub":
             msg = _resub(f, item)
         elif a["kind"] == "redownload":
-            msg = _redownload(f, item)
+            want = _replace_language(codes)
+            msg = _redownload_replace(f, item, want) if want is not False else _redownload(f, item)
         else:
             raise RuntimeError(f"unknown action {a['kind']}")
         status = "done"
@@ -702,6 +704,71 @@ def _current_grab(grabs: list[dict], imports: list[dict]) -> dict | None:
         did = imports[0].get("downloadId")
         return next((g for g in grabs if did and g.get("downloadId") == did), None)
     return grabs[0] if len(grabs) == 1 else None
+
+
+_UPGRADE_REJECTIONS = ("existing file", "equal or higher", "cutoff", "upgrade")
+_DUB_TITLE = re.compile(r"dual[ ._-]?audio|\bdubbed\b|\bdub\b|multi[ ._-]?audio", re.I)
+
+
+def _replace_language(codes: list[str]):
+    """False = delete-first redownload as before. Otherwise replace-on-import: a language code to require in the new
+    release ('eng' or the original), or None when the release only has to differ from the bad one."""
+    mode = settings.get()["automation"].get("redownload_replace", "audio")
+    if mode == "never":
+        return False
+    if "english_audio_missing" in codes:
+        return "eng"
+    if "original_audio_missing" in codes:
+        return "original"
+    return None if mode == "always" else False
+
+
+def _release_candidates(releases: list[dict], tried: set[str], lang: str | None) -> list[dict]:
+    """Releases worth grabbing for a file that is being replaced, best first. Rejections about the existing file (not
+    an upgrade, cutoff met) are exactly what a manual grab overrides; anything else (blocklisted, unwanted quality,
+    too small) still counts. Season packs are skipped: they would replace files this action is not about."""
+    out = []
+    for r in releases:
+        if r.get("fullSeason") or (r.get("title") or "") in tried:
+            continue
+        if any(not any(k in str(x).lower() for k in _UPGRADE_REJECTIONS) for x in r.get("rejections") or []):
+            continue
+        if lang:
+            names = [(l.get("name") if isinstance(l, dict) else str(l)) or "" for l in r.get("languages") or []]
+            if not (any(langs.same(n, lang) for n in names) or _DUB_TITLE.search(r.get("title") or "")):
+                continue
+        out.append(r)
+    out.sort(key=lambda r: (r.get("customFormatScore") or 0, r.get("seeders") or 0), reverse=True)
+    return out
+
+
+def _redownload_replace(f: dict, item: dict, lang: str | None) -> str:
+    """Keep the current file, grab a matching release the way Interactive Search would, and let Sonarr/Radarr swap the
+    file in when that download imports. Nothing is deleted or blocklisted here; if nothing matches, nothing changes."""
+    if lang == "original":
+        lang = item.get("original_language") or None
+        if langs.norm(lang) in langs.UNKNOWN:
+            raise RuntimeError("original language unknown, so no release can be matched; nothing changed")
+    if item["source"] == "sonarr":
+        s = arr.Sonarr()
+        eps = db.unj(f["episodes"], [])
+        if len(eps) != 1:
+            raise RuntimeError("multi-episode file: replace-on-import needs one episode; nothing changed")
+        tried = {g.get("sourceTitle") or "" for g in s.grab_history(item["arr_id"], eps[0]["id"])}
+        cands = _release_candidates(s.releases(eps[0]["id"]), tried, lang)
+        client = s
+    else:
+        r = arr.Radarr()
+        tried = {g.get("sourceTitle") or "" for g in r.grab_history(item["arr_id"])}
+        cands = _release_candidates(r.releases(item["arr_id"]), tried, lang)
+        client = r
+    if not cands:
+        raise RuntimeError("no untried release matches" + (f" ({langs.name(lang)} audio)" if lang else "")
+                           + "; the current file was left alone")
+    pick = cands[0]
+    client.grab_release(pick["guid"], pick["indexerId"])
+    return (f"grabbed '{pick.get('title')}' ({len(cands)} candidate(s)); the current file stays until the download "
+            "imports and replaces it")
 
 
 def _redownload(f: dict, item: dict) -> str:

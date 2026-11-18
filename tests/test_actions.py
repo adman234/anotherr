@@ -174,3 +174,45 @@ def test_claim_is_atomic():
     assert actions._claim(aid) is True
     assert actions._claim(aid) is False
     assert actions.execute(aid)["ok"] is False
+
+
+def _rel(title, lang="English", rej=(), score=0, seeders=1, **kw):
+    return {"guid": title, "indexerId": 1, "title": title, "languages": [{"name": lang}], "rejections": list(rej),
+            "customFormatScore": score, "seeders": seeders, **kw}
+
+
+def test_replace_on_import_keeps_the_file_and_grabs_a_matching_release(monkeypatch):
+    calls = []
+    rels = [_rel("jp", lang="Japanese"), _rel("pack", fullSeason=True), _rel("old"),
+            _rel("blocked", rej=["Release is blocklisted"]),
+            _rel("dub-low", rej=["Existing file meets cutoff: WEBDL-1080p"], score=1),
+            _rel("dub-high", rej=["Existing file on disk is of equal or higher preference"], score=5)]
+    monkeypatch.setattr(arr.Sonarr, "grab_history", lambda self, s, e: [{"sourceTitle": "old"}])
+    monkeypatch.setattr(arr.Sonarr, "releases", lambda self, e: rels)
+    monkeypatch.setattr(arr.Sonarr, "grab_release", lambda self, g, i: calls.append(("grab", g)))
+    monkeypatch.setattr(arr.Sonarr, "mark_failed", lambda self, h: calls.append(("failed", h)))
+    monkeypatch.setattr(arr.Sonarr, "delete_file", lambda self, f: calls.append(("delete", f)))
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, first_seen) VALUES (?, 30, '/tv/a.mkv', ?, ?)",
+               (db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 3, 'Show', 'series')"),
+                '[{"id": 300, "season": 1, "episode": 1}]', time.time()))
+    db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'english_audio_missing', 'error', 'open', ?)",
+         (fid, time.time()))
+    aid = actions._propose(fid, "redownload", "x", ["english_audio_missing"])
+    res = actions.execute(aid)
+    assert res["ok"], res
+    assert calls == [("grab", "dub-high")]
+
+
+def test_replace_on_import_changes_nothing_when_no_release_matches(monkeypatch):
+    calls = []
+    monkeypatch.setattr(arr.Sonarr, "grab_history", lambda self, s, e: [])
+    monkeypatch.setattr(arr.Sonarr, "releases", lambda self, e: [_rel("jp", lang="Japanese")])
+    monkeypatch.setattr(arr.Sonarr, "grab_release", lambda self, g, i: calls.append("grab"))
+    monkeypatch.setattr(arr.Sonarr, "delete_file", lambda self, f: calls.append("delete"))
+    fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, episodes, first_seen) VALUES (?, 30, '/tv/a.mkv', ?, ?)",
+               (db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 3, 'Show', 'series')"),
+                '[{"id": 300, "season": 1, "episode": 1}]', time.time()))
+    db.x("INSERT INTO issues(file_id, code, severity, status, created_at) VALUES (?, 'english_audio_missing', 'error', 'open', ?)",
+         (fid, time.time()))
+    res = actions.execute(actions._propose(fid, "redownload", "x", ["english_audio_missing"]))
+    assert not res["ok"] and "left alone" in res["result"] and calls == []

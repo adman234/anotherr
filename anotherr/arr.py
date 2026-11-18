@@ -85,6 +85,14 @@ class Sonarr(Client):
     def search(self, episode_ids: list[int]):
         return self.req("POST", "/api/v3/command", json={"name": "EpisodeSearch", "episodeIds": episode_ids})
 
+    def releases(self, episode_id: int) -> list[dict]:
+        """Interactive search: every candidate release, rejected ones included (with their reasons)."""
+        return self.req("GET", "/api/v3/release", params={"episodeId": episode_id}, timeout=300) or []
+
+    def grab_release(self, guid: str, indexer_id: int):
+        """Send one release to the download client, bypassing the upgrade check (what Interactive Search does)."""
+        return self.req("POST", "/api/v3/release", json={"guid": guid, "indexerId": indexer_id})
+
     def history_since(self, iso: str) -> list[dict]:
         return self.get("/api/v3/history/since", date=iso) or []
 
@@ -114,6 +122,12 @@ class Radarr(Client):
 
     def search(self, movie_ids: list[int]):
         return self.req("POST", "/api/v3/command", json={"name": "MoviesSearch", "movieIds": movie_ids})
+
+    def releases(self, movie_id: int) -> list[dict]:
+        return self.req("GET", "/api/v3/release", params={"movieId": movie_id}, timeout=300) or []
+
+    def grab_release(self, guid: str, indexer_id: int):
+        return self.req("POST", "/api/v3/release", json={"guid": guid, "indexerId": indexer_id})
 
     def history_since(self, iso: str) -> list[dict]:
         return self.get("/api/v3/history/since", date=iso) or []

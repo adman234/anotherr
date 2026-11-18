@@ -143,6 +143,9 @@ DEFAULTS: dict = {
         "auto_redownload": False,
         "redownload_codes": ["unreadable", "no_video", "no_audio", "truncated", "decode_errors_severe", "original_audio_missing"],
         "redownload_delete_file": True,
+        # "audio": a missing English/original audio track keeps the old file and grabs a matching release by hand;
+        # it is only replaced when that download imports. "always": every redownload works that way. "never": off.
+        "redownload_replace": "audio",
     },
 }
 

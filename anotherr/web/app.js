@@ -644,6 +644,7 @@ const HELP = {
   "automation.auto_redownload": "Automatically blocklist + redownload files with the issue types below.",
   "automation.redownload_codes": "Issue types that may trigger an automatic redownload.",
   "automation.redownload_delete_file": "Delete the bad file before searching (needed for a same-quality replacement).",
+  "automation.redownload_replace": "Replace-on-import: keep the current file, pick a matching release (like Interactive Search) and grab it. The old file is only replaced when the new download imports. audio = only for missing English/original audio, always = every redownload, never = delete first as before. If no release matches, nothing is touched.",
 };
 let SET = null;
 
@@ -681,6 +682,7 @@ function render(path, val) {
     if (p === "scan.hw_decode") return field(p, pretty(k), `<select data-k="${p}">${["auto", "off"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "subgen.mode") return field(p, pretty(k), `<select data-k="${p}">${["path", "upload"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "subgen.audio_format") return field(p, pretty(k), `<select data-k="${p}">${["flac", "opus", "pcm"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
+    if (p === "automation.redownload_replace") return field(p, pretty(k), `<select data-k="${p}">${["audio", "always", "never"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "whisper.device") return field(p, pretty(k), `<select data-k="${p}">${["auto", "cuda", "cpu"].map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select>`);
     if (p === "schedule.disks") return field(p, pretty(k), `<div data-list="${p}">${SET.disks.filter((d) => d).map((d) => `<label style="margin-right:10px"><input type="checkbox" value="${esc(d)}" ${v.includes(d) ? "checked" : ""}> ${esc(d)}</label>`).join("") || '<span class="muted">No disks detected yet (sync first)</span>'}</div>`);
     if (p === "automation.redownload_codes") return field(p, pretty(k), `<div data-list="${p}">${SET.redownload_codes.map((d) => `<label style="margin-right:10px;display:inline-block"><input type="checkbox" value="${d}" ${v.includes(d) ? "checked" : ""}> ${d}</label>`).join("")}</div>`);

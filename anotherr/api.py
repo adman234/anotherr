@@ -234,7 +234,7 @@ def status():
         "memory": health.memory(),
         "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
-        "open_issues": db.scalar(f"SELECT COUNT(*) FROM ({ISSUE_SQL} AND x.status='open' AND x.severity!='dual')"),
+        "open_issues": db.scalar(f"SELECT COUNT(*) FROM ({ISSUE_SQL} AND x.status='open' AND x.severity NOT IN ('dual', 'info'))"),
         "open_dual_issues": db.scalar(f"SELECT COUNT(*) FROM ({ISSUE_SQL} AND x.status='open' AND x.severity='dual')"),
         "pending_reviews": db.scalar(f"SELECT COUNT(*) FROM ({REVIEW_SQL} AND r.status='pending')"),
         "proposed_actions": len(proposed) - n_dual,

@@ -279,7 +279,8 @@ function showFrames(fid) {
 }
 
 // ------------------------------------------------------------------ issues
-let ISS = { status: "open", severity: "", code: "", search: "", page: 1, group: true, dual: false };
+const SEV_ABOVE_INFO = "critical,error,warning,dual";  // the default filter: info flags never lead to an action
+let ISS = { status: "open", severity: SEV_ABOVE_INFO, code: "", search: "", page: 1, group: true, dual: false };
 const SUB_CODES = ["subs_missing", "subs_signs_only", "subs_out_of_sync", "subs_mismatch", "subs_text_mismatch", "dubtitles"];
 // default-track / retag issues are fixed by a track-edit proposal: link to it, or rescan files scanned before it existed
 const genSub = (body) => `act(()=>api('/api/subgen/request',{method:'POST',body:{${body}}}),r=>r.proposed.length?'Proposed for subgen - approve it in Actions':'Not possible: '+Object.values(r.not_possible).join('; '))`;
@@ -305,12 +306,12 @@ function issueGroupRow(g) {
       : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
 }
 async function issues(_, dual = false) {
-  if (ISS.dual !== dual) Object.assign(ISS, { dual, page: 1, code: "", severity: "" });  // the two tabs share filters
+  if (ISS.dual !== dual) Object.assign(ISS, { dual, page: 1, code: "", severity: SEV_ABOVE_INFO });  // the two tabs share filters
   const p = new URLSearchParams({ ...ISS, dual: dual ? "only" : "exclude", per_page: 100 });
   const res = await api("/api/issues?" + p);
   $("#app").innerHTML = `<h2>${dual ? "Dual audio" : "Issues"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Foreign-language titles that should carry both the original audio and an English dub. ${sev("dual")} means one of them is missing, unidentified or from a different cut. A wrong default track stays a yellow warning on the Issues tab.</div>` : ""}
     <div class="toolbar"><select id="is"><option value="open">Open</option><option value="ignored">Ignored</option><option value="resolved">Resolved</option></select>
-      <select id="isev"><option value="">Any severity</option><option value="critical,error,warning,dual">Any severity above info</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="dual">Dual audio</option><option value="info">Info</option></select>
+      <select id="isev"><option value="${SEV_ABOVE_INFO}">Any severity above info</option><option value="">Any severity (incl. info)</option><option value="critical,error">Error + critical</option><option value="warning">Warning</option><option value="dual">Dual audio</option><option value="info">Info</option></select>
       <select id="icode"><option value="">Any type</option>${res.codes.map((c) => `<option value="${esc(c.code)}">${esc(c.code)} (${c.n})</option>`).join("")}</select>
       <input id="iq" placeholder="Search" value="${esc(ISS.search)}"><label class="small"><input type="checkbox" id="igroup" ${ISS.group ? "checked" : ""}> Group by show + season</label>
       <span class="muted">${ISS.group ? `${res.issues} issues in ${res.total} rows` : res.total}</span>

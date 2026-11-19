@@ -12,7 +12,7 @@ from .schedule_util import in_windows
 log = logging.getLogger("anotherr.actions")
 TRACK_KINDS = ("retag_audio", "set_default_audio", "set_default_subtitle")  # run by trackedit
 BATCH_KINDS = TRACK_KINDS + ("subgen_transcribe", "accept_season_audio")  # payload batches, rebuilt by their own refresh
-MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle", "accept_season_audio")  # what a person can propose from a file/issue
+MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle", "accept_season_audio", "shift_subtitle")  # what a person can propose from a file/issue
 REARM_AFTER = 7 * 86400
 
 
@@ -297,7 +297,7 @@ def reject(action_id: int):
     db.x("UPDATE actions SET status='rejected', updated_at=? WHERE id=? AND status='proposed'", (time.time(), action_id))
 
 
-GROUPABLE = ("resub", "redownload", "whisper_subtitle")  # one approval per series + season + identical reason (UI/MCP)
+GROUPABLE = ("resub", "redownload", "whisper_subtitle", "shift_subtitle")  # one approval per series + season + identical reason (UI/MCP)
 
 
 # ---- alternative proposals: several actions that fix the same files in different ways are one "choice"
@@ -594,7 +594,11 @@ def execute(action_id: int, wait: bool = False) -> dict:
             raise RuntimeError("file no longer in library")
         if a["kind"] == "whisper_subtitle":
             return _start_whisper(action_id, f, item, wait)
-        if a["kind"] == "resub":
+        if a["kind"] == "shift_subtitle":
+            from . import subshift
+
+            msg = subshift.run(f)
+        elif a["kind"] == "resub":
             msg = _resub(f, item)
         elif a["kind"] == "redownload":
             want = _replace_language(codes)
@@ -607,6 +611,10 @@ def execute(action_id: int, wait: bool = False) -> dict:
     db.x("UPDATE actions SET status=?, result=?, updated_at=? WHERE id=?", (status, msg, time.time(), action_id))
     label = f"{item['title']} {f.get('label', '')}" if item and f else f"file {a['file_id']}"
     db.log(f"Action {a['kind']} on {label}: {status} - {msg}", "info" if status == "done" else "error")
+    if status == "done" and a["kind"] == "shift_subtitle":
+        from . import subshift
+
+        subshift.queue_recheck(f["id"])
     if status == "done" and a["kind"] == "resub":
         # re-check subtitles after Bazarr had a moment to write them
         db.x("INSERT OR IGNORE INTO queue(file_id, profile, source, created_at) VALUES (?,?,?,?)",

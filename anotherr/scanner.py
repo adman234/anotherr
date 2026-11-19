@@ -1546,7 +1546,8 @@ def check_subtitles(ctx: Ctx):
     if checks:
         ctx.result["subtitle_content"] = checks
     ctx.result["subtitle_sync"] = [dict(a["sync"], track=a["name"], external=a["track"]["external"],
-                                        verdict_final=a["verdict"]) for a in per_track]
+                                        path=a["track"].get("path") if a["track"]["external"] else None,
+                                        s_index=a["track"].get("s_index"), verdict_final=a["verdict"]) for a in per_track]
     known = [a for a in per_track if a["verdict"] != "unknown"]
     if not known:
         return

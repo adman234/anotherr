@@ -493,6 +493,9 @@ def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0)
     """Propose resub (Bazarr subtitle search), redownload (blocklist + search in Sonarr/Radarr) or whisper_subtitle
     (transcribes + translates one episode: goes to the subgen worker when subgen is set up, otherwise to Bazarr's
     Whisper provider, which needs a known, non-subtitle-language audio tag).
+    shift_subtitle corrects a subtitle that is merely offset (subs_out_of_sync, "text matches once shifted") by moving
+    its cues by the detected amount: sidecar .srt/.vtt/.ass files are rewritten (original kept as .anotherr-bak),
+    embedded Matroska text tracks are remuxed with mkvmerge; the file is rescanned afterwards. No Bazarr involved.
     Also accept_season_audio: accept the file's whole season (or movie) as is when the requested audio language is
     not available (a warning-level english_audio_missing / original_audio_missing); approving records an exception
     that covers later imports too and resolves the season's warnings.

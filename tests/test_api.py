@@ -172,3 +172,18 @@ def test_retired_settings_are_dropped():
     s = settings.get()
     assert "disk_mode" not in s["schedule"] and "max_files_per_window" not in s["schedule"]
     assert s["schedule"]["max_disks"] == 2 and s["scan"]["profiles"]["standard"]["seconds"] == 60
+
+
+def test_active_actions_progress_and_eta():
+    iid = db.x("INSERT INTO items(source, arr_id, title, kind) VALUES ('sonarr', 8, 'Show', 'series')")
+    now = time.time()
+    ids = []
+    for n in range(5):
+        fid = db.x("INSERT INTO files(item_id, arr_file_id, arr_path, first_seen) VALUES (?, ?, '/tv/b.mkv', ?)", (iid, 80 + n, now))
+        ids.append(db.x("INSERT INTO actions(file_id, kind, status, result, created_at, updated_at) VALUES (?, 'shift_subtitle', ?, ?, ?, ?)",
+                        (fid, ("done", "done", "running", "queued", "queued")[n], "x", now - 400, now - (300 - 100 * n if n < 2 else 400))))
+    w = api._active_actions()
+    assert [a["state"] for a in w["actions"]] == ["running", "waiting", "waiting"]
+    k = w["kinds"][0]
+    assert (k["kind"], k["done"], k["total"], k["running"], k["waiting"]) == ("shift_subtitle", 2, 5, 1, 2)
+    assert k["eta_s"] == 300

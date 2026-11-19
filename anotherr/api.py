@@ -231,6 +231,7 @@ def status():
                     "model": stt.WHISPER.model_name or cfg["whisper"]["model"], "error": stt.WHISPER.load_error},
         "files": {"total": sum(counts.values()), **counts},
         "queue": scheduler.queue_count(),
+        "actions_active": db.scalar("SELECT COUNT(*) FROM actions WHERE status IN ('queued','running')"),
         "memory": health.memory(),
         "files_not_found": db.scalar("SELECT COUNT(*) FROM issues WHERE code='file_not_found' AND status='open'"),
         "forcing_queue": bool(settings.state_get("force_queue", False)),
@@ -535,6 +536,38 @@ def queue_list(limit: int = 0):
     return db.q("""SELECT q.*, i.title, f.label FROM queue q JOIN files f ON f.id=q.file_id JOIN items i ON i.id=f.item_id
         WHERE f.missing=0 ORDER BY CASE q.source WHEN 'manual' THEN 0 WHEN 'import' THEN 1 ELSE 2 END, q.created_at
         LIMIT ?""", (limit if limit > 0 else -1,))
+
+
+def _active_actions() -> dict:
+    """Approved actions that are running or waiting their turn, in run order, with per-kind progress and an ETA.
+    Group approvals run one after another, so a kind's ETA is the average gap between its recent completions."""
+    rows = sorted(_action_rows("queued,running", 0), key=lambda r: r["id"])
+    kinds: dict[str, dict] = {}
+    for r in rows:
+        waiting = r["status"] == "queued" or (r["result"] or "") == "queued"
+        r["state"] = "waiting" if waiting else "running"
+        k = kinds.setdefault(r["kind"], {"kind": r["kind"], "running": 0, "waiting": 0, "since": r["updated_at"]})
+        k[r["state"]] += 1
+        k["since"] = min(k["since"], r["updated_at"])
+        r["position"] = k["running"] + k["waiting"]
+        r.pop("payload", None)
+    for k in kinds.values():
+        done = db.q("SELECT status, updated_at FROM actions WHERE kind=? AND status IN ('done','failed') "
+                    "AND updated_at>=? ORDER BY updated_at", (k["kind"], k["since"] - 1))
+        k["done"] = sum(d["status"] == "done" for d in done)
+        k["failed"] = len(done) - k["done"]
+        k["total"] = len(done) + k["running"] + k["waiting"]
+        k["eta_s"] = None
+        if len(done) >= 2:
+            per = (done[-1]["updated_at"] - done[0]["updated_at"]) / (len(done) - 1)
+            k["per_item_s"] = round(per, 1)
+            k["eta_s"] = round(per * (k["running"] + k["waiting"]))
+    return {"actions": rows, "kinds": sorted(kinds.values(), key=lambda k: k["since"])}
+
+
+@app.get("/api/actions/active", dependencies=[Depends(auth)])
+def actions_active():
+    return _active_actions()
 
 
 @app.delete("/api/queue", dependencies=[Depends(auth)])

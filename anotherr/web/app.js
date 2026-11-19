@@ -46,7 +46,7 @@ async function refreshStatus() {
     $("#n-dualact").textContent = s.proposed_dual_actions || "";
     const cur = s.current && s.current.file_id ? `Scanning <b>${esc(s.current.title)} ${esc(s.current.label || "")}</b> · ${esc(s.current.step)}` : esc(s.scheduler.mode || "idle");
     const pause = s.scheduler.pause_reasons && s.scheduler.pause_reasons.length ? ` · <span style="color:var(--warning)">${esc(s.scheduler.pause_reasons.join(", "))}</span>` : "";
-    $("#statusbar").innerHTML = `${cur}${pause}<br>queue ${s.queue} · whisper ${esc(s.whisper.device || (s.whisper.error ? "error" : "not loaded"))} · sync ${s.sync.running ? "running" : ago(s.sync.last)}`;
+    $("#statusbar").innerHTML = `${cur}${pause}<br><a href="#/queue">queue ${s.queue}${s.actions_active ? ` + ${s.actions_active} action${s.actions_active === 1 ? "" : "s"}` : ""}</a> · whisper ${esc(s.whisper.device || (s.whisper.error ? "error" : "not loaded"))} · sync ${s.sync.running ? "running" : ago(s.sync.last)}`;
     window.STATUS = s;
   } catch (e) { $("#statusbar").textContent = "offline: " + e.message; }
 }
@@ -390,7 +390,7 @@ const bulkForeignDefaults = () => act(() => api("/api/actions/bulk-foreign-defau
 const bulkRuntimeChecks = () => act(() => api("/api/actions/bulk-runtime-checks", { method: "POST" }), (r) => `${r.waiting} runtime check(s) wait for Claude: they run the next time the MCP is used`);
 const bulkSync = () => act(() => api("/api/actions/bulk-out-of-sync", { method: "POST" }), "Queued");
 // resub/redownload proposals for the same series + season with the same reason get one Approve
-const GROUPABLE = ["resub", "redownload", "whisper_subtitle"];
+const GROUPABLE = ["resub", "redownload", "whisper_subtitle", "shift_subtitle"];
 const GROUP_MAX = { whisper_subtitle: 5 };  // Bazarr's Whisper route: at most 5 episodes per approval
 const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
 function actFileCount(rows) {
@@ -513,7 +513,7 @@ function subgenButtons(a) {
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
   set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle",
   subgen_transcribe: "Generate subtitle (subgen)", accept_season_audio: "Accept season audio as is",
-  mcp_review: "Ask Claude to check runtime" };
+  mcp_review: "Ask Claude to check runtime", shift_subtitle: "Shift subtitles" };
 const TRACK_KINDS = ["retag_audio", "set_default_audio", "set_default_subtitle"];
 const BATCH_KINDS = [...TRACK_KINDS, "subgen_transcribe", "accept_season_audio"];
 function acceptTable(a) {
@@ -553,11 +553,29 @@ async function bulk(op, kind) {
 }
 
 // ------------------------------------------------------------------ queue
+const etaText = (sec) => sec == null ? "estimating..." : sec < 90 ? "under a minute" : sec < 5400 ? `~${Math.round(sec / 60)} min` : `~${(sec / 3600).toFixed(1)} h`;
+// Approved actions (shift subtitles, resubs, retags...) run in the background one after another; show them here.
+function activeActionsCard(w) {
+  if (!w.actions.length) return "";
+  const bars = w.kinds.map((k) => {
+    const pct = k.total ? Math.round(((k.done + k.failed) / k.total) * 100) : 0;
+    return `<div style="margin-bottom:8px"><b>${KIND_LABEL[k.kind] || esc(k.kind)}</b>
+      <span class="muted small"> ${k.done + k.failed} of ${k.total} finished${k.failed ? `, <span style="color:var(--warning)">${k.failed} failed</span>` : ""} · ${k.running} running, ${k.waiting} waiting · ${etaText(k.eta_s)} left</span>
+      <div style="height:6px;background:var(--border,#333);border-radius:3px;margin-top:4px"><div style="height:6px;width:${pct}%;background:var(--accent);border-radius:3px"></div></div></div>`;
+  }).join("");
+  const rows = w.actions.slice(0, 60).map((a) => `<tr><td><span class="st s-${a.state === "running" ? "running" : "queued"}">${a.state}</span></td><td>${KIND_LABEL[a.kind] || esc(a.kind)}</td>
+    <td>${!BATCH_KINDS.includes(a.kind) ? `<a href="#/file/${a.file_id}">${esc(a.title)} ${esc(a.label || "")}</a>` : esc(a.title)}</td><td class="muted small">#${a.position}</td></tr>`).join("");
+  return `<div class="card" style="margin-bottom:12px"><h3 style="margin-top:0">Actions in progress <span class="muted">(${w.actions.length})</span></h3>${bars}
+    <table><tr><th>State</th><th>Action</th><th>File</th><th>Order</th></tr>${rows}</table>
+    ${w.actions.length > 60 ? `<div class="muted small">...and ${w.actions.length - 60} more. <a href="#/actions" onclick="ACT.status='running,queued'">Full list</a></div>` : ""}
+    <div class="muted small" style="margin-top:6px">These were approved and run one after another in the background. Finished ones (and failures with the reason) are under Actions, Finished.</div></div>`;
+}
 async function queue() {
-  const [rows, s] = await Promise.all([api("/api/queue"), api("/api/status")]);
+  const [rows, s, w] = await Promise.all([api("/api/queue"), api("/api/status"), api("/api/actions/active")]);
   const reasons = s.scheduler.pause_reasons || [];
   const waiting = rows.length && !s.current.file_id && !s.forcing_queue && reasons.length;
-  $("#app").innerHTML = `<h2>Queue <span class="muted">(${s.queue})</span></h2>
+  if (w.actions.length) setTimeout(() => { if (location.hash.startsWith("#/queue")) queue(); }, 4000);
+  $("#app").innerHTML = `<h2>Queue <span class="muted">(${s.queue})</span></h2>${activeActionsCard(w)}
     ${waiting ? `<div class="card" style="border-color:var(--warning);margin-bottom:12px">Queue is waiting: <b>${esc(reasons.join(", "))}</b>. Use <b>Process queue now</b> to run it anyway.</div>` : ""}
     ${s.forcing_queue ? `<div class="card" style="border-color:var(--accent);margin-bottom:12px">Processing the queue now, ignoring pauses. ${s.current.file_id ? `Scanning <b>${esc(s.current.title)} ${esc(s.current.label || "")}</b> · ${esc(s.current.step)}` : ""}</div>` : ""}
     <div class="toolbar">

@@ -149,6 +149,24 @@ class Bazarr(Client):
         return self.req("PATCH", "/api/movies/subtitles", timeout=300, params={
             "radarrid": radarr_id, "language": lang2, "forced": str(forced).lower(), "hi": str(hi).lower()})
 
+    def history(self, episode_id: int | None = None, radarr_id: int | None = None, length: int = 25) -> list[dict]:
+        """Subtitle history for one episode or movie, newest first."""
+        r = (self.get("/api/episodes/history", episodeid=episode_id, length=length) if episode_id is not None
+             else self.get("/api/movies/history", radarrid=radarr_id, length=length))
+        return (r or {}).get("data", []) if isinstance(r, dict) else (r or [])
+
+    def blacklist(self, entry: dict, lang2: str, series_id: int | None = None, episode_id: int | None = None,
+                  radarr_id: int | None = None):
+        """Blacklist the subtitle a history entry downloaded. Bazarr deletes that file and runs a fresh search,
+        which can no longer pick the same subtitle again."""
+        params = {"provider": entry["provider"], "subs_id": str(entry["subs_id"]), "language": lang2,
+                  "subtitles_path": entry["subtitles_path"]}
+        if episode_id is not None:
+            params.update(seriesid=series_id, episodeid=episode_id)
+            return self.req("POST", "/api/episodes/blacklist", timeout=300, params=params, data=params)
+        params["radarrid"] = radarr_id
+        return self.req("POST", "/api/movies/blacklist", timeout=300, params=params, data=params)
+
     # manual search + download (used to pick one provider, e.g. Whisper). Bazarr's Whisper provider transcribes
     # while downloading, so the download call can take many minutes.
     def provider_results(self, episode_id: int | None = None, radarr_id: int | None = None) -> list[dict]:

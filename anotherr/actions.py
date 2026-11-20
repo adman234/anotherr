@@ -695,13 +695,57 @@ def _wait_for_srt(action_id: int, f: dict, since: float) -> str | None:
 def _resub(f: dict, item: dict) -> str:
     b = arr.Bazarr()
     lang2 = langs.iso1(settings.get()["languages"]["subtitle_language"]) or "en"
+    banned = []
     if item["source"] == "sonarr":
         eps = db.unj(f["episodes"], [])
         for e in eps:
-            b.search_episode(item["arr_id"], e["id"], lang2)
-        return f"Bazarr subtitle search ({lang2}) triggered for {len(eps)} episode(s)"
-    b.search_movie(item["arr_id"], lang2)
-    return f"Bazarr subtitle search ({lang2}) triggered"
+            ids = dict(series_id=item["arr_id"], episode_id=e["id"])
+            gone = _blacklist_current(b, lang2, ids, b.history(episode_id=e["id"]))
+            if gone:
+                banned.append(gone)
+            else:
+                b.search_episode(item["arr_id"], e["id"], lang2)
+        return f"Bazarr subtitle search ({lang2}) triggered for {len(eps)} episode(s)" + _banned_note(banned)
+    gone = _blacklist_current(b, lang2, dict(radarr_id=item["arr_id"]), b.history(radarr_id=item["arr_id"]))
+    if gone:
+        banned.append(gone)
+    else:
+        b.search_movie(item["arr_id"], lang2)
+    return f"Bazarr subtitle search ({lang2}) triggered" + _banned_note(banned)
+
+
+def _current_sub(history: list[dict], lang2: str) -> dict | None:
+    """The newest subtitle Bazarr downloaded in this language, unless it's already blacklisted. Without this a resub
+    is a plain search, and Bazarr picks the same top-scoring subtitle (often an embedded track) every time."""
+    for h in history:
+        lang = h.get("language") or {}
+        code = lang.get("code2") if isinstance(lang, dict) else str(lang).split(":")[0]
+        if code != lang2 or (isinstance(lang, dict) and lang.get("forced")):
+            continue
+        if not (h.get("provider") and h.get("subs_id") and h.get("subtitles_path")):
+            continue  # deletions, syncs and uploads name no provider subtitle to ban
+        return None if h.get("blacklisted") else h
+    return None
+
+
+def _blacklist_current(b, lang2: str, ids: dict, history: list[dict]) -> str | None:
+    """Blacklist the subtitle on disk; Bazarr deletes it and searches again. None = nothing to ban (or Bazarr
+    refused), so the caller runs a plain search instead."""
+    h = _current_sub(history, lang2)
+    if not h:
+        return None
+    try:
+        b.blacklist(h, lang2, **ids)
+    except arr.ServiceError as e:
+        log.info("resub: blacklisting %s %s failed, plain search instead: %s", h["provider"], h["subs_id"], e)
+        return None
+    return f"{h['provider']} {h['subs_id']}"
+
+
+def _banned_note(banned: list[str]) -> str:
+    if not banned:
+        return ""
+    return "; blacklisted the previous subtitle first (" + ", ".join(banned[:5]) + (" ..." if len(banned) > 5 else "") + ")"
 
 
 def _current_grab(grabs: list[dict], imports: list[dict]) -> dict | None:

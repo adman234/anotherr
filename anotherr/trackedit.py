@@ -47,6 +47,10 @@ COPY_HARD_LIMIT = 4 * 3600  # absolute cap on one copy edit; apply() has its own
 SLOW_KINDS = {"whisper_subtitle": 2 * 3600, "subgen_transcribe": 1800,  # subgen heartbeats every poll
               "shift_subtitle": 3600 + 300}  # an mkvmerge remux of a big file reports nothing until it ends
 TEMP_PREFIX = ".anotherr-edit."
+COPY_MIN_SECS = 300
+COPY_RATE = 8 * 1024 * 1024  # bytes/s a stream copy is allowed to run at: a spun-down parity array, not an SSD
+LOCK_WAIT_MAX = 24 * 3600  # a queued edit waits this long for the one before it (the reaper frees a stuck lock)
+HEARTBEAT = 60
 _lock = threading.Lock()
 _owner: dict = {"action": None, "since": 0.0}
 _pool = cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="anotherr-trackedit-file")
@@ -195,7 +199,7 @@ def _apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, st
     else:
         target = tmp_path(path)
         st = os.stat(path)
-        timeout = max(EDIT_TIMEOUT, size / (40 * 1024 * 1024))  # stream copies need time in proportion to size
+        timeout = copy_timeout(size)
         try:
             p = subprocess.run(copy_args(path, target, ops), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -205,9 +209,10 @@ def _apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, st
             _rm(target)
             return False, f"ffmpeg copy failed: {p.stderr.strip()[-400:]}"
         new_size = os.path.getsize(target)
-        if abs(new_size - st.st_size) > 0.01 * st.st_size:
+        why = copy_size_problem(st.st_size, new_size)
+        if why:
             _rm(target)
-            return False, f"copy size {new_size} differs from original {st.st_size} by more than 1%"
+            return False, why
         try:
             os.chown(target, st.st_uid, st.st_gid)
         except OSError:
@@ -441,11 +446,38 @@ def start(action_id: int) -> dict:
     return {"ok": True, "result": f"started: {n} file(s)"}
 
 
+def copy_timeout(size: int) -> float:
+    """How long one ffmpeg stream copy may take. 40 MB/s with a 60s floor failed most 1.5-3 GB MP4s on the array."""
+    return min(COPY_HARD_LIMIT - 60, max(COPY_MIN_SECS, size / COPY_RATE))
+
+
+def copy_size_problem(old: int, new: int) -> str | None:
+    """A stream copy keeps every packet, so a much smaller result means it was cut short. It may grow a little
+    (container overhead, an MP4 index rewritten for a tiny SD file), which is not a problem."""
+    if new < old * 0.99:
+        return f"copy size {new} is more than 1% smaller than the original {old} - it may be truncated"
+    if new > old + max(0.03 * old, 8 * 1024 * 1024):
+        return f"copy size {new} is much larger than the original {old}"
+    return None
+
+
+def _touch(action_id: int, result: str):
+    db.x("UPDATE actions SET result=?, updated_at=? WHERE id=? AND status='running'", (result, time.time(), action_id))
+
+
 def run(action_id: int):
-    """Thread entry point: one action at a time, and whatever happens the action ends done or failed."""
-    if not _lock.acquire(timeout=STALL_AFTER):
-        _finish(action_id, "failed", "another track edit was still running after 10 minutes - try again")
-        return
+    """Thread entry point: one action at a time, and whatever happens the action ends done or failed. While it
+    waits for the edit before it, it keeps its own updated_at fresh so the reaper doesn't call it stalled."""
+    waited = 0
+    while not _lock.acquire(timeout=HEARTBEAT):
+        waited += HEARTBEAT
+        st = db.scalar("SELECT status FROM actions WHERE id=?", (action_id,))
+        if st != "running":
+            return  # rejected or reaped meanwhile
+        if waited >= LOCK_WAIT_MAX:
+            _finish(action_id, "failed", f"another track edit was still running after {LOCK_WAIT_MAX // 3600} hours - try again")
+            return
+        _touch(action_id, f"queued behind action {_owner.get('action')} ({waited // 60} min)")
     _owner.update(action=action_id, since=time.time())
     try:
         _run(action_id)
@@ -491,7 +523,15 @@ def _run(action_id: int):
         fut = _pool.submit(edit_file, e, cfg, action_id)
         limit = EDIT_TIMEOUT if e.get("method") != "copy" else COPY_HARD_LIMIT  # copies also have a size-based timeout
         try:
-            r = fut.result(timeout=limit)
+            while True:  # heartbeat: a long copy is progress, not a stall
+                try:
+                    r = fut.result(timeout=min(HEARTBEAT, max(0.05, limit - (time.time() - t0))))
+                    break
+                except cf.TimeoutError:
+                    if time.time() - t0 >= limit:
+                        raise
+                    _touch(action_id, f"{n - 1} of {len(entries)} files done; editing "
+                                      f"{labels.get(e['file_id'], e['file_id'])} ({int(time.time() - t0)}s)")
         except cf.TimeoutError:
             r = {"status": "failed", "why": f"no result after {limit}s - gave up on this file (if the edit finishes "
                                             "late, the queued rescan reads the real state)"}

@@ -12,7 +12,7 @@ from .schedule_util import in_windows
 log = logging.getLogger("anotherr.actions")
 TRACK_KINDS = ("retag_audio", "set_default_audio", "set_default_subtitle")  # run by trackedit
 BATCH_KINDS = TRACK_KINDS + ("subgen_transcribe", "accept_season_audio")  # payload batches, rebuilt by their own refresh
-MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle", "accept_season_audio", "shift_subtitle")  # what a person can propose from a file/issue
+MANUAL_KINDS = ("resub", "redownload", "whisper_subtitle", "accept_season_audio", "shift_subtitle", "retire_subtitle")  # what a person can propose from a file/issue
 REARM_AFTER = 7 * 86400
 
 
@@ -30,9 +30,14 @@ def propose_for_file(file_id: int) -> list[int]:
     unasked = {i["code"] for i in issues if i["severity"] == "dual" and db.unj(i["details"], {}).get("requested") is False}
     redl = sorted((codes - unasked) & set(settings.REDOWNLOAD_CODES))
     resub = sorted(codes & set(settings.RESUB_CODES))
+    if not redl:  # a redownload would replace the subs anyway
+        fixed = _local_sub_fixes(file_id, codes, recent)
+        created += list(fixed.values())
+        if "shift_subtitle" in fixed:  # the offset is known: moving the cues beats another search
+            resub = [c for c in resub if c != "subs_out_of_sync"]
     if redl and "redownload" not in recent:
         created += [_propose(file_id, "redownload", "Issues: " + ", ".join(redl), redl)]
-    elif resub and not redl:  # a redownload would replace the subs anyway
+    elif resub and not redl:
         item_id = db.scalar("SELECT item_id FROM files WHERE id=?", (file_id,))
         from . import subgen
 
@@ -74,6 +79,30 @@ def reconcile(file_id: int | None = None) -> int:
 def _still_open(file_id: int, codes: list[str]) -> bool:
     return bool(db.q1(f"SELECT id FROM issues WHERE file_id=? AND status='open' AND code IN ({','.join('?' * len(codes))})",
                       [file_id, *codes]))
+
+
+def _local_sub_fixes(file_id: int, codes: set[str], recent: set[str]) -> dict[str, int | None]:
+    """Fixes that need no search: shift an offset track by the measured amount, move a bad sidecar aside when a good
+    track is there. A shift is proposed once per file: if the offset is still there after one, it was not a plain
+    offset and the subtitle needs replacing (resub, then subgen)."""
+    from . import subretire, subshift
+
+    out = {}
+    if "subs_out_of_sync" in codes and "shift_subtitle" not in recent and not db.q1(
+            "SELECT id FROM actions WHERE file_id=? AND kind='shift_subtitle' AND status IN ('done','failed')",
+            (file_id,)):
+        picks = [p for p in subshift.plan(file_id) if 0 < abs(p["offset"]) <= subshift.MAX_SHIFT
+                 and ((p["external"] and p.get("path")) or (not p["external"] and p.get("text") is not False))]
+        if picks:
+            out["shift_subtitle"] = _propose(file_id, "shift_subtitle", "Subtitles are offset: " + ", ".join(
+                f"{p['name']} {p['offset']:+.1f}s" for p in picks) + " - shift them back into sync", ["subs_out_of_sync"])
+    if "subs_mismatch_partial" in codes and "retire_subtitle" not in recent:
+        p = subretire.plan(file_id)
+        if p["retire"]:
+            out["retire_subtitle"] = _propose(
+                file_id, "retire_subtitle", "Doesn't match the dialogue: " + ", ".join(r["name"] for r in p["retire"])
+                + f" - move it aside, {', '.join(p['keep'])} stays", ["subs_mismatch_partial"])
+    return out
 
 
 WHISPER_CODES = ("subs_missing", "subs_signs_only")  # no usable full subtitle: a generated one fills the gap
@@ -297,7 +326,7 @@ def reject(action_id: int):
     db.x("UPDATE actions SET status='rejected', updated_at=? WHERE id=? AND status='proposed'", (time.time(), action_id))
 
 
-GROUPABLE = ("resub", "redownload", "whisper_subtitle", "shift_subtitle")  # one approval per series + season + identical reason (UI/MCP)
+GROUPABLE = ("resub", "redownload", "whisper_subtitle", "shift_subtitle", "retire_subtitle")  # one approval per series + season + identical reason (UI/MCP)
 
 
 # ---- alternative proposals: several actions that fix the same files in different ways are one "choice"
@@ -598,6 +627,10 @@ def execute(action_id: int, wait: bool = False) -> dict:
             from . import subshift
 
             msg = subshift.run(f)
+        elif a["kind"] == "retire_subtitle":
+            from . import subretire
+
+            msg = subretire.run(f)
         elif a["kind"] == "resub":
             msg = _resub(f, item)
         elif a["kind"] == "redownload":
@@ -611,7 +644,7 @@ def execute(action_id: int, wait: bool = False) -> dict:
     db.x("UPDATE actions SET status=?, result=?, updated_at=? WHERE id=?", (status, msg, time.time(), action_id))
     label = f"{item['title']} {f.get('label', '')}" if item and f else f"file {a['file_id']}"
     db.log(f"Action {a['kind']} on {label}: {status} - {msg}", "info" if status == "done" else "error")
-    if status == "done" and a["kind"] == "shift_subtitle":
+    if status == "done" and a["kind"] in ("shift_subtitle", "retire_subtitle"):
         from . import subshift
 
         subshift.queue_recheck(f["id"])

@@ -392,7 +392,7 @@ const bulkForeignDefaults = () => act(() => api("/api/actions/bulk-foreign-defau
 const bulkRuntimeChecks = () => act(() => api("/api/actions/bulk-runtime-checks", { method: "POST" }), (r) => `${r.waiting} runtime check(s) wait for Claude: they run the next time the MCP is used`);
 const bulkSync = () => act(() => api("/api/actions/bulk-out-of-sync", { method: "POST" }), "Queued");
 // resub/redownload proposals for the same series + season with the same reason get one Approve
-const GROUPABLE = ["resub", "redownload", "whisper_subtitle", "shift_subtitle"];
+const GROUPABLE = ["resub", "redownload", "whisper_subtitle", "shift_subtitle", "retire_subtitle"];
 const GROUP_MAX = { whisper_subtitle: 5 };  // Bazarr's Whisper route: at most 5 episodes per approval
 const epLabel = (a) => (a.label || "").replace(/^S\d+/, "") || a.label || "file " + a.file_id;
 function actFileCount(rows) {
@@ -515,7 +515,8 @@ function subgenButtons(a) {
 const KIND_LABEL = { resub: "Bazarr resub", redownload: "Blocklist + redownload", retag_audio: "Retag audio language",
   set_default_audio: "Set default audio", set_default_subtitle: "Set default subtitle", whisper_subtitle: "Bazarr Whisper subtitle",
   subgen_transcribe: "Generate subtitle (subgen)", accept_season_audio: "Accept season audio as is",
-  mcp_review: "Ask Claude to check runtime", shift_subtitle: "Shift subtitles" };
+  mcp_review: "Ask Claude to check runtime", shift_subtitle: "Shift subtitles",
+  retire_subtitle: "Move bad subtitle aside" };
 const TRACK_KINDS = ["retag_audio", "set_default_audio", "set_default_subtitle"];
 const BATCH_KINDS = [...TRACK_KINDS, "subgen_transcribe", "accept_season_audio"];
 function acceptTable(a) {

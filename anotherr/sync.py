@@ -69,6 +69,19 @@ def _upsert_item(source, arr_id, title, year, kind, is_anime, olang, runtime, mo
     return db.scalar("SELECT id FROM items WHERE source=? AND arr_id=?", (source, arr_id))
 
 
+def _is_temp(item_id: int, arr_path: str | None) -> bool:
+    """Sonarr/Radarr adopted one of our .anotherr-edit.* temp files (a disk rescan while it existed). Never
+    scan or act on it: it is a partial copy, and a redownload proposed from it would replace a good file."""
+    from .trackedit import is_temp
+
+    if not is_temp(arr_path):
+        return False
+    log.warning("item %s: the arr points at a temp file, ignored: %s", item_id, arr_path)
+    db.log(f"Ignored an .anotherr-edit temp file the arr reports as the library file - delete it and rescan "
+           f"in Sonarr/Radarr: {arr_path}", "warning")
+    return True
+
+
 def _upsert_file(item_id, arr_file_id, arr_path, size, episodes, label, group, quality, date_added) -> int:
     now = time.time()
     existing = db.q1("SELECT id, size, arr_path FROM files WHERE item_id=? AND arr_file_id=?", (item_id, arr_file_id))
@@ -154,12 +167,17 @@ def sync_series(s: arr.Sonarr, series: dict, profiles: dict[int, str] | None = N
                 "id": e["id"], "season": e.get("seasonNumber", 0), "episode": e.get("episodeNumber", 0),
                 "abs": e.get("absoluteEpisodeNumber"), "title": e.get("title", ""), "runtime": e.get("runtime") or 0})
     seen = set()
+    temp = False
     for f in files:
+        if _is_temp(item_id, f.get("path")):
+            temp = True  # its episodes keep their old row; nothing is marked missing this round
+            continue
         seen.add(f["id"])
         episodes = sorted(by_file.get(f["id"], []), key=lambda e: (e["season"], e["episode"]))
         _upsert_file(item_id, f["id"], f.get("path", ""), f.get("size", 0), episodes, _ep_label(episodes),
                      f.get("releaseGroup") or "", _quality(f.get("quality")), f.get("dateAdded", ""))
-    _mark_missing(item_id, seen)
+    if not temp:
+        _mark_missing(item_id, seen)
     return len(files)
 
 
@@ -173,6 +191,8 @@ def sync_movie(m: dict, profiles: dict[int, str] | None = None) -> int:
                             "originalTitle": m.get("originalTitle") or ""})
     _store_profile(item_id, m.get("qualityProfileId"), _profile_names(arr.Radarr()) if profiles is None else profiles)
     mf = m.get("movieFile")
+    if mf and _is_temp(item_id, mf.get("path")):
+        return 0  # keep the real file's row until Radarr is pointed back at it
     if not mf:
         _mark_missing(item_id, set())
         return 0

@@ -44,7 +44,9 @@ MKVPROPEDIT = os.environ.get("ANOTHERR_MKVPROPEDIT", "mkvpropedit")
 EDIT_TIMEOUT = 60
 STALL_AFTER = 600
 COPY_HARD_LIMIT = 4 * 3600  # absolute cap on one copy edit; apply() has its own tighter size-based limit
-SLOW_KINDS = {"whisper_subtitle": 2 * 3600, "subgen_transcribe": 1800}  # subgen heartbeats every poll
+SLOW_KINDS = {"whisper_subtitle": 2 * 3600, "subgen_transcribe": 1800,  # subgen heartbeats every poll
+              "shift_subtitle": 3600 + 300}  # an mkvmerge remux of a big file reports nothing until it ends
+TEMP_PREFIX = ".anotherr-edit."
 _lock = threading.Lock()
 _owner: dict = {"action": None, "since": 0.0}
 _pool = cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="anotherr-trackedit-file")
@@ -113,7 +115,17 @@ def method_for(path: str, nlink: int) -> str:
 
 
 def tmp_path(path: str) -> str:
-    return os.path.join(os.path.dirname(path), ".anotherr-edit." + os.path.basename(path))
+    return os.path.join(os.path.dirname(path), TEMP_PREFIX + os.path.basename(path))
+
+
+def is_temp(path: str | None) -> bool:
+    """A copy/remux temp file of ours (Radarr/Sonarr can pick one up as the library file on a disk rescan)."""
+    return os.path.basename(path or "").startswith(TEMP_PREFIX)
+
+
+def log_temp(path: str):
+    """Record a temp file about to be written so sweep_temp can find it if the container dies mid-write."""
+    _log({"event": "temp", "path": path, "ts": time.time()})
 
 
 def preview(path: str, ops: list[dict], cfg: dict) -> dict:
@@ -541,7 +553,8 @@ def refresh_apps(item: dict, bazarr: bool = True) -> list[str]:
 def sweep_temp(days: float = 7) -> int:
     """Remove copy temp files that outlived their edit (container killed or restarted mid-copy, a failed
     delete on the share layer). Temp files only exist while an edit runs, so with none running every
-    .anotherr-edit.* next to a file copied in the last `days` is a leftover. Only logged paths are checked:
+    .anotherr-edit.* next to a file copied or remuxed (subtitle shift) in the last `days` is a leftover. Only
+    logged paths are checked:
     no directory walks, so no array disks are woken for this."""
     if _lock.locked():
         return 0  # an edit is running: its temp file is live
@@ -554,7 +567,8 @@ def sweep_temp(days: float = 7) -> int:
                     r = json.loads(line)
                 except ValueError:
                     continue
-                if r.get("event") == "before" and r.get("method") == "copy" and r.get("path") and r.get("ts", 0) >= cut:
+                logged = (r.get("event") == "before" and r.get("method") == "copy") or r.get("event") == "temp"
+                if logged and r.get("path") and r.get("ts", 0) >= cut:
                     paths.add(r["path"])
     except OSError:
         return 0

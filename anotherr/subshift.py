@@ -182,6 +182,7 @@ def _shift_embedded(path: str, f: dict, picks: list[dict]) -> str:
             raise RuntimeError(f"embedded track {p['name']} not found in the file any more")
         delays[subs[i]["id"]] = int(round(-p["offset"] * 1000))
     tmp = trackedit.tmp_path(wp)
+    trackedit.log_temp(wp)  # a restart mid-remux kills us before the finally below; the startup sweep cleans up
     try:
         r = subprocess.run(remux_args(wp, tmp, delays), capture_output=True, text=True, timeout=REMUX_TIMEOUT)
         if r.returncode > 1 or not os.path.exists(tmp):

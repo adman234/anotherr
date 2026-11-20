@@ -376,9 +376,11 @@ function bulkButtons(rows, bp) {
   const btn = (n, label, onclick, cls = "") => `<button${cls ? ` class="${cls}"` : ""} onclick="${onclick}"${n ? "" : " disabled"}>${label} (${n})</button>`;
   const shifts = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "shift_subtitle"));
   const subgens = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "subgen_transcribe"));
+  const retires = actFileCount(rows.filter((a) => a.status === "proposed" && a.kind === "retire_subtitle"));
   return btn(subgens, "Approve all subgen generations", "bulkSubgen()")
     + btn(resubs, "Approve all resubs (Bazarr)", "bulk('approve','resub')")
     + btn(shifts, "Approve all shift subtitles", "bulk('approve','shift_subtitle')")
+    + btn(retires, "Move all bad subtitles aside", "bulk('approve','retire_subtitle')")
     + btn(f.english_retags || 0, "Approve confident retags", "bulkEnglish()")
     + btn(f.english_default_audio || 0, "Approve default English audio", "bulkEnglishDefault()")
     + btn(f.foreign_defaults || 0, "Clear foreign defaults", "bulkForeignDefaults()")

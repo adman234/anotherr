@@ -41,6 +41,10 @@ from . import db, langs, media, settings
 log = logging.getLogger("anotherr.subgen")
 KIND = "subgen_transcribe"
 TRIGGER = {"subs_missing", "subs_signs_only", "subs_image_only"}
+# a subtitle exists but is wrong: subgen makes a new one only after Bazarr's search failed (or a person asks), and for
+# an offset only once a shift can't fix it
+REPLACE_CODES = {"subs_mismatch", "subs_out_of_sync"}
+ALL_CODES = TRIGGER | REPLACE_CODES
 ACTIVE_FILE = ("waiting", "submitted", "running")
 _ENGLISH = set("""the a an and or but of to in on at for with from by is are was were be been being am i you he she
 it we they me him her us them my your his its our their this that these there here what who where when why how not no
@@ -227,8 +231,14 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
     from . import actions, defaults
     from .retag import _evidence, _season
 
-    if not codes & TRIGGER:
-        return None, "no missing-subtitle issue"
+    if not codes & ALL_CODES:
+        return None, "no missing or broken subtitle issue"
+    replacing = not codes & TRIGGER  # only a bad (mismatched / offset) subtitle, none missing
+    if replacing and not manual:
+        if not actions.resub_failed_before(item["id"]):
+            return None, "Bazarr's search hasn't failed for this show yet - a resub comes first"
+        if codes & REPLACE_CODES == {"subs_out_of_sync"} and _shift_first(f["id"]):
+            return None, "the offset is known - shifting the subtitle comes first"
     if "no_dialogue" in codes:
         return None, "almost no speech detected"
     busy = _busy_files() if busy is None else busy
@@ -238,8 +248,8 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
     ev = _evidence(f) or {}
     # image-only is the one case where a full subtitle exists but isn't text: only a text track counts as covered
     image_only = "subs_image_only" in codes and not codes & {"subs_missing", "subs_signs_only"}
-    if any(_same(s.get("lang"), sub) and s.get("kind") == "full" and (s.get("text") or not image_only)
-           for s in ev.get("subs") or []):
+    if not replacing and any(_same(s.get("lang"), sub) and s.get("kind") == "full" and (s.get("text") or not image_only)
+                             for s in ev.get("subs") or []):
         return None, f"already has a full {langs.name(sub)} subtitle"
     tracks = ev.get("tracks") or []
     ok = [t for t in tracks if t.get("confident") and t.get("all_agree") and t.get("windows") and not t.get("commentary")]
@@ -270,10 +280,15 @@ def plan_file(f: dict, item: dict, codes: set[str], manual: bool = False, busy: 
         if _too_new(f):
             return None, "a new episode - Bazarr gets a week to find a subtitle first"
     model = ("Whisper " + ((settings.state_get("subgen_info") or {}).get("model") or "")).strip()
-    old = _signs_sidecar(f, ev, codes, lang1_sub=langs.ISO1.get(sub, "en"))
+    if replacing:
+        old, why = _bad_sidecar(f, langs.ISO1.get(sub, "en"))
+        if why:
+            return None, why
+    else:
+        old = _signs_sidecar(f, ev, codes, lang1_sub=langs.ISO1.get(sub, "en"))
     return {"file_id": f["id"], "label": f.get("label") or "", "season": _season(f),
             "path": "" if upload else subgen_path(f), **({"upload": True} if upload else {}),
-            **({"replace": old} if old else {}),
+            **({"replace": old, "replace_kind": "mismatched" if replacing else "signs-only"} if old else {}),
             "a_index": track["a_index"], "language": lang1, "lang3": lang3, "task": task, "tag": track.get("tag") or "",
             "overridden": langs.norm(track.get("tag")) != lang3,
             "backend": (f"Parakeet if enabled, else {model}" if task == "transcribe" and lang3 == "eng"
@@ -297,6 +312,38 @@ def _signs_sidecar(f: dict, ev: dict, codes: set[str], lang1_sub: str) -> str | 
         if s.get("external") and os.path.basename(s.get("path") or "") == name:
             return old if s.get("kind") != "full" else None
     return None
+
+
+def _shift_first(file_id: int) -> bool:
+    """A shift_subtitle can still fix this file: the last scan measured a shiftable offset and none ran yet."""
+    from . import subshift
+
+    if db.q1("SELECT id FROM actions WHERE file_id=? AND kind='shift_subtitle' AND status IN ('done','failed')",
+             (file_id,)):
+        return False
+    return any(0 < abs(p["offset"]) <= subshift.MAX_SHIFT for p in subshift.plan(file_id))
+
+
+def _bad_sidecar(f: dict, lang1_sub: str) -> tuple[str | None, str]:
+    """(path to replace, why-not) for a file whose subtitle is wrong. The existing <stem>.<lang1>.srt is replaced
+    when the last scan judged it bad; when it was judged fine the new subtitle has nowhere to go (the bad track is
+    another one - the retire action handles a bad sidecar). No such file: a new one is written beside the bad track."""
+    from .scanner import resolve_path
+
+    local = resolve_path(f)
+    old = existing_sub(f, local, lang1_sub) if local else None
+    if not old:
+        return None, ""
+    row = db.q1("SELECT result FROM scans WHERE file_id=? AND status='done' AND result LIKE '%subtitle_sync%' "
+                "ORDER BY id DESC LIMIT 1", (f["id"],))
+    sync = (db.unj(row["result"], {}) if row else {}).get("subtitle_sync") or []
+    name = os.path.basename(old)
+    for s in sync:
+        if s.get("external") and os.path.basename(s.get("path") or "") == name:
+            if s.get("verdict_final") in ("mismatch", "offset"):
+                return old, ""
+            return None, f"{name} matches the dialogue - the bad subtitle is another track"
+    return None, f"{name} wasn't checked in the last scan - rescan first"
 
 
 def explain(file_id: int, manual: bool = True) -> tuple[dict | None, str]:
@@ -343,8 +390,13 @@ def wanted(file_id: int) -> bool:
 def _reason(item: dict, season, files: list[dict]) -> str:
     tasks = sorted({f"{'translate' if e['task'] == 'translate' else 'transcribe'} {langs.name(e['lang3'])}" for e in files})
     where = item["title"] + (f" Season {season}" if season is not None else "")
-    swap = sum(bool(e.get("replace")) for e in files)
-    extra = f" For {swap} file(s) this replaces the signs-only .en.srt once the new one passes the checks." if swap else ""
+    swaps: dict[str, int] = {}
+    for e in files:
+        if e.get("replace"):
+            k = e.get("replace_kind") or "signs-only"
+            swaps[k] = swaps.get(k, 0) + 1
+    extra = "".join(f" For {n} file(s) this replaces the {k} .en.srt once the new one passes the checks."
+                    for k, n in sorted(swaps.items(), reverse=True))
     return (f"{where}: generate English subtitles with subgen for {len(files)} file(s) ({', '.join(tasks)}). "
             f"Sent one at a time; each result is checked (language, cue density) and renamed to .en.srt." + extra)
 
@@ -360,7 +412,7 @@ def refresh_item(item_id: int) -> dict:
     groups: dict = {}
     for f in db.q("SELECT * FROM files WHERE item_id=? AND missing=0", (item_id,)):
         codes = {r["code"] for r in db.q("SELECT code FROM issues WHERE file_id=? AND status='open'", (f["id"],))}
-        if not codes & TRIGGER:
+        if not codes & ALL_CODES:
             continue
         plan, _ = plan_file(f, item, codes, manual=f["id"] in manual, busy=busy)
         if plan:
@@ -382,7 +434,7 @@ def refresh_item(item_id: int) -> dict:
         else:
             db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
                  "VALUES (?,?,?,?, 'proposed', 0, ?, ?, ?)", (files[0]["file_id"], KIND, _reason(item, season, files),
-                                                              db.j(sorted(TRIGGER)), db.j(payload), now, now))
+                                                              db.j(sorted(ALL_CODES)), db.j(payload), now, now))
             made["created"] += 1
         ids = [e["file_id"] for e in files]
         made["withdrawn"] += db.n(
@@ -401,7 +453,7 @@ def refresh_all() -> int:
         return 0
     ids = {r["item_id"] for r in db.q(
         "SELECT DISTINCT f.item_id FROM issues x JOIN files f ON f.id=x.file_id WHERE x.status='open' AND f.missing=0 "
-        "AND x.code IN ('subs_missing','subs_signs_only')")}
+        f"AND x.code IN ({','.join('?' * len(ALL_CODES))})", sorted(ALL_CODES))}
     for i in ids:
         try:
             refresh_item(i)
@@ -1135,4 +1187,4 @@ def _accepted(e: dict, ev: dict, final: str, dur: float):
     info = settings.state_get("subgen_info") or {}
     e.update(status="done", srt=os.path.basename(final), machine_generated=True,
              model=info.get("model"), backend=e.get("backend"),
-             outcome=("replaced signs-only " if swapped else "") + f"{os.path.basename(final)}: {ev['cues']} cues, {ev['per_min']}/min, English score {ev['english_score']}")
+             outcome=(f"replaced {e.get('replace_kind') or 'signs-only'} " if swapped else "") + f"{os.path.basename(final)}: {ev['cues']} cues, {ev['per_min']}/min, English score {ev['english_score']}")

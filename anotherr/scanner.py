@@ -1450,17 +1450,28 @@ def check_subtitles(ctx: Ctx):
             skip = (f"no {langs.name(exp)} track identified; not comparing subtitles against the "
                     f"{langs.name(eff)} track")
     per_track = []
+    # a track in the subtitle's own language (an English dub under English subs): subtitles timed to it are fine
+    dub_ai = next((t["a_index"] for t in ctx.tracks.values() if t["a_index"] != at
+                   and lang_match(t.get("effective") or "", sub_lang)), None)
+
+    def timing(ai: int, a: dict) -> dict:
+        per = []
+        for si in _audio_segments(ctx):
+            if (ai, si) not in ctx.vad:
+                continue
+            s, d = ctx.segments[si]
+            per.append(analysis.sync_offset(ctx.vad[(ai, si)], [(c[0], c[1]) for c in a["cues"]], s, d))
+        return analysis.aggregate_sync(per)
+
     if full and not skip:
         ctx.result["sync_audio_track"] = at
         for a in full[:3]:
             ctx.step(f"subtitle sync: {a['name']}")
-            per = []
-            for si in _audio_segments(ctx):
-                if (at, si) not in ctx.vad:
-                    continue
-                s, d = ctx.segments[si]
-                per.append(analysis.sync_offset(ctx.vad[(at, si)], [(c[0], c[1]) for c in a["cues"]], s, d))
-            a["sync"] = analysis.aggregate_sync(per)
+            a["sync"] = timing(at, a)
+            if a["sync"]["verdict"] in ("offset", "unknown") and dub_ai is not None:
+                dub = timing(dub_ai, a)
+                if dub["verdict"] == "ok":  # timed to the dub, not off: a shift would break it
+                    a["sync"] = {**dub, "timed_to_track": dub_ai}
             per_track.append(a)
     elif full:
         ctx.result["sync_skipped"] = skip

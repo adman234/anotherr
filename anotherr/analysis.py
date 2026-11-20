@@ -9,6 +9,7 @@ import numpy as np
 
 RES = 0.1  # seconds per bin for sync correlation
 MAX_OFFSET = 12.0
+MIN_OFFSET_WINDOWS = 2  # windows that must agree before a track counts as offset
 
 _SIGN_STYLE = re.compile(r"sign|song|op\b|ed\b|opening|ending|title|karaoke|kfx|lyric|insert|note|typeset|ts\b", re.I)
 _TAGS = re.compile(r"\{[^}]*\}")
@@ -196,7 +197,9 @@ def aggregate_sync(results: list[dict]) -> dict:
     if med_score < 0.22 and med_zero < 0.22:
         out["verdict"] = "mismatch"
     elif abs(med_off) >= 0.6 and spread <= 1.0 and med_score - med_zero >= 0.05:
-        out["verdict"] = "offset"
+        # one window can line up with the wrong stretch of speech (a quiet mono track gave DBZ a fake +12s):
+        # an offset needs two windows that agree before anyone shifts or replaces a subtitle over it
+        out["verdict"] = "offset" if len(res) >= MIN_OFFSET_WINDOWS else "unknown"
     else:
         out["verdict"] = "ok"
     return out

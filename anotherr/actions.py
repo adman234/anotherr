@@ -28,7 +28,10 @@ def propose_for_file(file_id: int) -> list[int]:
         recent.discard("resub")
     # a blue dual-audio gap only asks for a redownload when that language was requested (older issues have no flag)
     unasked = {i["code"] for i in issues if i["severity"] == "dual" and db.unj(i["details"], {}).get("requested") is False}
-    redl = sorted((codes - unasked) & set(settings.REDOWNLOAD_CODES))
+    # a wrong default audio track with no better track to flag can only be fixed by another release
+    noflag = {i["code"] for i in issues if i["code"] == "default_audio_not_preferred"
+              and db.unj(i["details"], {}).get("fix_available") is False}
+    redl = sorted(((codes - unasked) & set(settings.REDOWNLOAD_CODES)) | noflag)
     resub = sorted(codes & set(settings.RESUB_CODES))
     if not redl:  # a redownload would replace the subs anyway
         fixed = _local_sub_fixes(file_id, codes, recent)

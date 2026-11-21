@@ -37,6 +37,27 @@ def test_no_repropose_within_week():
     assert len(actions.propose_for_file(fid)) == 1
 
 
+def test_unfixable_default_audio_proposes_redownload():
+    fid = _file()
+    now = time.time()
+    db.x("INSERT INTO issues(file_id, code, severity, details, status, created_at) "
+         "VALUES (?, 'default_audio_not_preferred', 'warning', ?, 'open', ?)",
+         (fid, json.dumps({"fix_available": False, "target_track": None}), now))
+    [aid] = actions.propose_for_file(fid)
+    a = db.q1("SELECT kind, status, codes FROM actions WHERE id=?", (aid,))
+    assert a["kind"] == "redownload" and a["status"] == "proposed"
+    assert json.loads(a["codes"]) == ["default_audio_not_preferred"]
+
+
+def test_flag_fixable_default_audio_does_not_propose_redownload():
+    fid = _file()
+    db.x("INSERT INTO issues(file_id, code, severity, details, status, created_at) "
+         "VALUES (?, 'default_audio_not_preferred', 'warning', ?, 'open', ?)",
+         (fid, json.dumps({"fix_available": True, "target_track": 1}), time.time()))
+    assert not any(db.scalar("SELECT kind FROM actions WHERE id=?", (a,)) == "redownload"
+                   for a in actions.propose_for_file(fid))
+
+
 def test_stale_proposals_are_withdrawn_and_rechecked_before_running(monkeypatch):
     fid = _file()
     now = time.time()

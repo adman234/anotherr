@@ -252,7 +252,7 @@ def process_queue(stop: bool = False) -> str:
 @mcp.tool()
 def queue_scan(scope: str, ids: list[int] | None = None, disk: str = "", library: str = "", count: int = 0,
                profile: str = "standard") -> str:
-    """Queue scans. scope: file|item|disk|library|random|problems|unscanned.
+    """Queue scans. scope: file|item|disk|library|random|problems|unscanned|ignored (re-checks ignored issues; ones no longer found become resolved).
     library: tv|movies|anime. count limits/samples the selection (random defaults to 10).
     profile: quick (~seconds) | standard (~1-2 min) | deep (full decode, several min)."""
     res = _send("POST", "/api/scan", {"scope": scope, "ids": ids or [], "disk": disk, "library": library,

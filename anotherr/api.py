@@ -473,7 +473,7 @@ def file_streams(file_id: int):
 
 @app.post("/api/scan", dependencies=[Depends(auth)])
 def scan(body: dict = Body(...)):
-    """scope: file | item | disk | library | random | problems | unscanned. full=true skips quick-rescan reuse."""
+    """scope: file | item | disk | library | random | problems | unscanned | ignored. full=true skips quick-rescan reuse."""
     scope = body.get("scope", "file")
     profile = body.get("profile") or settings.get()["scan"]["default_profile"]
     if profile not in settings.get()["scan"]["profiles"]:
@@ -508,6 +508,8 @@ def scan(body: dict = Body(...)):
         where.append("f.status IN ('warning','error','critical','failed')")
     elif scope == "unscanned":
         where.append("f.last_scan_at IS NULL")
+    elif scope == "ignored":  # re-check ignored issues: the scan resolves the ones it no longer finds
+        where.append("EXISTS (SELECT 1 FROM issues x WHERE x.file_id=f.id AND x.status='ignored')")
     elif scope != "random":
         raise HTTPException(400, f"unknown scope {scope}")
     if body.get("disk") and scope != "disk":

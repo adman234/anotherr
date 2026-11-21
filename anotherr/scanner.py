@@ -1834,7 +1834,9 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
         if keep_cache:  # only the newest scan keeps its cache; older rows would just repeat it
             c.execute("UPDATE scans SET result=json_remove(result, '$.cache') WHERE file_id=? AND id<>? "
                       "AND result LIKE '%\"cache\"%'", (fid, scan_id))
-        ignored = {r[0] for r in c.execute("SELECT DISTINCT code FROM issues WHERE file_id=? AND status='ignored'", (fid,))}
+        # an ignore survives being resolved: if the issue comes back, it comes back ignored, not open
+        ignored = {r[0] for r in c.execute("SELECT DISTINCT code FROM issues WHERE file_id=? AND (status='ignored' OR "
+                                           "(status='resolved' AND json_extract(details, '$.was_ignored')))", (fid,))}
         # Only what this scan actually checked may close old issues: a failed or early-exit scan (file
         # unreadable, crash mid-pipeline) saw only part of the file, and its silence is not "fixed".
         # Codes re-found now are always replaced, so they never duplicate.
@@ -1850,6 +1852,12 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
         if conds:
             c.execute("UPDATE issues SET status='resolved', updated_at=? WHERE file_id=? AND status='open' AND ("
                       + " OR ".join(conds) + ")", (now, fid, *args))
+        if cats:  # an ignored issue this scan checked for and no longer sees is fixed, not just hidden
+            q = ",".join("?" * len(cats))
+            nf = f" AND code NOT IN ({','.join('?' * len(found))})" if found else ""
+            c.execute("UPDATE issues SET status='resolved', details=json_set(COALESCE(details, '{}'), '$.was_ignored', 1), "
+                      f"updated_at=? WHERE file_id=? AND status='ignored' AND category IN ({q}){nf}",
+                      (now, fid, *cats, *found))
         refreshed: set[str] = set()
         for i in ctx.issues:
             if i["code"] in ignored and i["code"] not in refreshed:

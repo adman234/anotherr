@@ -637,7 +637,7 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
         res = page(sql, args, page_no, min(per_page, 500), order)
     fixes = _proposed_track_fixes()
     for r in res["rows"]:
-        r["details"] = db.unj(r["details"], {})
+        r["details"] = db.unj(r.get("details"), {})
         r.pop("file_episodes", None)
         if r["code"] in TRACK_FIX_CODES:  # fixed by a track-edit proposal, not a resub
             files = [i["file_id"] for i in r["items"]] if r.get("group") else [r["file_id"]]

@@ -59,3 +59,38 @@ def test_copy_size_check_allows_small_growth_not_truncation():
     assert trackedit.copy_size_problem(134 * mb, int(134 * mb * 1.011)) is None  # Cane Toads: +1.1%
     assert "truncated" in trackedit.copy_size_problem(1000 * mb, 950 * mb)
     assert trackedit.copy_size_problem(1000 * mb, 1100 * mb)
+
+
+def test_whisper_subtitle_is_never_blacklisted():
+    # Banning Bazarr's whisperai sub deleted it and left the file with no subtitle at all (DBZ S06E22)
+    assert actions._current_sub([_h(provider="whisperai", subs_id="w1")], "en") is None
+    assert actions._current_sub([_h(provider="whisperai", subs_id="w1"), _h(subs_id="5")], "en") is None
+
+
+def test_resub_blocked_for_embedded_offset_subgen_subs_and_repeats():
+    import json
+    f, _ = _file()
+    fid = f["id"]
+    assert actions.resub_blocker(fid, "subs_missing") == ""
+    # out of sync in an embedded track: a new sidecar leaves it as it is
+    assert "embedded" in actions.resub_blocker(fid, "subs_out_of_sync", {"tracks": ["English SDH"]})
+    assert actions.resub_blocker(fid, "subs_out_of_sync", {"tracks": ["a.en.srt"]}) == ""
+    # three manual resubs in a week and the issue is back
+    now = time.time()
+    for _ in range(2):
+        db.x("INSERT INTO actions(file_id, kind, status, created_at, updated_at) VALUES (?, 'resub', 'done', ?, ?)",
+             (fid, now, now))
+    assert actions.resub_blocker(fid, "subs_missing") == ""
+    assert "2 times" in actions.resub_blocker(fid, "subs_missing", manual=True)
+    # subgen made the current sidecar: Bazarr would overwrite or delete it
+    pay = {"files": [{"file_id": fid, "status": "done", "srt": "/tv/a.en.srt"}]}
+    db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) VALUES (?, 'subgen_transcribe', 'done', ?, ?, ?)",
+         (fid, json.dumps(pay), now, now))
+    assert "subgen" in actions.resub_blocker(fid, "subs_missing")
+
+
+def test_scanner_reads_sidecars_past_six_embedded_tracks():
+    from anotherr import scanner
+    tracks = [{"external": False, "i": i} for i in range(8)] + [{"external": True, "i": 99}]
+    got = scanner._capped(tracks)
+    assert [t["i"] for t in got] == [0, 1, 2, 3, 4, 5, 99]

@@ -6,7 +6,7 @@ import os
 import re
 import time
 
-from . import arr, db, langs, settings
+from . import arr, db, langs, media, settings
 from .schedule_util import in_windows
 
 log = logging.getLogger("anotherr.actions")
@@ -32,7 +32,8 @@ def propose_for_file(file_id: int) -> list[int]:
     noflag = {i["code"] for i in issues if i["code"] == "default_audio_not_preferred"
               and db.unj(i["details"], {}).get("fix_available") is False}
     redl = sorted(((codes - unasked) & set(settings.REDOWNLOAD_CODES)) | noflag)
-    resub = sorted(codes & set(settings.RESUB_CODES))
+    resub = sorted(i["code"] for i in issues if i["code"] in settings.RESUB_CODES
+                   and not resub_blocker(file_id, i["code"], db.unj(i["details"], {})))
     if not redl:  # a redownload would replace the subs anyway
         fixed = _local_sub_fixes(file_id, codes, recent)
         created += list(fixed.values())
@@ -113,6 +114,29 @@ def _local_sub_fixes(file_id: int, codes: set[str], recent: set[str]) -> dict[st
 
 
 WHISPER_CODES = ("subs_missing", "subs_signs_only")  # no usable full subtitle: a generated one fills the gap
+RESUB_REPEAT_LIMIT = 2  # Bazarr searches per file per week before a person's "propose subtitle fix" stops asking again
+
+
+def resub_blocker(file_id: int, code: str, details: dict | None = None, manual: bool = False) -> str:
+    """Why a Bazarr search can't fix this issue on this file ("" = it might). Bazarr only writes external files and
+    overwrites (or, after a blacklist, deletes) the file's current external subtitle."""
+    if code == "subs_out_of_sync":
+        names = [str(n) for n in (details or {}).get("tracks") or []]
+        if names and not any(n.lower().endswith(media.SIDE_EXTS) for n in names):
+            return ("the offset is in an embedded track - another external subtitle leaves it as it is "
+                    "(shift it, or make the external one the subtitle players pick)")
+    for a in db.q("SELECT payload FROM actions WHERE kind='subgen_transcribe' AND status IN ('done','failed') AND "
+                  "json_valid(payload) AND EXISTS (SELECT 1 FROM json_each(payload, '$.files') j "
+                  "WHERE json_extract(j.value, '$.file_id')=?)", (int(file_id),)):
+        if any(e.get("file_id") == file_id and e.get("status") == "done" and e.get("srt")
+               for e in (db.unj(a["payload"], {}) or {}).get("files") or []):
+            return "its subtitle was made by subgen - a Bazarr search would overwrite or delete it"
+    if manual and not _rearmed(file_id):
+        n = db.scalar("SELECT COUNT(*) FROM actions WHERE file_id=? AND kind='resub' AND status='done' AND updated_at > ?",
+                      (file_id, time.time() - REARM_AFTER)) or 0
+        if n >= RESUB_REPEAT_LIMIT:
+            return f"Bazarr already searched {n} times this week and the issue came back"
+    return ""
 
 
 def _sub_fix(file_id: int, item_id: int | None, codes: list[str]) -> tuple[str, str]:
@@ -754,6 +778,11 @@ def _resub(f: dict, item: dict) -> str:
     return f"Bazarr subtitle search ({lang2}) triggered" + _banned_note(banned)
 
 
+# A Whisper transcription is the only subtitle many files can get: banning it makes Bazarr delete it, and when the
+# search finds nothing else the file is left with no subtitle at all (and Whisper can't be picked again).
+NEVER_BLACKLIST = {"whisperai"}
+
+
 def _current_sub(history: list[dict], lang2: str) -> dict | None:
     """The newest subtitle Bazarr downloaded in this language, unless it's already blacklisted. Without this a resub
     is a plain search, and Bazarr picks the same top-scoring subtitle (often an embedded track) every time."""
@@ -764,6 +793,8 @@ def _current_sub(history: list[dict], lang2: str) -> dict | None:
             continue
         if not (h.get("provider") and h.get("subs_id") and h.get("subtitles_path")):
             continue  # deletions, syncs and uploads name no provider subtitle to ban
+        if h["provider"] in NEVER_BLACKLIST:
+            return None
         return None if h.get("blacklisted") else h
     return None
 

@@ -1293,11 +1293,19 @@ def _no_dialogue(ctx: Ctx) -> bool:
     return bool(tr) and all(t["speech_s"] < 10 and t["speech_s"] / t["window_s"] < 0.03 for t in tr)
 
 
+def _capped(tracks: list, n: int = 6) -> list:
+    """At most n embedded and n external subtitle tracks, in their own order. One cap over both let a file with six
+    embedded tracks hide every sidecar, so a good external subtitle (e.g. subgen's) was never read."""
+    emb = [s for s in tracks if not s["external"]][:n]
+    ext = [s for s in tracks if s["external"]][:n]
+    return [s for s in tracks if any(s is t for t in emb + ext)]
+
+
 def _sub_cue_rate(ctx: Ctx, tracks: list) -> float:
     """Best cheap cues/min over the given subtitle tracks (sidecar text read, or the muxer's frame-count tag)."""
     dur = max(float(ctx.info.get("duration") or 0), 60.0)
     best = 0.0
-    for s in tracks[:6]:
+    for s in _capped(tracks):
         n = 0
         if s["external"]:
             if not s["text"]:
@@ -1362,7 +1370,7 @@ def check_subtitles(ctx: Ctx):
     if any(not s["external"] for s in mine):
         packets = _sub_packets(ctx, windows)
     analysed = []
-    for s in mine[:6]:
+    for s in _capped(mine):
         cues, span = [], dur
         if s["external"]:
             if s["text"]:

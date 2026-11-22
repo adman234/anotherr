@@ -644,6 +644,12 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
             hit = {fixes[(f, r["code"])] for f in files if (f, r["code"]) in fixes}
             r["fix_actions"] = sorted(hit)
             r["fix_missing"] = [f for f in files if (f, r["code"]) not in fixes]
+    ids = [i["id"] for r in res["rows"] for i in (r["items"] if r.get("group") else [r])]
+    tried = _attempts(ids)
+    for r in res["rows"]:
+        r["redownload"] = r["code"] in settings.REDOWNLOAD_CODES
+        r["tried"] = sorted({a["id"]: a for i in (r["items"] if r.get("group") else [r]) for a in tried.get(i["id"], [])}
+                            .values(), key=lambda a: -a["at"])
     res["codes"] = db.q(f"SELECT x.code, x.severity, COUNT(*) n FROM issues x JOIN files f ON f.id=x.file_id "
                         f"WHERE x.status='open' AND f.missing=0{dual_sql} GROUP BY x.code, x.severity ORDER BY n DESC")
     return res
@@ -653,6 +659,59 @@ TRACK_FIX_CODES = {"default_audio_not_preferred": ("set_default_audio",),
                    "default_subs_foreign": ("set_default_audio", "set_default_subtitle"),
                    "default_subs_signs": ("set_default_audio", "set_default_subtitle"),  # combined proposals
                    "audio_untagged": ("retag_audio",), "audio_mislabeled": ("retag_audio",)}
+
+
+GEN_FIX_CODES = ("subs_missing", "subs_signs_only")  # what a subgen transcription fixes
+
+
+def _attempts(issue_ids: list[int]) -> dict[int, list[dict]]:
+    """issue id -> earlier fix attempts for that file and issue type: actions that failed, or that finished after
+    the issue was raised without clearing it (the "Tried" column)."""
+    if not issue_ids:
+        return {}
+    iss = db.q(f"SELECT id, file_id, code, created_at FROM issues WHERE id IN ({','.join('?' * len(issue_ids))})",
+               issue_ids)
+    fids = sorted({i["file_id"] for i in iss})
+    if not fids:
+        return {}
+    fph = ",".join("?" * len(fids))
+    single = db.q(f"SELECT id, file_id, kind, status, result, codes, updated_at FROM actions WHERE status IN "
+                  f"('failed','done') AND kind NOT IN ({','.join('?' * len(actions.BATCH_KINDS))}) AND file_id IN ({fph})",
+                  [*actions.BATCH_KINDS, *fids])
+    batch = db.q(f"SELECT a.id, a.kind, a.status, a.result, a.payload, a.updated_at FROM actions a WHERE a.status IN "
+                 f"('failed','done') AND a.kind IN ({','.join('?' * len(actions.BATCH_KINDS))}) AND EXISTS "
+                 f"(SELECT 1 FROM json_each(a.payload, '$.files') e WHERE json_extract(e.value, '$.file_id') IN ({fph}))",
+                 [*actions.BATCH_KINDS, *fids])
+    entries: dict[int, list[tuple[dict, dict]]] = {}
+    for a in batch:
+        for e in (db.unj(a["payload"], {}) or {}).get("files", []):
+            entries.setdefault(e.get("file_id"), []).append((a, e))
+    out: dict[int, list[dict]] = {}
+    for i in iss:
+        hits = []
+        for a in single:
+            if a["file_id"] != i["file_id"]:
+                continue
+            codes = db.unj(a["codes"], []) or []
+            if codes and i["code"] not in codes:
+                continue
+            if a["status"] == "failed" or (codes and a["updated_at"] > i["created_at"]):
+                hits.append({"id": a["id"], "kind": a["kind"], "status": a["status"], "at": a["updated_at"],
+                             "result": (a["result"] or "")[:200]})
+        for a, e in entries.get(i["file_id"], []):
+            if a["kind"] in actions.TRACK_KINDS and a["kind"] not in TRACK_FIX_CODES.get(i["code"], ()):
+                continue
+            if a["kind"] == subgen.KIND and i["code"] not in GEN_FIX_CODES:
+                continue
+            if a["kind"] not in actions.TRACK_KINDS and a["kind"] != subgen.KIND:
+                continue
+            st = e.get("status")
+            if st == "failed" or (st in ("edited", "done") and a["updated_at"] > i["created_at"]):
+                hits.append({"id": a["id"], "kind": a["kind"], "status": "failed" if st == "failed" else "done",
+                             "at": a["updated_at"], "result": (e.get("outcome") or a["result"] or "")[:200]})
+        if hits:
+            out[i["id"]] = hits
+    return out
 
 
 def _proposed_track_fixes() -> dict[tuple[int, str], int]:
@@ -707,7 +766,7 @@ def _grouped_issues(rows: list[dict], page_no: int, per: int) -> dict:
 
 @app.post("/api/issues/bulk", dependencies=[Depends(auth)])
 def issues_bulk(body: dict = Body(...)):
-    """{"ids": [...], "op": "ignore" | "open" | "propose_sub_fix"}. propose_sub_fix proposes a Bazarr resub per file,
+    """{"ids": [...], "op": "ignore" | "open" | "propose_sub_fix" | "propose_redownload"}. propose_sub_fix proposes a Bazarr resub per file,
     or a Whisper subtitle where Bazarr's search already came up empty for that series (same rule as automatic
     proposals)."""
     ids, op = [int(i) for i in body.get("ids") or []], body.get("op")
@@ -749,7 +808,18 @@ def issues_bulk(body: dict = Body(...)):
             else:
                 existing += 1
         return {"ok": True, "proposed": made, "already_proposed": existing, "skipped": skipped}
-    raise HTTPException(400, "op must be ignore | open | propose_sub_fix")
+    if op == "propose_redownload":
+        made, existing, skipped = 0, 0, 0
+        for fid in dict.fromkeys(r["file_id"] for r in rows):
+            mine = [r for r in rows if r["file_id"] == fid]
+            codes = list(dict.fromkeys(r["code"] for r in mine if r["code"] in settings.REDOWNLOAD_CODES))
+            if not codes:
+                skipped += 1
+                continue
+            aid = actions.propose(fid, "redownload", f"Manual, for {', '.join(codes)}: {mine[0]['message'][:200]}", codes)
+            made, existing = made + bool(aid), existing + (not aid)
+        return {"ok": True, "proposed": made, "already_proposed": existing, "skipped": skipped}
+    raise HTTPException(400, "op must be ignore | open | propose_sub_fix | propose_redownload")
 
 
 EVIDENCE_KEYS = {
@@ -875,12 +945,17 @@ def review_verdict(review_id: int, body: dict = Body(...)):
 ACTION_SQL = """SELECT a.*, i.title, f.label, f.item_id, f.episodes FROM actions a JOIN files f ON f.id=a.file_id JOIN items i ON i.id=f.item_id"""
 
 
-def _action_rows(status: str, limit: int) -> list[dict]:
-    sql, args = ACTION_SQL, []
+def _action_rows(status: str, limit: int, ids: list[int] | None = None) -> list[dict]:
+    sql, args, where = ACTION_SQL, [], []
     if status:
         vals = status.split(",")
-        sql += f" WHERE a.status IN ({','.join('?' * len(vals))})"
+        where.append(f"a.status IN ({','.join('?' * len(vals))})")
         args += vals
+    if ids:
+        where.append(f"a.id IN ({','.join('?' * len(ids))})")
+        args += ids
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     rows = db.q(sql + " ORDER BY a.id DESC LIMIT ?", args + [limit if limit > 0 else -1])
     for r in rows:
         r["codes"] = db.unj(r["codes"], [])
@@ -893,9 +968,12 @@ def _action_rows(status: str, limit: int) -> list[dict]:
 
 
 @app.get("/api/actions", dependencies=[Depends(auth)])
-def actions_list(status: str = "proposed", limit: int = 0, dual: str = ""):
+def actions_list(status: str = "proposed", limit: int = 0, dual: str = "", ids: str = ""):
     """dual=only: the Dual actions tab; dual=exclude: the main Actions tab. limit 0 = all, so the tabs list every
-    row their badge counts. The tab filter runs before any limit."""
+    row their badge counts. The tab filter runs before any limit. ids=1,2 lists just those actions, whatever their
+    status or tab (an issue's "View proposed fix" link)."""
+    if ids:
+        return _action_rows("", 0, [int(i) for i in ids.split(",") if i.strip().isdigit()])
     if dual not in ("only", "exclude"):
         return _action_rows(status, limit)
     rows = [r for r in _action_rows(status, 0) if actions.is_dual(r) == (dual == "only")]

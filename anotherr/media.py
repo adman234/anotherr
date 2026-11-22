@@ -143,17 +143,19 @@ def _f(v, default=0.0) -> float:
         return default
 
 
-def _stream_duration(s: dict) -> float:
+def _stream_duration(s: dict, container: float = 0.0) -> float:
+    """The stream's length in seconds: ffprobe's own figure, else the mkvmerge DURATION statistics tag.
+
+    Statistics tags are written once and copied along by tools that cut or split a file without refreshing
+    them (an 11-minute episode split from a 22-minute double keeps "00:22:34"), so a tag that runs past the
+    end of the container is stale: no stream can outlast its container. Such a tag counts as unknown (0)."""
     d = _f(s.get("duration"))
     if d:
         return d
-    tags = {k.upper(): v for k, v in (s.get("tags") or {}).items()}
-    for k, v in tags.items():
-        if k.startswith("DURATION"):
-            m = re.match(r"(\d+):(\d+):([\d.]+)", str(v))
-            if m:
-                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
-    return 0.0
+    d = _tag_duration(s)
+    if d and container and d - container > max(30.0, 0.05 * container):
+        return 0.0
+    return d
 
 
 def _tag_duration(s: dict) -> float:
@@ -194,6 +196,7 @@ def live_audio(info: dict, start: float, margin: float = 1.0) -> list[int]:
 
 def summarize(probe: dict) -> dict:
     fmt = probe.get("format") or {}
+    container = _f(fmt.get("duration"))
     video, audio, subs = [], [], []
     for s in probe.get("streams", []):
         tags = {k.lower(): v for k, v in (s.get("tags") or {}).items()}
@@ -206,7 +209,7 @@ def summarize(probe: dict) -> dict:
             "title": tags.get("title", ""),
             "default": bool(disp.get("default")),
             "forced": bool(disp.get("forced")),
-            "duration": _stream_duration(s),
+            "duration": _stream_duration(s, container),
         }
         base["end"] = _stream_end(s, base["duration"])
         t = s.get("codec_type")

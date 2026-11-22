@@ -237,3 +237,16 @@ def test_replace_on_import_changes_nothing_when_no_release_matches(monkeypatch):
          (fid, time.time()))
     res = actions.execute(actions._propose(fid, "redownload", "x", ["english_audio_missing"]))
     assert not res["ok"] and "left alone" in res["result"] and calls == []
+
+
+def test_redownload_withdrawn_once_the_default_audio_becomes_flag_fixable():
+    fid = _file()
+    xid = db.x("INSERT INTO issues(file_id, code, severity, details, status, created_at) "
+               "VALUES (?, 'default_audio_not_preferred', 'warning', ?, 'open', ?)",
+               (fid, json.dumps({"fix_available": False}), time.time()))
+    [aid] = actions.propose_for_file(fid)
+    assert actions.reconcile(fid) == 0
+    # a rescan confirms the tagged track: same open issue, now with a flag fix, so another release isn't needed
+    db.x("UPDATE issues SET details=? WHERE id=?", (json.dumps({"fix_available": True, "target_track": 1}), xid))
+    assert actions.reconcile(fid) == 1
+    assert db.q1("SELECT status FROM actions WHERE id=?", (aid,))["status"] == "withdrawn"

@@ -71,7 +71,7 @@ def reconcile(file_id: int | None = None) -> int:
             why = "the file is no longer in the library"
         else:
             codes = db.unj(a["codes"], []) or []
-            if not codes or _still_open(a["file_id"], codes):
+            if not codes or _still_open(a["file_id"], codes, a["kind"]):
                 continue
             why = "the issues behind it are no longer open"
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?", (f"Withdrawn: {why}", time.time(), a["id"]))
@@ -79,9 +79,13 @@ def reconcile(file_id: int | None = None) -> int:
     return n
 
 
-def _still_open(file_id: int, codes: list[str]) -> bool:
-    return bool(db.q1(f"SELECT id FROM issues WHERE file_id=? AND status='open' AND code IN ({','.join('?' * len(codes))})",
-                      [file_id, *codes]))
+def _still_open(file_id: int, codes: list[str], kind: str = "") -> bool:
+    rows = db.q(f"SELECT code, details FROM issues WHERE file_id=? AND status='open' AND code IN ({','.join('?' * len(codes))})",
+                [file_id, *codes])
+    if kind == "redownload":  # a wrong default audio track only needs another release while no flag change fixes it
+        rows = [r for r in rows if r["code"] != "default_audio_not_preferred"
+                or db.unj(r["details"], {}).get("fix_available") is False]
+    return bool(rows)
 
 
 def _local_sub_fixes(file_id: int, codes: set[str], recent: set[str]) -> dict[str, int | None]:
@@ -609,7 +613,7 @@ def execute(action_id: int, wait: bool = False) -> dict:
                  ("Withdrawn: the issues behind it are no longer open", time.time(), action_id))
             return {"ok": False, "error": "withdrawn - the issues behind this action have since been resolved"}
         return runtime_check.approve(action_id)
-    if codes and not _still_open(a["file_id"], codes):
+    if codes and not _still_open(a["file_id"], codes, a["kind"]):
         db.x("UPDATE actions SET status='withdrawn', result=?, updated_at=? WHERE id=?",
              ("Withdrawn: the issues behind it are no longer open", time.time(), action_id))
         return {"ok": False, "error": "withdrawn - the issues behind this action have since been resolved"}

@@ -637,7 +637,7 @@ def issues(status: str = "open", severity: str = "", code: str = "", category: s
         res = page(sql, args, page_no, min(per_page, 500), order)
     fixes = _proposed_track_fixes()
     for r in res["rows"]:
-        r["details"] = db.unj(r.get("details"), {})
+        r["details"] = db.unj(r["details"], {})
         r.pop("file_episodes", None)
         if r["code"] in TRACK_FIX_CODES:  # fixed by a track-edit proposal, not a resub
             files = [i["file_id"] for i in r["items"]] if r.get("group") else [r["file_id"]]
@@ -711,7 +711,7 @@ def issues_bulk(body: dict = Body(...)):
     or a Whisper subtitle where Bazarr's search already came up empty for that series (same rule as automatic
     proposals)."""
     ids, op = [int(i) for i in body.get("ids") or []], body.get("op")
-    rows = db.q(f"SELECT x.id, x.file_id, x.code, x.message, f.item_id FROM issues x JOIN files f ON f.id=x.file_id "
+    rows = db.q(f"SELECT x.id, x.file_id, x.code, x.message, x.details, f.item_id FROM issues x JOIN files f ON f.id=x.file_id "
                 f"WHERE x.id IN ({','.join('?' * len(ids))})", ids) if ids else []
     if op in ("ignore", "open"):
         st = "ignored" if op == "ignore" else "open"
@@ -727,6 +727,7 @@ def issues_bulk(body: dict = Body(...)):
         return {"ok": True, "changed": len(rows)}
     if op == "propose_sub_fix":
         made: dict[str, int] = {}
+        skipped: dict[str, int] = {}
         existing = 0
         sg = [r["file_id"] for r in rows if subgen.configured() and subgen.wanted(r["file_id"])]
         if sg:
@@ -737,12 +738,17 @@ def issues_bulk(body: dict = Body(...)):
             kind, reason = actions._sub_fix(r["file_id"], r["item_id"], [r["code"]])
             if kind == "skip":
                 kind, reason = "resub", f"Manual, for {r['code']}"
+            why = actions.resub_blocker(r["file_id"], r["code"], db.unj(r.get("details"), {}), manual=True) \
+                if kind == "resub" else ""
+            if why:
+                skipped[why] = skipped.get(why, 0) + 1
+                continue
             aid = actions.propose(r["file_id"], kind, reason.replace("Issues:", "Manual, for", 1), [r["code"]])
             if aid:
                 made[kind] = made.get(kind, 0) + 1
             else:
                 existing += 1
-        return {"ok": True, "proposed": made, "already_proposed": existing}
+        return {"ok": True, "proposed": made, "already_proposed": existing, "skipped": skipped}
     raise HTTPException(400, "op must be ignore | open | propose_sub_fix")
 
 

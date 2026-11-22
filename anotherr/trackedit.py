@@ -657,6 +657,72 @@ def reap() -> int:
 
 # ====================================================================== read-back & undo
 
+MANUAL_CODES = {"retag_audio": ["audio_mislabeled", "audio_untagged"],
+                "set_default_audio": ["default_audio_not_preferred"]}
+
+
+def propose_manual(file_id: int, kind: str, track: int, language: str = "", issue_id: int = 0) -> int:
+    """A person's own track edit for one file: retag audio track `track` (1-based) to `language`, or make it the
+    default audio track. The automatic proposers skip these (payload "manual"), so a rescan doesn't withdraw them."""
+    from . import retag
+    from .scanner import resolve_path
+
+    if kind not in MANUAL_CODES:
+        raise ValueError("kind must be retag_audio or set_default_audio")
+    f = db.q1("SELECT * FROM files WHERE id=? AND missing=0", (file_id,))
+    if not f:
+        raise ValueError("file not found")
+    path = resolve_path(f)
+    if not path:
+        raise ValueError("file not found on disk")
+    if not can_edit(path):
+        raise ValueError(f"{os.path.splitext(path)[1]} files can't store track languages or default flags")
+    audio = media.summarize(media.ffprobe(path))["audio"]
+    idx = int(track) - 1
+    if not 0 <= idx < len(audio):
+        raise ValueError(f"track must be 1..{len(audio)}")
+    cur = audio[idx]["lang"]
+    if kind == "retag_audio":
+        lang = langs.norm(language)
+        if not lang or lang not in langs.NAMES:
+            raise ValueError(f"unknown language {language!r}")
+        if lang == cur:
+            raise ValueError(f"audio track {track} is already tagged {lang}")
+        op = {"type": "a", "index": idx, "language": lang, "old": cur}
+        what = f"set audio track {track} to {langs.name(lang)} (was {langs.name(cur) if cur else 'untagged'})"
+    else:
+        if audio[idx]["default"] and sum(bool(a["default"]) for a in audio) == 1:
+            raise ValueError(f"audio track {track} is already the only default")
+        op = {"type": "a", "index": idx, "default": True, "expect_lang": cur}
+        what = f"make audio track {track} ({langs.name(cur) if cur else 'untagged'}) the default"
+    codes = MANUAL_CODES[kind]
+    if issue_id:
+        i = db.q1("SELECT code FROM issues WHERE id=? AND file_id=?", (int(issue_id), file_id))
+        if not i:
+            raise ValueError("issue not found for this file")
+        codes = [i["code"]]
+    for a in db.q("SELECT payload FROM actions WHERE kind=? AND status='proposed'", (kind,)):
+        p = db.unj(a["payload"], {}) or {}
+        if p.get("manual") and any(e.get("file_id") == file_id for e in p.get("files", [])):
+            return 0
+    ev = retag._evidence(f) or {}
+    label = f.get("label") or ""
+    entry = {"file_id": file_id, "label": label, "ops": [op], "status": "pending", "why": "manual", "conf": 1.0,
+             "scan_started": ev.get("scan_started"), "path": f.get("local_path"),
+             **preview(f.get("local_path") or f["arr_path"], [op], settings.get())}
+    if kind == "retag_audio":
+        entry.update(a_index=idx, old=cur, new=op["language"])
+    else:
+        entry.update(audio=idx)
+    item = db.q1("SELECT title FROM items WHERE id=?", (f["item_id"],)) or {}
+    payload = {"item_id": f["item_id"], "key": ["manual", file_id, idx], "manual": True, "files": [entry]}
+    now = time.time()
+    return db.x("INSERT INTO actions(file_id, kind, reason, codes, status, auto, payload, created_at, updated_at) "
+                "VALUES (?,?,?,?, 'proposed', 0, ?, ?, ?)",
+                (file_id, kind, f"Manual: {item.get('title', '')} {label}: {what}".replace("  ", " "), db.j(codes),
+                 db.j(payload), now, now))
+
+
 def after_scan(file_id: int, info: dict):
     """A rescan after an edit reads the change back: confirm it, or mark the action failed."""
     if not info.get("audio") and not info.get("subs"):

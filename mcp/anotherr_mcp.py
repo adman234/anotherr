@@ -489,7 +489,8 @@ def undo_retag(action_id: int) -> str:
 
 
 @mcp.tool()
-def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0) -> str:
+def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0, track: int = 0,
+                   language: str = "") -> str:
     """Propose resub (Bazarr subtitle search), redownload (blocklist + search in Sonarr/Radarr) or whisper_subtitle
     (transcribes + translates one episode: goes to the subgen worker when subgen is set up, otherwise to Bazarr's
     Whisper provider, which needs a known, non-subtitle-language audio tag).
@@ -499,10 +500,15 @@ def propose_action(file_id: int, kind: str, reason: str = "", issue_id: int = 0)
     Also accept_season_audio: accept the file's whole season (or movie) as is when the requested audio language is
     not available (a warning-level english_audio_missing / original_audio_missing); approving records an exception
     that covers later imports too and resolves the season's warnings.
+    Manual track edits on one file: retag_audio sets audio track `track` (1-based, as in file_streams) to `language`
+    (e.g. kor, eng); set_default_audio makes audio track `track` the default (other defaults are cleared). Check the
+    result with track_edit_preview before approving.
     Pass issue_id to tie it to one issue (it's withdrawn when that issue closes). Nothing runs until approved."""
     body = {"file_id": file_id, "kind": kind, "reason": reason}
     if issue_id:
         body["issue_id"] = issue_id
+    if track:
+        body.update(track=track, language=language)
     return _j(_send("POST", "/api/actions", body))
 
 

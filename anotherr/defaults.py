@@ -225,7 +225,7 @@ def refresh_item(item_id: int) -> dict:
     existing = {}
     for a in db.q("SELECT * FROM actions WHERE kind IN (?, ?) AND status='proposed'", (AUDIO, SUBS)):
         p = db.unj(a["payload"], {}) or {}
-        if p.get("item_id") == item_id:
+        if p.get("item_id") == item_id and not p.get("manual"):
             existing[tuple(p.get("key") or ())] = a
     now = time.time()
     made = {"created": 0, "updated": 0, "withdrawn": 0}

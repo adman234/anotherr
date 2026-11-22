@@ -199,6 +199,15 @@ def _subgen_track_pick(tracks: list[dict], lang3: str) -> dict | None:
     return next((t for t in tracks if langs.norm(t.get("tag")) == lang3), tracks[0])
 
 
+def _gone_since(file_id: int, done_at: float) -> bool:
+    """A scan after that subgen run still found a subtitle problem: the subtitle it made (or the one it found already
+    there) is gone or was replaced, e.g. Bazarr deleted or overwrote it, so a new run is allowed."""
+    return bool(db.scalar(
+        "SELECT 1 FROM files f JOIN scans s ON s.id=f.last_scan_id WHERE f.id=? AND s.finished_at > ? AND EXISTS "
+        "(SELECT 1 FROM issues x WHERE x.file_id=f.id AND x.status='open' AND (x.category='subtitles' OR x.code LIKE 'subs%'))",
+        (file_id, done_at)))
+
+
 def _busy_files() -> dict[int, str]:
     """Files already covered: in an open/running subgen batch, or recently done/failed there (no auto re-propose)."""
     out = {}
@@ -208,7 +217,7 @@ def _busy_files() -> dict[int, str]:
             st = e.get("status")
             if a["status"] in ("queued", "running") and st in ACTIVE_FILE:
                 out[e["file_id"]] = "already queued for subgen"
-            elif st == "done" and a["updated_at"] > time.time() - 30 * 86400:
+            elif st == "done" and a["updated_at"] > time.time() - 30 * 86400                     and not _gone_since(e["file_id"], a["updated_at"]):
                 out[e["file_id"]] = "subgen already made a subtitle for it (waiting for the rescan)"
             elif st == "failed" and a["updated_at"] > time.time() - 7 * 86400:
                 out.setdefault(e["file_id"], f"subgen failed on it recently: {e.get('outcome', '')}")

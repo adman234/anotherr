@@ -557,12 +557,17 @@ def _approve_track_edits(ids: list[int], label: str) -> dict:
 
     if not settings.get()["retag"].get("enabled"):
         return {"ok": False, "error": "track editing is turned off in Settings -> Retag audio", "queued": 0}
+    # 'queued', not 'running': the reaper fails any 'running' action that shows no progress for 10 minutes, and
+    # nothing heartbeats an edit still waiting for its turn in this list (most of a big batch died as "stalled")
     claimed = [i for i in ids if db.n(
-        "UPDATE actions SET status='running', result='queued', updated_at=? WHERE id=? AND status='proposed'",
+        "UPDATE actions SET status='queued', result='queued', updated_at=? WHERE id=? AND status='proposed'",
         (time.time(), i))]
 
     def go():
         for i in claimed:
+            if not db.n("UPDATE actions SET status='running', result='queued', updated_at=? WHERE id=? AND status='queued'",
+                        (time.time(), i)):
+                continue  # rejected or withdrawn meanwhile
             try:
                 trackedit.run(i)
             except Exception as e:  # noqa: BLE001

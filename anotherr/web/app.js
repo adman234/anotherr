@@ -53,7 +53,7 @@ async function refreshStatus() {
 setInterval(refreshStatus, 5000);
 
 // ------------------------------------------------------------------ router
-const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, dual: (a) => issues(a, true), reviews, actions: actionsPage, dualactions: () => actionsPage(true), queue, settings: settingsPage, exceptions: exceptionsPage };
+const routes = { "": dashboard, library, item: itemPage, file: filePage, issues, dual: (a) => issues(a, true), reviews, actions: (a) => actionsPage(false, a), dualactions: (a) => actionsPage(true, a), queue, settings: settingsPage, exceptions: exceptionsPage };
 async function route() {
   // stop images still loading on the page we're leaving, so they don't hold up the next page
   document.querySelectorAll("#app img").forEach((i) => { i.removeAttribute("src"); });
@@ -290,19 +290,27 @@ function trackFixButtons(r, items) {
   const noFix = (m) => /can't fix|no confidently/i.test(m || "");
   const rescan = items.filter((i) => (r.fix_missing || []).includes(i.file_id) && !noFix(i.message)).map((i) => i.file_id);
   const out = [];
-  if (r.fix_actions.length) out.push(`<a class="btn sm primary" href="#/actions" title="Proposal(s) ${r.fix_actions.join(", ")}">View proposed fix</a>`);
+  if (r.fix_actions.length) out.push(`<a class="btn sm primary" href="#/actions/${r.fix_actions.join(",")}" title="Proposal(s) ${r.fix_actions.join(", ")}">View proposed fix</a>`);
   if (rescan.length) out.push(`<button class="sm" title="Scanned before the default-track fix existed (or the fix is waiting on a rescan) - a rescan builds the proposal" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'file',ids:[${rescan}],profile:'standard'}}),r=>'Queued '+r.queued+' - the proposal appears in Actions after the scan')">Rescan ${rescan.length > 1 ? rescan.length + " " : ""}to find fix</button>`);
   if (!out.length && items.some((i) => noFix(i.message))) out.push('<span class="small muted">no flag fix (no confident track)</span>');
   return out.join(" ");
 }
+function triedCell(r) {
+  const t = r.tried || [];
+  if (!t.length) return '<td class="muted small">-</td>';
+  const failed = t.filter((a) => a.status === "failed").length;
+  const tip = t.map((a) => `#${a.id} ${KIND_LABEL[a.kind] || a.kind} ${a.status === "done" ? "done, issue remains" : "failed"} ${new Date(a.at * 1000).toLocaleDateString()}${a.result ? ": " + a.result : ""}`).join("\n");
+  return `<td class="small"><a href="#/actions/${t.map((a) => a.id).join(",")}" title="${esc(tip)}"><span class="pill"${t.length >= 2 ? ' style="background:var(--warning);color:#000"' : ""}>${t.length}</span></a>${failed ? ` <span class="muted">${failed} failed</span>` : ""}</td>`;
+}
+const redlBtn = (body, label, msg) => `<button class="sm" title="Search Sonarr/Radarr for a different release (needs approval in Actions)" onclick="act(()=>api('${body.url}',{method:'POST',body:${body.data}}),${msg})">${label}</button> `;
 function issueGroupRow(g) {
   const n = g.items.length, ids = JSON.stringify(g.ids);
   const bulkIss = (op, msg) => `act(()=>api('/api/issues/bulk',{method:'POST',body:{op:'${op}',ids:${ids}}}),${msg})`;
   return `<tr><td>${sev(g.severity)}</td><td><a href="#/item/${g.item_id}">${esc(g.title)}</a> Season ${g.season} <span class="pill">${n} files</span>
       <div class="small">${g.items.map((i) => `<a href="#/file/${i.file_id}" title="${esc(i.message)}">${esc(epLabel(i))}</a>`).join(", ")}</div></td>
     <td><b>${esc(g.code)}</b><br><span class="small">${g.message ? esc(g.message) : `<details><summary>details differ per file</summary>${g.items.map((i) => `${esc(epLabel(i))}: ${esc(i.message)}`).join("<br>")}</details>`}</span></td>
-    <td class="muted">${esc(g.disks.join(", "))}</td>
-    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${GEN_CODES.includes(g.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" title="Propose subgen subtitles for these files (each is checked first)" onclick="${genSub(`issue_ids:${ids}`)}">Generate subtitles (${n})</button> ` : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')+Object.entries(r.skipped||{}).map(([k,v])=>'; skipped '+v+': '+k).join('')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
+    <td class="muted">${esc(g.disks.join(", "))}</td>${triedCell(g)}
+    <td>${g.status === "open" ? `${trackFixButtons(g, g.items) ? trackFixButtons(g, g.items) + " " : ""}${g.redownload ? redlBtn({ url: "/api/issues/bulk", data: `{op:'propose_redownload',ids:${ids}}` }, `Propose redownload (${n})`, "r=>'Proposed '+r.proposed+' redownload(s)'+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')") : ""}${GEN_CODES.includes(g.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" title="Propose subgen subtitles for these files (each is checked first)" onclick="${genSub(`issue_ids:${ids}`)}">Generate subtitles (${n})</button> ` : ""}${SUB_CODES.includes(g.code) ? `<button class="sm" title="Bazarr resub per file - or a Whisper subtitle where Bazarr's search already found nothing for this show" onclick="${bulkIss("propose_sub_fix", "r=>'Proposed: '+(Object.entries(r.proposed).map(([k,v])=>v+' '+(KIND_LABEL[k]||k)).join(', ')||'nothing new')+(r.already_proposed?' ('+r.already_proposed+' already proposed)':'')+Object.entries(r.skipped||{}).map(([k,v])=>'; skipped '+v+': '+k).join('')")}">Propose subtitle fix (${n})</button> ` : ""}<button class="sm" onclick="${bulkIss("ignore", "'Ignored " + n + "'")}">Ignore ${n}</button>`
       : g.status === "ignored" ? `<button class="sm" onclick="${bulkIss("open", "'Reopened " + n + "'")}">Un-ignore ${n}</button>` : ""}</td></tr>`;
 }
 async function issues(_, dual = false) {
@@ -316,9 +324,9 @@ async function issues(_, dual = false) {
       <input id="iq" placeholder="Search" value="${esc(ISS.search)}"><label class="small"><input type="checkbox" id="igroup" ${ISS.group ? "checked" : ""}> Group by show + season</label>
       <span class="muted">${ISS.group ? `${res.issues} issues in ${res.total} rows` : res.total}</span>
       ${ISS.status === "ignored" ? `<button style="margin-left:auto" title="Scans each file with an ignored issue again. Issues it no longer finds become resolved; the rest stay ignored." onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'ignored',profile:'standard',full:true}}),r=>'Queued '+r.queued+' file(s)')">Rescan ignored</button>` : `<button style="margin-left:auto" onclick="act(()=>api('/api/scan',{method:'POST',body:{scope:'problems',profile:'standard'}}),r=>'Queued '+r.queued)">Rescan all problem files</button>`}</div>
-    <table><tr><th>Severity</th><th>File</th><th>Issue</th><th>Disk</th><th></th></tr>
-    ${res.rows.map((i) => i.group ? issueGroupRow(i) : `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>
-      <td>${i.status === "open" ? `${trackFixButtons(i, [i]) ? trackFixButtons(i, [i]) + " " : ""}${GEN_CODES.includes(i.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" onclick="${genSub(`issue_ids:[${i.id}]`)}">Generate subtitle</button> ` : ""}${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> ` : ""}<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
+    <table><tr><th>Severity</th><th>File</th><th>Issue</th><th>Disk</th><th title="Earlier fix attempts for this file and issue type that failed, or finished without clearing it">Tried</th><th></th></tr>
+    ${res.rows.map((i) => i.group ? issueGroupRow(i) : `<tr><td>${sev(i.severity)}</td><td><a href="#/file/${i.file_id}">${esc(i.title)} ${esc(i.label || "")}</a></td><td><b>${esc(i.code)}</b><br><span class="small">${esc(i.message)}</span></td><td class="muted">${esc(i.disk)}</td>${triedCell(i)}
+      <td>${i.status === "open" ? `${trackFixButtons(i, [i]) ? trackFixButtons(i, [i]) + " " : ""}${i.redownload ? redlBtn({ url: "/api/actions", data: `{kind:'redownload',issue_id:${i.id}}` }, "Propose redownload", "r=>r.action_id?'Proposed - see Actions':r.note") : ""}${GEN_CODES.includes(i.code) && (window.STATUS || {}).subgen_configured ? `<button class="sm" onclick="${genSub(`issue_ids:[${i.id}]`)}">Generate subtitle</button> ` : ""}${SUB_CODES.includes(i.code) ? `<button class="sm" onclick="act(()=>api('/api/actions',{method:'POST',body:{kind:'resub',issue_id:${i.id}}}),r=>r.action_id?'Proposed - see Actions':r.note)">Propose resub</button> ` : ""}<button class="sm" onclick="act(()=>api('/api/issues/${i.id}',{method:'PATCH',body:{status:'ignored'}}),'Ignored')">Ignore</button>` : ""}</td></tr>`).join("")}</table>${pager(res, "ISS")}`;
   $("#is").value = ISS.status; $("#isev").value = ISS.severity; $("#icode").value = ISS.code;
   $("#igroup").onchange = (e) => { ISS.group = e.target.checked; ISS.page = 1; issues(null, ISS.dual); };
   for (const [id, k] of [["is", "status"], ["isev", "severity"], ["icode", "code"], ["iq", "search"]])
@@ -348,12 +356,13 @@ async function verdict(id, v, redl = false) {
 
 // ------------------------------------------------------------------ actions
 let ACT = { status: "proposed" };
-async function actionsPage(dual = false) {
-  const rows = await api(`/api/actions?status=${ACT.status}&dual=${dual ? "only" : "exclude"}`);
+async function actionsPage(dual = false, only = "") {
+  only = /^[\d,]+$/.test(only || "") ? only : "";  // #/actions/12,13: just those actions, whatever their status or tab
+  const rows = await api(only ? `/api/actions?ids=${only}` : `/api/actions?status=${ACT.status}&dual=${dual ? "only" : "exclude"}`);
   const s = window.STATUS || (await api("/api/status"));
   const sg = s.subgen_configured ? await api("/api/subgen/status") : null;
-  const bp = ACT.status === "proposed" && rows.length ? await api("/api/actions/bulk-preview").catch(() => null) : null;
-  $("#app").innerHTML = `<h2>${dual ? "Dual actions" : "Actions"}</h2>${dual ? `<div class="card small muted" style="margin-bottom:12px">Fixes for single-language audio: accept the season as it is, or redownload where that language was requested.</div>` : sg ? subgenCard(sg) : ""}
+  const bp = !only && ACT.status === "proposed" && rows.length ? await api("/api/actions/bulk-preview").catch(() => null) : null;
+  $("#app").innerHTML = `<h2>${dual ? "Dual actions" : "Actions"}</h2>${only ? `<div class="card small" style="margin-bottom:12px">Showing action${only.includes(",") ? "s" : ""} ${esc(only.replace(/,/g, ", "))} only. <a href="#/${dual ? "dualactions" : "actions"}">Show all</a></div>` : ""}${dual ? `<div class="card small muted" style="margin-bottom:12px">Fixes for single-language audio: accept the season as it is, or redownload where that language was requested.</div>` : sg ? subgenCard(sg) : ""}
     <div class="card small" style="margin-bottom:12px">Automation is <b>${s.automation.enabled ? "enabled" : "disabled"}</b>${s.automation.enabled ? (s.automation.active_now ? " and active now" : " (outside its schedule)") : ""}. Proposals wait here for approval unless automation picks them up. <a href="#/settings">Configure automation</a></div>
     <div class="toolbar"><select id="as"><option value="proposed">Proposed</option><option value="done,failed">Finished</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="running,queued">Running</option><option value="waiting">Waiting for Claude</option><option value="undone">Undone</option><option value="">All</option></select>
     ${ACT.status === "proposed" && rows.length ? `<span class="small muted">${actFileCount(rows)} files in ${groupActions(rows).length} rows</span>` : ""}
@@ -365,8 +374,8 @@ async function actionsPage(dual = false) {
         ${a.status === "proposed" ? `<button class="sm" onclick="act(()=>api('/api/actions/${a.id}/reject',{method:'POST'}),'Rejected')">Reject</button>` : ""}
         ${a.kind === "subgen_transcribe" ? subgenButtons(a) : ""}
         ${TRACK_KINDS.includes(a.kind) && (a.status === "done" || a.status === "failed") && (a.payload.files || []).some((f) => f.status === "edited") ? `<button class="sm danger" onclick="act(()=>api('/api/actions/${a.id}/undo',{method:'POST'}),r=>r.ok?'Restored '+r.restored+' track(s)':'Undo: '+(r.error||r.failed.join('; ')))">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">None</td></tr>'}</table>`;
-  if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith(dual ? "#/dualactions" : "#/actions")) actionsPage(dual); }, 3000);
-  $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; actionsPage(dual); };
+  if (rows.some((a) => a.status === "running" || a.status === "queued")) setTimeout(() => { if (location.hash.startsWith(dual ? "#/dualactions" : "#/actions")) actionsPage(dual, only); }, 3000);
+  $("#as").value = ACT.status; $("#as").onchange = (e) => { ACT.status = e.target.value; if (only) location.hash = dual ? "#/dualactions" : "#/actions"; else actionsPage(dual); };
   window._actRows = rows;
 }
 // Bulk buttons show how many files each would touch; a button with nothing to do is disabled.

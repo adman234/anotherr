@@ -99,8 +99,14 @@ def mkv_args(path: str, ops: list[dict]) -> list[str]:
     return args
 
 
-def copy_args(path: str, tmp: str, ops: list[dict]) -> list[str]:
-    args = [media.FFMPEG, "-nostdin", "-v", "error", "-y", "-i", path, "-map", "0", "-map_metadata", "0", "-c", "copy"]
+CODECLESS_DATA = "Could not find tag for codec none"
+
+
+def copy_args(path: str, tmp: str, ops: list[dict], drop_data: bool = False) -> list[str]:
+    """drop_data leaves out data streams (timecode, unknown codecs): an MP4 with a codec-less data stream can't be
+    written back at all ("Could not find tag for codec none"), and they carry no picture, sound or subtitle."""
+    args = [media.FFMPEG, "-nostdin", "-v", "error", "-y", "-i", path, "-map", "0"] + (["-map", "-0:d?"] if drop_data else []) \
+        + ["-map_metadata", "0", "-c", "copy"]
     for o in ops:
         if o.get("language"):
             args += [f"-metadata:s:{o['type']}:{o['index']}", f"language={o['language']}"]
@@ -202,6 +208,10 @@ def _apply(path: str, ops: list[dict], method: str, size: int) -> tuple[bool, st
         timeout = copy_timeout(size)
         try:
             p = subprocess.run(copy_args(path, target, ops), capture_output=True, text=True, timeout=timeout)
+            if p.returncode != 0 and CODECLESS_DATA in p.stderr:
+                _rm(target)
+                p = subprocess.run(copy_args(path, target, ops, drop_data=True), capture_output=True, text=True,
+                                   timeout=timeout)
         except subprocess.TimeoutExpired:
             _rm(target)
             return False, f"copy took longer than {timeout:.0f}s"

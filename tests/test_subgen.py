@@ -507,3 +507,20 @@ def test_whisper_subtitle_request_becomes_a_subgen_action(lib, monkeypatch):
     monkeypatch.setattr(actions, "whisper_blocker", lambda fid: None)
     r = c.post("/api/actions", json={"kind": "whisper_subtitle", "file_id": fid})
     assert db.scalar("SELECT kind FROM actions WHERE id=?", (r.json()["action_id"],)) == "whisper_subtitle"
+
+
+def test_done_subgen_blocks_a_rerun_only_until_a_rescan_finds_the_subtitle_gone(lib):
+    iid = show()
+    fid = episode(lib, iid, "S01E01", [T(0, "kor")])
+    done_at = time.time() - 3600
+    db.x("INSERT INTO actions(file_id, kind, status, payload, created_at, updated_at) VALUES (?, ?, 'done', ?, ?, ?)",
+         (fid, subgen.KIND, json.dumps({"files": [{"file_id": fid, "status": "done", "srt": "/x.en.srt"}]}),
+          done_at, done_at))
+    assert "already made" in subgen._busy_files().get(fid, "")
+    # Bazarr deleted it; the next scan still finds subs_missing
+    sid = db.x("INSERT INTO scans(file_id, status, started_at, finished_at) VALUES (?, 'done', ?, ?)",
+               (fid, time.time(), time.time()))
+    db.x("UPDATE files SET last_scan_id=? WHERE id=?", (sid, fid))
+    assert fid not in subgen._busy_files()
+    db.x("UPDATE issues SET status='resolved' WHERE file_id=?", (fid,))
+    assert "already made" in subgen._busy_files().get(fid, "")

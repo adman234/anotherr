@@ -134,3 +134,41 @@ def test_avi_untagged_audio_is_not_flagged_since_it_cannot_be_retagged():
     c.tracks[0].update(detected="eng", prob=.98, agree=3, all_agree=True)
     scanner.check_language(c)
     assert not any(i["code"] == "audio_untagged" for i in c.issues) and c.tracks[0]["effective"] == "eng"
+
+
+def test_tagged_english_track_missed_by_scan_windows_gets_middle_samples(monkeypatch):
+    # The Walking Dead case: the scan windows hit the intro and end credits, so the English track (tagged, not default)
+    # had no detection and the Polish default looked unfixable. Middle-of-file samples confirm it, so the fix is offered.
+    import numpy as np
+    from anotherr import media, stt
+    calls = []
+    monkeypatch.setattr(media, "extract_audio_multi", lambda path, idx, start, secs: calls.append(start) or {idx[0]: np.ones(10)})
+    monkeypatch.setattr(stt, "speech_intervals", lambda a: [(0.0, 20.0)])
+    monkeypatch.setattr(stt, "speech_audio", lambda a, iv, n: a)
+    monkeypatch.setattr(stt.WHISPER, "detect_language", lambda a: ("en", 0.97, {}), raising=False)
+    c = scanner.Ctx(file={"id": 1}, item={"kind": "series", "original_language": "eng", "language_override": ""},
+                    cfg={"anime": {"dub_language": "eng", "prefer_dual_audio": False}}, profile="standard", pcfg={}, seed=1)
+    c.path = "/x/a.mkv"
+    c.info = {"audio": [{"a_index": 0, "lang": "eng", "default": False}, {"a_index": 1, "lang": "pol", "default": True}],
+              "duration": 2600}
+    c.tracks[0] = {"a_index": 0, "tag": "eng", "default": False, "speech_s": 0, "window_s": 135, "level_db": -32,
+                   "windows": [], "detected": "", "prob": 0.0, "agree": 0, "all_agree": False}
+    c.tracks[1] = {"a_index": 1, "tag": "pol", "default": True, "speech_s": 90, "window_s": 135, "level_db": -28,
+                   "windows": [{"at": a, "lang": "pol", "prob": .99} for a in (5, 170, 2536)], "detected": "pol",
+                   "prob": .99, "agree": 3, "all_agree": True}
+    c.expected = "eng"
+    scanner.check_language(c)
+    assert len(calls) == 4 and all(0.1 * 2600 < s < 0.8 * 2600 for s in calls)
+    assert c.tracks[0]["detected"] == "eng" and c.tracks[0]["confident"]
+    iss = next(i for i in c.issues if i["code"] == "default_audio_not_preferred")
+    assert iss["details"]["fix_available"] is True and iss["details"]["target_track"] == 1
+
+
+def test_default_track_is_not_resampled(monkeypatch):
+    from anotherr import media
+    calls = []
+    monkeypatch.setattr(media, "extract_audio_multi", lambda *a: calls.append(a) or {})
+    c = _untagged_ctx("/x/a.mkv", 0.0, [])
+    c.tracks[0]["tag"] = "eng"
+    scanner.check_language(c)
+    assert calls == []

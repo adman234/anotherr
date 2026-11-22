@@ -1049,6 +1049,15 @@ def check_language(ctx: Ctx):
             if len(t.get("windows", [])) < 3 and t.get("level_db", -120) > -70:
                 ctx.step(f"extra language samples track {t['a_index'] + 1}")
                 _extra_language_windows(ctx, t)
+    if exp and _check_on(ctx, "extra_language_samples"):
+        # A non-default track tagged with the language that should play, but not heard in the scan windows (on a
+        # 3-window profile two of them are the opening and the end credits): sample the middle of the file, since
+        # the default-track fix only trusts a confirmed track and would otherwise read as "can't fix it".
+        for t in tracks:
+            if (not t["default"] and not t.get("detected") and t.get("level_db", -120) > -70
+                    and (lang_match(t["tag"], exp) or lang_match(t["tag"], "eng"))):
+                ctx.step(f"extra language samples track {t['a_index'] + 1}")
+                _extra_language_windows(ctx, t)
     if _check_on(ctx, "extra_language_samples"):
         for t in tracks:
             if not langs.norm(t["tag"]) and (t.get("speech_s", 0) < 10 or len(t.get("windows", [])) < 2):

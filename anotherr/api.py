@@ -1095,8 +1095,16 @@ def actions_bulk_out_of_sync():
 
 @app.post("/api/actions", dependencies=[Depends(auth)])
 def action_create(body: dict = Body(...)):
-    """Manual proposal: kind resub | redownload | whisper_subtitle, optionally for one issue (issue_id)."""
+    """Manual proposal: kind resub | redownload | whisper_subtitle, optionally for one issue (issue_id).
+    retag_audio (track, language) and set_default_audio (track) edit one file's audio track headers."""
     kind = body.get("kind")
+    if kind in trackedit.MANUAL_CODES:
+        try:
+            aid = trackedit.propose_manual(int(body.get("file_id") or 0), kind, int(body.get("track") or 0),
+                                           body.get("language") or "", int(body.get("issue_id") or 0))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"action_id": aid, "note": None if aid else "an open manual proposal for this file already exists"}
     if kind not in actions.MANUAL_KINDS:
         raise HTTPException(400, "kind must be " + " | ".join(actions.MANUAL_KINDS))
     file_id, reason, codes = int(body.get("file_id") or 0), body.get("reason") or "manual", []

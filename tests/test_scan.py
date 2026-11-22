@@ -178,3 +178,9 @@ def test_sub_packets_keep_cues_at_window_end(video):
     assert {28, 31, 34, 37, 40} <= starts and {49, 52, 55, 58, 61} <= starts
     texts = [media.text_from_packet("subrip", p["data"])[1] for p in pk[s_full] if round(p["start"]) == 40]
     assert texts == [TEXTS[13]]
+
+
+def test_extract_audio_multi_limits_every_track(video):
+    # -t as an output option only limits the first output; the second track used to run to the end of the file
+    out = media.extract_audio_multi(str(video), [0, 1], 10.0, 5.0)
+    assert {k: round(v.size / media.SR, 1) for k, v in out.items()} == {0: 5.0, 1: 5.0}

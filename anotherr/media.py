@@ -544,8 +544,10 @@ def extract_audio_multi(path: str, a_indices: list[int], start: float, dur: floa
     if not a_indices:
         return out
     with tempfile.TemporaryDirectory(prefix="anotherr-audio-") as td:
-        cmd = nice_prefix() + [FFMPEG, "-nostdin", "-v", "error", "-y", "-ss", f"{start:.3f}", "-i", path,
-                               "-t", f"{dur:.3f}"]
+        # -t goes before -i: as an output option it would only limit the first output, and every other track
+        # would be decoded from `start` to the end of the file
+        cmd = nice_prefix() + [FFMPEG, "-nostdin", "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+                               "-i", path]
         for a in a_indices:
             cmd += ["-map", f"0:a:{a}", "-ac", "1", "-ar", str(SR), "-f", "s16le", os.path.join(td, f"{a}.raw")]
         try:

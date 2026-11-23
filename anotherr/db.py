@@ -126,6 +126,11 @@ CREATE TABLE IF NOT EXISTS audio_exceptions (
     note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS audio_exceptions_item ON audio_exceptions(item_id);
+CREATE TABLE IF NOT EXISTS scan_cache (     -- quick-rescan reuse cache, newest per file (see scanstore.py)
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    scan_id INTEGER, made_at REAL,
+    data BLOB                          -- zlib JSON: {cache, fingerprint, sampled, segments}
+);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY, ts REAL, level TEXT, message TEXT

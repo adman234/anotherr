@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import analysis, audio_request, db, frames, langs, media, ocr, runtime, settings, stt, trackedit
+from . import analysis, audio_request, db, frames, langs, media, ocr, runtime, scanstore, settings, stt, trackedit
 
 log = logging.getLogger("anotherr.scan")
 
@@ -182,9 +182,7 @@ def prepare_reuse(ctx: Ctx) -> list | None:
     elif not sc.get("quick_rescan", True):
         why = "quick rescans are off in Settings"
     else:
-        row = db.q1("SELECT id, result FROM scans WHERE file_id=? AND status='done' AND result LIKE '%\"cache\"%' "
-                    "ORDER BY id DESC LIMIT 1", (ctx.file["id"],))
-        prev = db.unj(row["result"], {}) if row else None
+        prev = scanstore.load_cache(ctx.file["id"])
         if not prev or not prev.get("cache"):
             why, prev = "no earlier scan to reuse", None
         elif not same_file(prev.get("fingerprint"), fp):
@@ -208,7 +206,7 @@ def prepare_reuse(ctx: Ctx) -> list | None:
     ctx.fresh["made_at"] = ctx.cache.get("made_at")
     ctx.result["sampled"] = prev["sampled"]
     ctx.force = forced_kinds(ctx.file["id"])
-    ctx.result["rescan"] = {"mode": "quick", "from_scan": row["id"], "rerun": sorted(ctx.force)}
+    ctx.result["rescan"] = {"mode": "quick", "from_scan": prev["scan_id"], "rerun": sorted(ctx.force)}
     return [tuple(s) for s in prev["segments"]]
 
 
@@ -1608,7 +1606,7 @@ def check_subtitles(ctx: Ctx):
                   offset=off[0]["sync"]["offset"], tracks=[a["name"] for a in off], **evidence)
 
 
-SUB_CACHE_MAX = 512 * 1024  # image subtitle packets are big; those are read again rather than stored
+SUB_CACHE_MAX = 128 * 1024  # image subtitle packets are big; those are read again rather than stored
 
 
 def _sub_packets(ctx: Ctx, windows: list) -> dict:
@@ -1845,12 +1843,11 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
         return {"scan_id": scan_id, "status": status}
     ctx.result["elapsed_s"] = round(elapsed, 1)
     keep_cache = status == "done" and any(k != "made_at" for k in ctx.fresh)
-    if keep_cache:
-        ctx.result["cache"] = ctx.fresh
     with db.tx() as c:
-        if keep_cache:  # only the newest scan keeps its cache; older rows would just repeat it
-            c.execute("UPDATE scans SET result=json_remove(result, '$.cache') WHERE file_id=? AND id<>? "
-                      "AND result LIKE '%\"cache\"%'", (fid, scan_id))
+        if keep_cache:  # one compressed cache row per file, replaced by each finished scan
+            scanstore.save_cache(c, fid, scan_id, {"cache": ctx.fresh, "fingerprint": ctx.result.get("fingerprint"),
+                                                   "sampled": ctx.result.get("sampled"),
+                                                   "segments": ctx.result.get("segments")})
         # an ignore survives being resolved: if the issue comes back, it comes back ignored, not open
         ignored = {r[0] for r in c.execute("SELECT DISTINCT code FROM issues WHERE file_id=? AND (status='ignored' OR "
                                            "(status='resolved' AND json_extract(details, '$.was_ignored')))", (fid,))}
@@ -1906,6 +1903,7 @@ def persist(ctx: Ctx, scan_id: int, status: str, error: str, elapsed: float) -> 
                    _audio_evidence(ctx), fid))
         c.execute("UPDATE scans SET status=?, finished_at=?, result=?, error=? WHERE id=?",
                   (status, now, db.j(ctx.result), error, scan_id))
+        scanstore.prune(c, fid)  # older results nothing reads any more
         if ctx.queue_rev is not None:  # a request made while this scan ran is a newer one: keep it
             c.execute("DELETE FROM queue WHERE file_id=? AND COALESCE(rev, 0)=?", (fid, ctx.queue_rev))
     label = f"{ctx.item['title']} {ctx.file.get('label', '')}".strip()

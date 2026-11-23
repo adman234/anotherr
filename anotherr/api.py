@@ -15,7 +15,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, actions, arr, audio_request, db, defaults, frames, health, media, paths, redact, retag, runtime_check, scanner, scheduler, settings, stt, subgen, sync, trackedit, unraid
+from . import __version__, actions, arr, audio_request, db, defaults, frames, health, media, paths, redact, retag, runtime_check, scanner, scanstore, scheduler, settings, stt, subgen, sync, trackedit, unraid
 
 log = logging.getLogger("anotherr.api")
 API_KEY = os.environ.get("ANOTHERR_API_KEY", "")
@@ -59,6 +59,7 @@ def _startup():
     redact.install()
     threading.excepthook = _thread_crash
     db.init()
+    scanstore.migrate()
     note = health.check_previous_run()
     if note:
         db.log(note, "warning")

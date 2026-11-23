@@ -104,7 +104,8 @@ def test_quick_rescan_reuses_measurements(video, fake_whisper, monkeypatch):  # 
     assert r1["rescan"]["mode"] == "full"
     codes = _open_codes(fid)
     calls = _counted(monkeypatch)
-    r = _result(scanner.scan_file(fid, "standard"))
+    second = scanner.scan_file(fid, "standard")
+    r = _result(second)
     assert r["rescan"]["mode"] == "quick", r["rescan"]
     assert r["rescan"]["from_scan"] == first["scan_id"]
     assert r["segments"] == r1["segments"]
@@ -112,8 +113,9 @@ def test_quick_rescan_reuses_measurements(video, fake_whisper, monkeypatch):  # 
     # dubtitles is open, so the transcripts (and the subtitle text they are compared with) are made again
     assert r["rescan"]["rerun"] == ["transcribe"] and calls.get("transcribe")
     assert _open_codes(fid) == codes
-    # only the newest scan keeps the cache
-    assert "cache" not in _result(first) and "cache" in r
+    # the cache lives in its own table (one row per file), not in scan results
+    assert "cache" not in r1 and "cache" not in r
+    assert db.scalar("SELECT scan_id FROM scan_cache WHERE file_id=?", (fid,)) == second["scan_id"]
 
 
 @needs_ffmpeg

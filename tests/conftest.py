@@ -16,7 +16,7 @@ from anotherr import db, settings  # noqa: E402
 @pytest.fixture(autouse=True)
 def fresh_db():
     db.init()
-    for t in ("queue", "actions", "reviews", "issues", "scans", "files", "items", "settings", "activity"):
+    for t in ("scan_cache", "queue", "actions", "reviews", "issues", "scans", "files", "items", "settings", "activity"):
         db.x(f"DELETE FROM {t}")
     settings._cache = None
     yield
